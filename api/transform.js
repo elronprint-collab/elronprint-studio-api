@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/transform.js — עיצוב מתמונה של הלקוח (image-to-image)
+// api/transform.js — עריכת תמונה לפי הוראה (FLUX.1 Kontext)
 // הלקוח מעלה תמונה + הוראה בעברית ("תהפכו את הלוגו לסגנון גרפיטי")
 
 const ALLOWED = [
@@ -65,7 +65,7 @@ export default async function handler(req, res) {
     !image ||
     typeof image !== "string" ||
     !/^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(image) ||
-    image.length > 4_000_000 // ~3MB — מעל מגבלת גוף הבקשה של Vercel נחתכים ממילא
+    image.length > 4_000_000
   ) {
     return res.status(400).json({ error: "Invalid image" });
   }
@@ -73,7 +73,8 @@ export default async function handler(req, res) {
   const englishPrompt = await translateToEnglish(prompt);
 
   try {
-    const r = await fetch("https://fal.run/fal-ai/flux/dev/image-to-image", {
+    // FLUX.1 Kontext — מודל עריכה לפי הוראה: "תמחק / תחליף / תוסיף / תשנה"
+    const r = await fetch("https://fal.run/fal-ai/flux-pro/kontext", {
       method: "POST",
       headers: {
         "Authorization": `Key ${process.env.FAL_KEY}`,
@@ -81,12 +82,10 @@ export default async function handler(req, res) {
       },
       body: JSON.stringify({
         image_url: image, // fal מקבל גם Data URL
-        prompt: `${englishPrompt}, clean edges, high detail, t-shirt print artwork`,
-        strength: 0.82,           // כמה לשנות: 0=בלי שינוי, 1=מתעלם מהמקור
-        num_inference_steps: 28,
+        prompt: englishPrompt,
         guidance_scale: 3.5,
         output_format: "png",
-        enable_safety_checker: true,
+        safety_tolerance: "2",
       }),
     });
     if (!r.ok) {
