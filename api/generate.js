@@ -25,11 +25,10 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-
 // מזהה עברית ומתרגם לאנגלית דרך שירות התרגום החינמי של גוגל.
 // אם התרגום נכשל מכל סיבה — ממשיכים עם הטקסט המקורי.
 async function translateToEnglish(text) {
-  if (!/[\u0590-\u05FF]/.test(text)) return text; // אין עברית — אין צורך לתרגם
+  if (!/[\u0590-\u05FF]/.test(text)) return text;
   try {
     const url =
       "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=" +
@@ -74,8 +73,8 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        prompt: `${englishPrompt}, isolated design, clean edges, high detail, t-shirt print artwork`,
-        image_size: { width: 1152, height: 1536 }, // יחס 3:4 כמו שטח ההדפסה
+        prompt: `${englishPrompt}, rich modern cartoon illustration, soft shading with highlights and dynamic lighting, bold clean linework, vibrant colors, high detail, isolated subject, t-shirt print artwork`,
+        image_size: { width: 1152, height: 1536 },
         num_inference_steps: 28,
         guidance_scale: 3.5,
         output_format: "png",
