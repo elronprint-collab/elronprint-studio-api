@@ -1,6 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/eraser.js — מחק קסם: הסרת אובייקטים מתמונה (inpainting) דרך fal.ai
-// מקבל imageUrl + maskUrl (לבן = למחוק, שחור = להשאיר), מחזיר תמונה נקייה
+// api/eraser.js v2 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
 
 const ALLOWED = [
   "https://elronprint.co.il",
@@ -34,6 +33,12 @@ function isAllowedUrl(url) {
   return isCloudinary || isFal;
 }
 
+const MODELS = [
+  "fal-ai/lama",
+  "fal-ai/bria/eraser",
+  "fal-ai/inpaint",
+];
+
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -50,27 +55,36 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Invalid imageUrl or maskUrl" });
   }
 
-  try {
-    const r = await fetch("https://fal.run/fal-ai/lama", {
-      method: "POST",
-      headers: {
-        "Authorization": `Key ${process.env.FAL_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ image_url: imageUrl, mask_url: maskUrl }),
-    });
-    if (!r.ok) {
-      const t = await r.text();
-      console.error("fal eraser failed:", r.status, t);
-      return res.status(502).json({ error: "Eraser failed" });
+  let lastErr = "";
+  for (const model of MODELS) {
+    try {
+      const r = await fetch(`https://fal.run/${model}`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Key ${process.env.FAL_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ image_url: imageUrl, mask_url: maskUrl }),
+      });
+      if (!r.ok) {
+        lastErr = `${model}: ${r.status} ${await r.text()}`;
+        console.error("fal eraser failed:", lastErr.slice(0, 500));
+        continue;
+      }
+      const data = await r.json();
+      const outUrl = data?.image?.url || data?.images?.[0]?.url;
+      if (!outUrl) {
+        lastErr = `${model}: no image in response`;
+        console.error(lastErr);
+        continue;
+      }
+      console.log("eraser success with model:", model);
+      return res.status(200).json({ imageUrl: outUrl, model });
+    } catch (err) {
+      lastErr = `${model}: ${err.message}`;
+      console.error("fal eraser exception:", lastErr);
     }
-    const data = await r.json();
-    const outUrl = data?.image?.url || data?.images?.[0]?.url;
-    if (!outUrl) return res.status(502).json({ error: "No image returned" });
-
-    return res.status(200).json({ imageUrl: outUrl });
-  } catch (err) {
-    console.error(err);
-    return res.status(502).json({ error: "Eraser failed" });
   }
+
+  return res.status(502).json({ error: "Eraser failed", detail: lastErr.slice(0, 300) });
 }
