@@ -1,5 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/upscale.js — שלב 2: אפסקייל x3 לרזולוציית דפוס (3456×4608 ≈ 30×40 ס"מ ב-300 DPI)
+// api/upscale-tool.js — שיפור איכות תמונה לכלי הציבורי באתר
+// מקבל תמונות מ-Cloudinary (העלאות לקוחות) ומ-fal, מחזיר תמונה מוגדלת x3
 
 const ALLOWED = [
   "https://elronprint.co.il",
@@ -39,10 +40,13 @@ export default async function handler(req, res) {
   if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.startsWith("https://")) {
     return res.status(400).json({ error: "Invalid imageUrl" });
   }
-  // מקבלים רק תמונות שנוצרו ב-fal — לא URL שרירותי
-  let host;
-  try { host = new URL(imageUrl).hostname; } catch { return res.status(400).json({ error: "Invalid imageUrl" }); }
-  if (!host.endsWith("fal.media") && !host.endsWith("fal.ai") && !host.endsWith("fal.run")) {
+  // מקבלים רק תמונות מ-Cloudinary שלנו או מ-fal — לא URL שרירותי
+  let u;
+  try { u = new URL(imageUrl); } catch { return res.status(400).json({ error: "Invalid imageUrl" }); }
+  const host = u.hostname;
+  const isCloudinary = host === "res.cloudinary.com" && u.pathname.startsWith("/dztd5g0p8/");
+  const isFal = host.endsWith("fal.media") || host.endsWith("fal.ai") || host.endsWith("fal.run");
+  if (!isCloudinary && !isFal) {
     return res.status(400).json({ error: "URL not allowed" });
   }
 
