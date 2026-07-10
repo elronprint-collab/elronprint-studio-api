@@ -1,6 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/upscale-tool.js — שיפור איכות תמונה לכלי הציבורי באתר
-// מקבל תמונות מ-Cloudinary (העלאות לקוחות) ומ-fal, מחזיר תמונה מוגדלת x3
+// api/upscale.js v2 — שיפור איכות תמונה: הגדלה + שחזור חדות ופרטים (Clarity Upscaler)
+// מקבל תמונות מ-Cloudinary (העלאות לקוחות) ומ-fal, מחזיר תמונה חדה ומוגדלת
 
 const ALLOWED = [
   "https://elronprint.co.il",
@@ -40,7 +40,6 @@ export default async function handler(req, res) {
   if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.startsWith("https://")) {
     return res.status(400).json({ error: "Invalid imageUrl" });
   }
-  // מקבלים רק תמונות מ-Cloudinary שלנו או מ-fal — לא URL שרירותי
   let u;
   try { u = new URL(imageUrl); } catch { return res.status(400).json({ error: "Invalid imageUrl" }); }
   const host = u.hostname;
@@ -51,24 +50,29 @@ export default async function handler(req, res) {
   }
 
   try {
-    const r = await fetch("https://fal.run/fal-ai/esrgan", {
+    const r = await fetch("https://fal.run/fal-ai/clarity-upscaler", {
       method: "POST",
       headers: {
         "Authorization": `Key ${process.env.FAL_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ image_url: imageUrl, scale: 3 }),
+      body: JSON.stringify({
+        image_url: imageUrl,
+        upscale_factor: 2,
+        creativity: 0.3,
+        resemblance: 0.8,
+      }),
     });
     if (!r.ok) {
       const t = await r.text();
-      console.error("fal upscale failed:", r.status, t);
+      console.error("fal clarity failed:", r.status, t);
       return res.status(502).json({ error: "Upscale failed" });
     }
     const data = await r.json();
-    const upscaledUrl = data?.image?.url;
-    if (!upscaledUrl) return res.status(502).json({ error: "No image returned" });
+    const outUrl = data?.image?.url || data?.images?.[0]?.url;
+    if (!outUrl) return res.status(502).json({ error: "No image returned" });
 
-    return res.status(200).json({ imageUrl: upscaledUrl });
+    return res.status(200).json({ imageUrl: outUrl });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ error: "Upscale failed" });
