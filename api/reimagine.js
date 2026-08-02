@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v13 (style-matched: photoreal stays photoreal)
+// api/reimagine.js — "עיצוב מחדש" v14 (reads the PRINT, not the photo around it)
 
 import sharp from "sharp";
 
@@ -59,41 +59,57 @@ async function fal(model, input) {
 
 /* ---------------- step 1: Claude writes an original prompt ---------------- */
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
-You will be shown an image containing a printed design.
 
-Write a prompt for a NEW design in the SAME rendering style and the SAME subject
-category as the reference — but a clearly different picture.
+WHAT TO ANALYSE — READ THIS BEFORE ANYTHING ELSE.
+The image you are shown is one of two things:
+(a) a standalone artwork file — the design itself, or
+(b) a PHOTO OF SOMEONE WEARING A GARMENT, or a product mockup, where a design is
+    printed on the garment.
 
-STYLE RULE — THIS COMES FIRST AND OVERRIDES THE COLOUR RULE BELOW.
-Identify how the reference is rendered, and reproduce that exact technique:
-- A photograph or photorealistic render stays PHOTOREALISTIC: real skin texture, real
-  fabric, natural lighting, real depth of field. It must NOT become an illustration,
-  anime, cartoon or vector art, and must have NO drawn outlines of any kind.
+If it is (b), the ONLY thing that matters is the PRINTED GRAPHIC on the garment.
+Completely ignore the model, their face, hair, body, pose and expression; ignore the
+garment itself, the room, the street, the sky, the lighting and the photographic style
+of the photo. The subject, the rendering technique, the colours and the text you
+describe must all come from the printed graphic alone. NEVER describe the person
+wearing the shirt — that is the single worst mistake you can make here.
+If the printed graphic is small, partly hidden by folds or hard to read, describe what
+you can see of it and infer the rest; still never fall back to describing the wearer.
+
+Now write a prompt for a NEW design in the SAME rendering style and the SAME subject
+category as THAT GRAPHIC — but a clearly different picture.
+
+STYLE RULE — OVERRIDES THE COLOUR RULE BELOW.
+Identify how the GRAPHIC is rendered, and reproduce that exact technique:
+- A photographic or photorealistic graphic stays photorealistic: real skin texture,
+  real fabric, natural lighting, no drawn outlines.
 - Anime or manga stays anime. Flat vector stays flat vector. Watercolour stays
   watercolour. Comic ink stays comic ink. Oil painting stays oil painting.
+Note: a photo of a person wearing a shirt is NOT a photographic graphic. Judge only the
+artwork printed on the fabric.
 Name the technique explicitly at the start of your prompt.
 
 KEEP THE SUBJECT TYPE. THIS IS MANDATORY.
-A woman stays a woman. A man stays a man. A dog stays a dog. A car stays a car.
+Whatever the printed graphic depicts, the new design depicts the same kind of thing.
+A woman stays a woman. A skull stays a skull. A car stays a car.
 NEVER substitute a different category.
 
 ONE SUBJECT ONLY — NOTHING BESIDE IT.
-The artwork contains the single subject and nothing else. Do NOT add stacks of books,
-plants, cups, pillows, flowers, leaves, sparkles, wreaths, frames, decorative motifs or
-any object sitting next to, behind or under the subject. If the pose needs something in
-the hands, allow at most ONE small held item, touching the hands.
+The artwork contains the single subject and nothing else. No stacks of books, plants,
+cups, flowers, leaves, sparkles, wreaths, frames or decorative motifs beside, behind or
+under it. If the pose needs something in the hands, allow at most ONE small held item.
 
 CHANGE EVERYTHING ELSE.
-Change the pose and body position, the activity, the hair, the outfit, the colour
-palette and the camera angle. If your description could be mistaken for the reference
-image, rewrite it.
+Change the pose, the activity, the hair, the outfit, the colour palette and the camera
+angle. If your description could be mistaken for the original graphic, rewrite it.
 
 TEXT RULE.
-- If the reference contains NO text, the new design contains no text either.
-- If the reference DOES contain text, invent DIFFERENT wording of your own.
+- If the printed graphic contains NO text, the new design contains no text either.
+- If it DOES contain text, invent DIFFERENT wording of your own.
   * English only, one to three words maximum, in capitals inside quotation marks.
-  * Never reuse the reference's words, and never use a real brand, band, company,
-    book or film name, or a known trademarked slogan.
+  * All capitals, spelled consistently — never mix a lowercase letter into a capitalised
+    word.
+  * Never reuse the original words, and never use a real brand, band, company, book or
+    film name, or a known trademarked slogan.
   * Place it so it does not overlap the subject's face.
 
 NO BACKGROUND, NO STICKER BORDER.
@@ -105,11 +121,11 @@ COLOUR RULE — subordinate to the style rule.
 The print must read on a white shirt as well as black.
 - For ILLUSTRATED styles: bold dark outlines on every element, saturated mid-to-deep
   colours, no large white or cream fills, strong contrast between adjacent shapes.
-- For PHOTOREALISTIC style: do NOT add outlines — that would break the realism.
-  Instead specify deep saturated clothing and hair, dramatic directional lighting and
-  strong tonal contrast, so the subject separates clearly from a white garment. Skin is
-  rendered naturally.
-- In both cases, avoid neon or glow effects, which only read on dark garments.
+- For PHOTOREALISTIC style: no drawn outlines. Instead specify deep saturated clothing
+  and hair, dramatic directional lighting and strong tonal contrast.
+- In both cases avoid neon, glow and pale fluorescent colours — they only read on dark
+  garments. Lettering in particular must be a deep saturated colour, never pale cyan,
+  pale yellow or white.
 
 COMPOSITION RULE.
 The entire subject, including raised arms, hair and lettering, sits well inside the
@@ -141,7 +157,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Match the reference's rendering technique exactly. Same subject category, different pose, activity, outfit and palette. Subject alone, no objects beside it. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -169,7 +185,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, nothing beside the subject, no extra objects, no props, no plants, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, no neon glow, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, nothing beside the subject, no extra objects, no props, no plants, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, no neon glow, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
   ", bold dark outlines on every element, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
@@ -181,7 +197,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `Match the reference's rendering technique exactly. Keep the same kind of subject but draw a different pose, activity, outfit and palette, alone with nothing next to it: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -244,7 +260,7 @@ function retryHint(qc) {
     parts.push("CRITICAL: the previous attempt was cut off by the frame. Zoom out. Make the subject noticeably smaller and fully contained, with wide empty margins on every side");
   }
   if (qc.tooPale) {
-    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Use much deeper, more saturated clothing and hair, and stronger tonal contrast. Keep the same rendering technique and the same kind of subject");
+    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Use much deeper, more saturated colours and stronger tonal contrast. Keep the same rendering technique and the same kind of subject");
   }
   return ". " + parts.join(". ") + ".";
 }
