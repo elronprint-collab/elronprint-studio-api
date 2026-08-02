@@ -6,7 +6,7 @@ import { checkRateLimit } from "./_ratelimit.js";
 
 import sharp from "sharp";
 
-export const config = { maxDuration: 300 };
+export const config = { maxDuration: 60 };
 
 const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.90, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
@@ -209,16 +209,35 @@ export default async function handler(req, res) {
   const [, mediaType, base64Data] = match;
 
   try {
+    const t0 = Date.now();
+    const step = (name) => console.log(`[reimagine] ${name}: ${Date.now() - t0}ms`);
+
     const prompt = await analyzeAndReimagine(base64Data, mediaType);
+    step("analyze");
+
     const generated = await generate(prompt, image);
+    step("generate");
+
     const cutout = await fal("fal-ai/birefnet", { image_url: generated });
-    const upscaled = await fal("fal-ai/clarity-upscaler", {
-      image_url: cutout,
-      scale_factor: 3,
-      creativity: 0.1,
-      resemblance: 1.2,
-    });
-    const imageUrl = await uploadCloudinary(await toPrintCanvas(upscaled));
+    step("cutout");
+
+    let upscaled = cutout;
+    try {
+      upscaled = await fal("fal-ai/esrgan", {
+        image_url: cutout,
+        scale: 4,
+        model: "RealESRGAN_x4plus",
+      });
+      step("upscale");
+    } catch (e) {
+      console.warn("upscale skipped:", e.message);
+    }
+
+    const canvas = await toPrintCanvas(upscaled);
+    step("canvas");
+
+    const imageUrl = await uploadCloudinary(canvas);
+    step("upload");
 
     return res.status(200).json({
       imageUrl,
