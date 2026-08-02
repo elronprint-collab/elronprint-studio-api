@@ -1,7 +1,7 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v3
-// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> bg removal
-//           -> 2x upscale -> centered 4500x5400 @300DPI transparent PNG -> Cloudinary
+// api/reimagine.js — "עיצוב מחדש" v4
+// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> 2x upscale
+//           -> bg removal (LAST, so alpha survives) -> centered 4500x5400 @300DPI -> Cloudinary
 
 import sharp from "sharp";
 
@@ -140,11 +140,16 @@ async function generate(prompt, dataUri) {
   });
 }
 
-/* ---------------- step 4: centered print canvas ---------------- */
+/* ---------------- step 5: centered print canvas ---------------- */
 async function toPrintCanvas(url) {
   const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
 
-  // threshold trim so soft anti-aliased edges don't skew the centering
+  const src = sharp(buf).ensureAlpha();
+  const stats = await src.stats();
+  if (stats.isOpaque) {
+    console.warn("[reimagine] WARNING: image has no transparency");
+  }
+
   const inner = await sharp(buf)
     .ensureAlpha()
     .trim({ threshold: 12 })
@@ -236,18 +241,15 @@ export default async function handler(req, res) {
     const prompt = await analyzeAndReimagine(base64Data, mediaType);
     step("analyze");
 
-    const generated = await generate(prompt, image);
+    let art = await generate(prompt, image);
     step("generate");
 
-    const cutout = await fal("fal-ai/birefnet", { image_url: generated });
-    step("cutout");
-
-    // sharpen before enlarging — skipped automatically if we are running late
-    let source = cutout;
+    // upscale BEFORE cutting out — RealESRGAN drops the alpha channel,
+    // so it must never run on a transparent image.
     if (Date.now() - t0 < 22000) {
       try {
-        source = await fal("fal-ai/esrgan", {
-          image_url: cutout,
+        art = await fal("fal-ai/esrgan", {
+          image_url: art,
           scale: 2,
           model: "RealESRGAN_x4plus",
         });
@@ -259,7 +261,11 @@ export default async function handler(req, res) {
       console.warn("[reimagine] upscale skipped - no time budget");
     }
 
-    let canvas = await toPrintCanvas(source);
+    // background removal is the LAST image operation, so alpha survives
+    const cutout = await fal("fal-ai/birefnet", { image_url: art });
+    step("cutout");
+
+    let canvas = await toPrintCanvas(cutout);
     console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
     canvas = await fitUploadSize(canvas);
     step("canvas");
