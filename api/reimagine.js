@@ -1,261 +1,224 @@
-import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v2
-// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> background removal
-//           -> upscale -> 4500x5400 @300DPI transparent PNG -> Cloudinary
-// env: FAL_KEY, ANTHROPIC_API_KEY (both already set)
+{{ 'https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@400;500;700&family=Heebo:wght@300;400;500;600&display=swap' | stylesheet_tag }}
+<style>
+  .edr { --edr-ink:#101012; --edr-gray:#86868B; --edr-line:#E8E8ED; --edr-blue:#0071E3; background:#fff; color:var(--edr-ink); font-family:'Heebo',system-ui,sans-serif; line-height:1.6; direction:rtl; }
+  .edr *{box-sizing:border-box;margin:0;padding:0}
+  .edr-wrap{max-width:680px;margin:0 auto;padding:0 24px}
+  .edr-hero{padding:80px 0 56px;text-align:center}
+  .edr-hero h1{font-family:'Frank Ruhl Libre',serif;font-weight:500;font-size:clamp(34px,6vw,52px);line-height:1.15;letter-spacing:-.01em;color:var(--edr-ink)}
+  .edr-hero p{margin-top:18px;font-size:17px;font-weight:300;color:var(--edr-gray);max-width:48ch;margin-inline:auto}
+  .edr-section{padding-bottom:64px}
+  .edr-upload{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:16px;padding:28px;border:1.5px dashed var(--edr-line);border-radius:14px;flex-wrap:wrap;cursor:pointer;transition:border-color .15s,background .15s}
+  .edr-upload.drag{border-color:var(--edr-blue);background:#F5F9FF}
+  .edr-upload-thumb{width:64px;height:64px;border-radius:10px;object-fit:cover;border:1px solid var(--edr-line)}
+  .edr-upload-text b{display:block;font-size:15px;color:var(--edr-ink)}
+  .edr-upload-text span{font-size:13px;color:var(--edr-gray)}
+  .edr-btn{border:0;background:var(--edr-blue);color:#fff;font:inherit;font-size:15px;font-weight:500;padding:14px 26px;border-radius:10px;cursor:pointer;transition:background .15s;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;gap:6px;text-decoration:none;width:100%;margin-top:18px}
+  .edr-btn:hover{background:#0077ED}
+  .edr-btn:disabled{background:#B8B8BD;cursor:default}
+  .edr-btn-ghost{background:transparent;color:var(--edr-blue);border:1px solid var(--edr-line);width:auto}
+  .edr-btn-ghost:hover{background:#F5F5F7}
+  .edr-hint{margin-top:10px;font-size:13px;color:var(--edr-gray);text-align:center}
+  .edr-tip{margin-top:14px;font-size:13.5px;color:#4A4A4F;text-align:center;background:#F5F5F7;border-radius:10px;padding:12px 16px;line-height:1.7}
+  .edr-tip b{color:var(--edr-ink);font-weight:600}
+  .edr-error{margin-top:18px;font-size:14px;color:#C0392B;text-align:center}
+  .edr-proof{padding-bottom:100px}
+  .edr-frame{position:relative;padding:26px}
+  .edr-canvas{aspect-ratio:3/4;background:repeating-conic-gradient(#FAFAFC 0% 25%,#F2F2F5 0% 50%) 0 0/24px 24px;border-radius:4px;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative}
+  .edr-canvas img{width:100%;height:100%;object-fit:contain;display:block}
+  .edr-empty{color:var(--edr-gray);font-size:14px;font-weight:300;text-align:center;padding:0 32px}
+  .edr-spec{display:flex;justify-content:space-between;gap:12px;margin-top:14px;padding-top:14px;border-top:1px solid var(--edr-line);font-size:11.5px;color:var(--edr-gray);letter-spacing:.05em;flex-wrap:wrap}
+  .edr-spec b{color:var(--edr-ink);font-weight:500}
+  .edr-actions{display:flex;justify-content:center;margin-top:28px;gap:12px;flex-wrap:wrap}
+  .edr-actions .edr-btn{width:auto;margin-top:0}
+  .edr-loader{position:absolute;inset:0;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;background:rgba(255,255,255,.75);backdrop-filter:blur(2px);z-index:5}
+  .edr-spinner{width:28px;height:28px;border:2px solid var(--edr-line);border-top-color:var(--edr-blue);border-radius:50%;animation:edrspin .8s linear infinite}
+  @keyframes edrspin{to{transform:rotate(360deg)}}
+  .edr-loader small{color:var(--edr-gray);font-size:13px}
+  .edr [hidden]{display:none!important}
+  @media (max-width:480px){.edr-hero{padding:56px 0 40px}}
+</style>
 
-import sharp from "sharp";
+<div class="edr">
+  <section class="edr-hero">
+    <div class="edr-wrap">
+      <h1>{{ section.settings.heading | default: 'העלו עיצוב, קבלו השראה חדשה' }}</h1>
+      <p>{{ section.settings.subheading | default: 'צלמו או העלו תמונה של חולצה עם עיצוב שאהבתם. המערכת תבין את הרעיון והסגנון, ותיצור עבורכם עיצוב חדש ושונה — לא העתקה — מוכן להדפסה.' }}</p>
+    </div>
+  </section>
 
-export const config = { maxDuration: 60 };
+  <section class="edr-section">
+    <div class="edr-wrap">
+      <div class="edr-upload" id="edr-upload">
+        <input type="file" id="edr-file" accept="image/png,image/jpeg,image/webp" hidden>
+        <img id="edr-file-thumb" class="edr-upload-thumb" hidden alt="">
+        <div class="edr-upload-text">
+          <b id="edr-upload-title">גררו לכאן תמונה, או לחצו לבחירה</b>
+          <span id="edr-upload-sub">חולצה עם עיצוב מודפס — JPG / PNG</span>
+        </div>
+      </div>
 
-const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.90, DPI = 300;
-const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
-const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
+      <button id="edr-generate" class="edr-btn" disabled>צרו לי עיצוב חדש בהשראת זה</button>
+      <p class="edr-hint">התוצאה היא עיצוב חדש שנוצר מחדש — לא קובץ מקורי מוגן בזכויות. מומלץ לוודא שיש לכם זכות שימוש בהשראה המקורית.</p>
+      <p class="edr-tip">💡 <b>איך זה עובד:</b> המערכת מזהה נושא, סגנון וצבעים בעיצוב שהעליתם, ואז מייצרת גרסה חדשה באותה רוח — עם חופש ליצירתיות (דמות ופרטים משתנים). התהליך אורך כ-20–30 שניות.</p>
+      <p id="edr-error" class="edr-error" hidden></p>
+    </div>
+  </section>
 
-/* ---------------- CORS (unchanged) ---------------- */
-const ALLOWED = [
-  "https://elronprint.co.il",
-  "https://www.elronprint.co.il",
-];
-function allowOrigin(origin) {
-  if (!origin) return null;
-  if (ALLOWED.includes(origin)) return origin;
-  try {
-    const host = new URL(origin).hostname;
-    if (host.endsWith(".myshopify.com") || host.endsWith(".shopifypreview.com")) return origin;
-  } catch {}
-  return null;
-}
-function cors(req, res) {
-  const origin = allowOrigin(req.headers.origin);
-  if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
+  <section class="edr-proof">
+    <div class="edr-wrap">
+      <div class="edr-frame">
+        <div class="edr-canvas">
+          <p class="edr-empty" id="edr-empty">גיליון ההגהה ריק. העלו תמונה כדי להתחיל.</p>
+          <img id="edr-result" alt="" hidden>
+          <div class="edr-loader" id="edr-loader" hidden>
+            <div class="edr-spinner" role="status" aria-label="יוצר עיצוב"></div>
+            <small id="edr-status">מנתח את העיצוב…</small>
+          </div>
+        </div>
+        <div class="edr-spec">
+          <span>מידות: <b>4500 × 5400 px</b></span>
+          <span>רזולוציה: <b>300 DPI</b></span>
+          <span>פרופיל: <b>sRGB · PNG שקוף</b></span>
+        </div>
+      </div>
+      <div class="edr-actions" id="edr-actions" hidden>
+        <a class="edr-btn" href="{{ section.settings.order_url | default: '/pages/designer' }}">🛒 הזמינו חולצה עם העיצוב</a>
+        <a id="edr-download" class="edr-btn edr-btn-ghost" download="elronprint--design.png" target="_blank" rel="noopener">הורדת קובץ לדפוס</a>
+        <button id="edr-again" class="edr-btn edr-btn-ghost">נסו וריאציה נוספת</button>
+      </div>
+      <p class="edr-hint" id="edr-order-hint" hidden>במעצב החולצות: הורידו כאן את הקובץ והעלו אותו בשלב העיצוב.</p>
+    </div>
+  </section>
+</div>
+
+<script>
+(function(){
+  var API_BASE = ({{ section.settings.api_endpoint | json }} || '').replace(/\/+$/,'').replace(/\/api\/generate$/,'');
+  var $ = function(id){ return document.getElementById(id); };
+  var uploadBox=$('edr-upload'), fileInput=$('edr-file'), fileThumb=$('edr-file-thumb'),
+      uploadTitle=$('edr-upload-title'), uploadSub=$('edr-upload-sub'),
+      btn=$('edr-generate'), loader=$('edr-loader'),
+      result=$('edr-result'), emptyMsg=$('edr-empty'), actions=$('edr-actions'),
+      errorEl=$('edr-error'), download=$('edr-download'), statusEl=$('edr-status'),
+      orderHint=$('edr-order-hint');
+
+  var uploadedDataUrl = null;
+  var statusTimers = [];
+
+  function readFile(f){
+    if(!f) return;
+    var img = new Image();
+    var reader = new FileReader();
+    reader.onload = function(){ img.src = reader.result; };
+    img.onload = function(){
+      var max = 1280, w = img.width, h = img.height;
+      if(w > max || h > max){
+        if(w >= h){ h = Math.round(h * max / w); w = max; }
+        else { w = Math.round(w * max / h); h = max; }
+      }
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      uploadedDataUrl = c.toDataURL('image/jpeg', 0.9);
+      fileThumb.src = uploadedDataUrl;
+      fileThumb.hidden = false;
+      uploadTitle.textContent = 'התמונה נבחרה — אפשר ללחוץ כדי להחליף';
+      uploadSub.textContent = f.name;
+      btn.disabled = false;
+    };
+    img.onerror = function(){ uploadSub.textContent = 'התמונה לא נקראה — נסו קובץ אחר'; };
+    reader.readAsDataURL(f);
   }
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-}
 
-/* ---------------- fal helper ---------------- */
-async function fal(model, input) {
-  const r = await fetch(`https://fal.run/${model}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${process.env.FAL_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(input),
+  uploadBox.addEventListener('click', function(){ fileInput.click(); });
+  fileInput.addEventListener('change', function(){ readFile(fileInput.files && fileInput.files[0]); });
+  ['dragenter','dragover'].forEach(function(ev){
+    uploadBox.addEventListener(ev, function(e){ e.preventDefault(); uploadBox.classList.add('drag'); });
   });
-  if (!r.ok) {
-    const t = await r.text();
-    console.error(`fal ${model} failed:`, r.status, t);
-    throw new Error(`${model} failed`);
-  }
-  const d = await r.json();
-  const url = d?.images?.[0]?.url || d?.image?.url || d?.url;
-  if (!url) throw new Error(`${model}: no image returned`);
-  return url;
-}
-
-/* ---------------- step 1: Claude writes an original prompt ---------------- */
-const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
-You will be shown an image containing a printed design.
-
-Your job is to write a prompt for a NEW, DIFFERENT design that is only INSPIRED
-by the one shown — same general style, mood and palette family — but NOT a copy.
-
-Hard rules:
-- If the design has a specific character, animal or figure, you MUST swap it for
-  a different one in the same category. Never describe the original subject directly.
-- Change at least three of: pose, scene, props, outfit, palette accent, camera angle.
-- NEVER include readable text, book titles, logos, brand names, real people, or
-  recognisable copyrighted characters. If the reference contains a book, product or
-  brand, replace it with a generic unbranded object.
-- Do not mention the t-shirt, garment, fabric, folds, model or photo background.
-- Write 2-4 sentences as a direct image-generation prompt in English.
-- End with exactly: "isolated subject on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, sharp clean outlines, high contrast rich colours, commercial illustration quality, full subject inside frame with generous margins on all sides, vertical 4:5 composition"
-- Output ONLY the prompt. No preamble.`;
-
-async function analyzeAndReimagine(base64Data, mediaType) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 400,
-      system: ANALYSIS_SYSTEM_PROMPT,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Write the prompt for a new original design inspired by this." },
-        ],
-      }],
-    }),
+  ['dragleave','drop'].forEach(function(ev){
+    uploadBox.addEventListener(ev, function(e){ e.preventDefault(); uploadBox.classList.remove('drag'); });
   });
-  if (!r.ok) {
-    const t = await r.text();
-    console.error("anthropic analyze failed:", r.status, t);
-    throw new Error("Analysis failed");
-  }
-  const data = await r.json();
-  const text = (data?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join(" ")
-    .trim();
-  if (!text) throw new Error("No analysis text returned");
-  return text;
-}
+  uploadBox.addEventListener('drop', function(e){
+    var f = e.dataTransfer.files && e.dataTransfer.files[0];
+    readFile(f);
+  });
 
-/* ---------------- step 2: generate ---------------- */
-async function generate(prompt, dataUri) {
-  // preferred: image-guided variation (keeps the style, changes the content)
-  try {
-    return await fal("fal-ai/nano-banana/edit", {
-      prompt,
-      image_urls: [dataUri],
-      num_images: 1,
-      output_format: "png",
+  function post(path, payload){
+    return fetch(API_BASE + path, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    }).then(function(res){
+      if(!res.ok){ var e = new Error('HTTP '+res.status); e.status = res.status; throw e; }
+      return res.json();
     });
-  } catch (e) {
-    console.warn("nano-banana failed, falling back to FLUX:", e.message);
   }
-  // fallback: text-only generation
-  return await fal("fal-ai/flux/dev", {
-    prompt: `${prompt}, rich modern illustration, soft shading with highlights, bold clean linework, vibrant colors, high detail, isolated subject, t-shirt print artwork`,
-    image_size: { width: 1152, height: 1536 },
-    num_inference_steps: 32,
-    guidance_scale: 3.5,
-    output_format: "png",
-    enable_safety_checker: true,
-  });
-}
 
-/* ---------------- step 5: print canvas ---------------- */
-async function toPrintCanvas(url) {
-  const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+  function clearTimers(){
+    statusTimers.forEach(clearTimeout);
+    statusTimers = [];
+  }
 
-  const inner = await sharp(buf)
-    .ensureAlpha()
-    .trim()
-    .resize(Math.round(CANVAS_W * SAFE), Math.round(CANVAS_H * SAFE), {
-      fit: "inside",
-      kernel: "lanczos3",
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
+  function fail(msg){
+    clearTimers();
+    loader.hidden=true;
+    if(!result.src){ emptyMsg.hidden=false; }
+    errorEl.textContent=msg; errorEl.hidden=false; btn.disabled=false;
+  }
+
+  function generate(){
+    if(!uploadedDataUrl){ uploadBox.click(); return; }
+    if(!API_BASE){
+      fail('כתובת השרת עדיין לא הוגדרה בהגדרות הסקשן בעורך התים.');
+      return;
+    }
+    btn.disabled=true; errorEl.hidden=true; actions.hidden=true; orderHint.hidden=true;
+    result.hidden=true; emptyMsg.hidden=true; loader.hidden=false;
+    statusEl.textContent='מנתח את העיצוב…';
+
+    clearTimers();
+    statusTimers.push(setTimeout(function(){ statusEl.textContent='מייצר עיצוב חדש…'; }, 5000));
+    statusTimers.push(setTimeout(function(){ statusEl.textContent='מסיר רקע ומכין לדפוס…'; }, 14000));
+    statusTimers.push(setTimeout(function(){ statusEl.textContent='כמעט שם…'; }, 24000));
+
+    post('/api/reimagine', { image: uploadedDataUrl })
+    .then(function(data){
+      clearTimers();
+      statusEl.textContent='טוען תצוגה…';
+      result.src = data.imageUrl;
+      result.alt = 'עיצוב חדש בהשראת התמונה שהועלתה';
+      result.onload = function(){
+        result.hidden=false; loader.hidden=true;
+        download.href = data.imageUrl;
+        actions.hidden=false; orderHint.hidden=false; btn.disabled=false;
+      };
+      result.onerror = function(){ fail('התמונה לא נטענה. נסו שוב.'); };
     })
-    .png({ compressionLevel: 1 })
-    .toBuffer();
-
-  const m = await sharp(inner).metadata();
-
-  return sharp({
-    create: {
-      width: CANVAS_W, height: CANVAS_H, channels: 4,
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
-    },
-  })
-    .composite([{
-      input: inner,
-      left: Math.round((CANVAS_W - m.width) / 2),
-      top: Math.round((CANVAS_H - m.height) / 2),
-    }])
-    .withMetadata({ density: DPI })
-    .png({ compressionLevel: 3, effort: 1 })
-    .toBuffer();
-}
-
-// Cloudinary unsigned uploads are size-capped; shrink only if we must.
-async function fitUploadSize(buffer) {
-  const MAX = 9.5 * 1024 * 1024;
-  if (buffer.length <= MAX) return buffer;
-  console.warn(`[reimagine] png ${(buffer.length / 1048576).toFixed(1)}MB - re-encoding as palette`);
-  return sharp(buffer)
-    .png({ compressionLevel: 9, palette: true, colours: 256, dither: 1 })
-    .withMetadata({ density: DPI })
-    .toBuffer();
-}
-
-/* ---------------- upload ---------------- */
-async function uploadCloudinary(buffer) {
-  const form = new FormData();
-  form.append("file", new Blob([buffer], { type: "image/png" }), "design.png");
-  form.append("upload_preset", CLOUD_PRESET);
-  const r = await fetch(
-    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
-    { method: "POST", body: form }
-  );
-  const text = await r.text();
-  if (!r.ok) {
-    console.error("cloudinary failed:", r.status, text.slice(0, 500));
-    throw new Error("Upload failed");
-  }
-  const d = JSON.parse(text);
-  if (!d.secure_url) {
-    console.error("cloudinary no url:", text.slice(0, 500));
-    throw new Error("Upload failed");
-  }
-  return d.secure_url;
-}
-
-/* ---------------- handler ---------------- */
-export default async function handler(req, res) {
-  cors(req, res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
-  const retryAfter = checkRateLimit(req);
-  if (retryAfter !== null) {
-    res.setHeader("Retry-After", String(retryAfter));
-    return res.status(429).json({ error: "Too many requests", retryAfter });
-  }
-
-  const { image } = req.body || {};
-  if (!image || typeof image !== "string") {
-    return res.status(400).json({ error: "Missing image" });
-  }
-  const match = image.match(/^data:(image\/\w+);base64,(.+)$/);
-  if (!match) {
-    return res.status(400).json({ error: "Invalid image format" });
-  }
-  const [, mediaType, base64Data] = match;
-
-  try {
-    const t0 = Date.now();
-    const step = (name) => console.log(`[reimagine] ${name}: ${Date.now() - t0}ms`);
-
-    const prompt = await analyzeAndReimagine(base64Data, mediaType);
-    step("analyze");
-
-    const generated = await generate(prompt, image);
-    step("generate");
-
-    const cutout = await fal("fal-ai/birefnet", { image_url: generated });
-    step("cutout");
-
-    const upscaled = cutout;
-
-    let canvas = await toPrintCanvas(upscaled);
-    console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
-    canvas = await fitUploadSize(canvas);
-    step("canvas");
-
-    const imageUrl = await uploadCloudinary(canvas);
-    step("upload");
-
-    return res.status(200).json({
-      imageUrl,
-      url: imageUrl,
-      width: CANVAS_W,
-      height: CANVAS_H,
-      dpi: DPI,
+    .catch(function(err){
+      if(err && err.status === 429){
+        fail('נוצרו יותר מדי עיצובים בזמן קצר. המתינו כמה דקות ונסו שוב.');
+      } else if(err && err.status === 404){
+        fail('הפיצ׳ר הזה עדיין לא הופעל בשרת — יש להוסיף את /api/reimagine.');
+      } else {
+        fail('היצירה נכשלה. נסו שוב בעוד רגע.');
+      }
     });
-  } catch (err) {
-    console.error(err);
-    return res.status(502).json({ error: "Reimagine failed" });
   }
+
+  btn.addEventListener('click', generate);
+  $('edr-again').addEventListener('click', function(){ generate(); });
+})();
+</script>
+
+{% schema %}
+{
+  "name": "EPD Design ",
+  "settings": [
+    { "type": "text", "id": "heading", "label": "כותרת", "default": "העלו עיצוב, קבלו השראה חדשה" },
+    { "type": "textarea", "id": "subheading", "label": "תת-כותרת", "default": "צלמו או העלו תמונה של חולצה עם עיצוב שאהבתם. המערכת תבין את הרעיון והסגנון, ותיצור עבורכם עיצוב חדש ושונה — לא העתקה — מוכן להדפסה." },
+    { "type": "text", "id": "api_endpoint", "label": "כתובת שרת (Vercel)", "info": "רק הבסיס, למשל: https://elronprint-studio-api.vercel.app" },
+    { "type": "text", "id": "order_url", "label": "קישור כפתור ההזמנה", "info": "ברירת מחדל: /pages/designer (מעצב החולצות)" }
+  ],
+  "presets": [{ "name": "EPD Design " }]
 }
+{% endschema %}
