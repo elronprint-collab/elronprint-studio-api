@@ -164,7 +164,7 @@ async function toPrintCanvas(url) {
       top: Math.round((CANVAS_H - m.height) / 2),
     }])
     .withMetadata({ density: DPI })
-    .png({ compressionLevel: 9 })
+    .png({ compressionLevel: 6 })
     .toBuffer();
 }
 
@@ -237,15 +237,19 @@ export default async function handler(req, res) {
     step("cutout");
 
     let upscaled = cutout;
-    try {
-      upscaled = await fal("fal-ai/esrgan", {
-        image_url: cutout,
-        scale: 4,
-        model: "RealESRGAN_x4plus",
-      });
-      step("upscale");
-    } catch (e) {
-      console.warn("upscale skipped:", e.message);
+    if (Date.now() - t0 < 18000) {
+      try {
+        upscaled = await fal("fal-ai/esrgan", {
+          image_url: cutout,
+          scale: 2,
+          model: "RealESRGAN_x4plus",
+        });
+        step("upscale");
+      } catch (e) {
+        console.warn("upscale skipped:", e.message);
+      }
+    } else {
+      console.warn("[reimagine] upscale skipped - no time budget");
     }
 
     let canvas = await toPrintCanvas(upscaled);
