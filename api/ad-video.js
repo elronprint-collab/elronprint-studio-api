@@ -45,23 +45,34 @@ const MODELS = {
 // אותה שיטה כמו בקריינות — מנסים לפי הסדר עד שאחד עונה,
 // כי fal מחליפים מזהי מודלים כל הזמן.
 const AVATAR_CANDIDATES = [
+  // כל המודלים האלה דורשים prompt — תיאור באנגלית של מה שקורה בפריים.
+  // בלעדיו fal מחזיר 422 "Field required". התיאור לא משנה את מה שנאמר,
+  // רק את התנועה, ההבעה והמצלמה.
   {
     model: "fal-ai/hedra/character-2",
-    input: (img, aud) => ({ image_url: img, audio_url: aud, aspect_ratio: "9:16" }),
+    input: (img, aud, prompt) => ({
+      image_url: img, audio_url: aud, prompt, aspect_ratio: "9:16",
+    }),
   },
   {
     model: "fal-ai/infinitalk",
-    input: (img, aud) => ({ image_url: img, audio_url: aud, resolution: "480p" }),
+    input: (img, aud, prompt) => ({
+      image_url: img, audio_url: aud, prompt, resolution: "480p",
+    }),
   },
   {
     model: "fal-ai/ai-avatar",
-    input: (img, aud) => ({ image_url: img, audio_url: aud }),
+    input: (img, aud, prompt) => ({ image_url: img, audio_url: aud, prompt }),
   },
   {
     model: "fal-ai/sonic",
-    input: (img, aud) => ({ image_url: img, audio_url: aud }),
+    input: (img, aud, prompt) => ({ image_url: img, audio_url: aud, prompt }),
   },
 ];
+
+const DEFAULT_AVATAR_PROMPT =
+  "A person speaking directly to the camera in a warm, natural, friendly way, " +
+  "subtle head movement and natural facial expression, static camera, indoor daylight";
 
 // ─────────────────────────────────────────────────────────────
 
@@ -417,7 +428,7 @@ function presenterInput({ describe = "", vertical = true }) {
   };
 }
 
-async function submitAvatar({ imageUrl, audioUrl, model = null }) {
+async function submitAvatar({ imageUrl, audioUrl, model = null, prompt = null }) {
   if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!imageUrl) throw new Error("חסרה תמונת דובר");
   if (!audioUrl) throw new Error("חסר קובץ קריינות");
@@ -434,7 +445,7 @@ async function submitAvatar({ imageUrl, audioUrl, model = null }) {
     try {
       const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
         method: "POST",
-        body: JSON.stringify(cand.input(imageUrl, audioUrl)),
+        body: JSON.stringify(cand.input(imageUrl, audioUrl, prompt || DEFAULT_AVATAR_PROMPT)),
       });
       return {
         requestId: data.request_id,
