@@ -86,8 +86,14 @@ const LIPSYNC_CANDIDATES = [
     input: (vid, aud) => ({ video_url: vid, audio_url: aud, sync_mode: "bounce" }),
   },
   {
-    model: "fal-ai/veed/lipsync",
+    // veed יושב תחת המרחב של veed עצמו, לא תחת fal-ai.
+    // "fal-ai/veed/lipsync" מחזיר 404 Application "veed" not found.
+    model: "veed/lipsync",
     input: (vid, aud) => ({ video_url: vid, audio_url: aud }),
+  },
+  {
+    model: "fal-ai/sync-lipsync/v2",
+    input: (vid, aud) => ({ video_url: vid, audio_url: aud, sync_mode: "bounce" }),
   },
   {
     model: "fal-ai/latentsync",
@@ -460,11 +466,14 @@ async function submitLipsync({ videoUrl, audioUrl, model = null, extra = null })
   if (!videoUrl) throw new Error("חסר קליפ דוברת");
   if (!audioUrl) throw new Error("חסר קובץ קריינות");
 
+  // מזהי מודלים אצל fal משתנים תכופות. אם נשלח model שלא ברשימה,
+  // מנסים אותו בכל זאת עם המבנה הסטנדרטי — ככה שינוי שם עתידי
+  // לא מחייב פריסה מחדש של השרת.
+  const known = LIPSYNC_CANDIDATES.filter((c) => c.model === model);
   const list = model
-    ? LIPSYNC_CANDIDATES.filter((c) => c.model === model)
+    ? (known.length ? known
+                    : [{ model, input: (v, a) => ({ video_url: v, audio_url: a }) }])
     : LIPSYNC_CANDIDATES;
-
-  if (model && list.length === 0) throw new Error("מודל סנכרון לא מוכר: " + model);
 
   const failures = [];
 
