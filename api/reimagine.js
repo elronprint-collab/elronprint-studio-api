@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v11 (invented English text allowed)
+// api/reimagine.js — "עיצוב מחדש" v13 (style-matched: photoreal stays photoreal)
 
 import sharp from "sharp";
 
@@ -61,64 +61,69 @@ async function fal(model, input) {
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
 You will be shown an image containing a printed design.
 
-Write a prompt for a NEW design in the SAME art style and the SAME subject category as
-the reference — but a clearly different picture.
+Write a prompt for a NEW design in the SAME rendering style and the SAME subject
+category as the reference — but a clearly different picture.
+
+STYLE RULE — THIS COMES FIRST AND OVERRIDES THE COLOUR RULE BELOW.
+Identify how the reference is rendered, and reproduce that exact technique:
+- A photograph or photorealistic render stays PHOTOREALISTIC: real skin texture, real
+  fabric, natural lighting, real depth of field. It must NOT become an illustration,
+  anime, cartoon or vector art, and must have NO drawn outlines of any kind.
+- Anime or manga stays anime. Flat vector stays flat vector. Watercolour stays
+  watercolour. Comic ink stays comic ink. Oil painting stays oil painting.
+Name the technique explicitly at the start of your prompt.
 
 KEEP THE SUBJECT TYPE. THIS IS MANDATORY.
-Whatever the reference shows, the new design shows the same kind of thing:
-- A woman stays a woman. A man stays a man. A child stays a child.
-- A dog stays a dog. A flower stays a flower. A car stays a car.
-- NEVER substitute a different category. Never turn a person into an animal, a plant
-  or an object. That is a failure.
+A woman stays a woman. A man stays a man. A dog stays a dog. A car stays a car.
+NEVER substitute a different category.
+
+ONE SUBJECT ONLY — NOTHING BESIDE IT.
+The artwork contains the single subject and nothing else. Do NOT add stacks of books,
+plants, cups, pillows, flowers, leaves, sparkles, wreaths, frames, decorative motifs or
+any object sitting next to, behind or under the subject. If the pose needs something in
+the hands, allow at most ONE small held item, touching the hands.
 
 CHANGE EVERYTHING ELSE.
-The result must not look like a redraw of the reference. Change all of these:
-- The pose and body position — lying down becomes sitting, standing, walking, dancing.
-- The activity and the props being held or used.
-- Hair colour and style, outfit, and colour palette.
-- The camera angle and the composition.
-If your description could be mistaken for the reference image, rewrite it.
+Change the pose and body position, the activity, the hair, the outfit, the colour
+palette and the camera angle. If your description could be mistaken for the reference
+image, rewrite it.
 
 TEXT RULE.
 - If the reference contains NO text, the new design contains no text either.
 - If the reference DOES contain text, invent DIFFERENT wording of your own.
-  * English only. Never Hebrew or any non-Latin script.
-  * One to three words maximum. Short phrases render cleanly; sentences do not.
-  * Never reuse the reference's words, and never use a real brand name, band name,
-    company name, book or film title, or a well-known trademarked slogan.
-  * Spell it out explicitly in the prompt, in capital letters, inside quotation marks,
-    for example: the word "WILDHEART" in bold condensed capitals.
-  * Give the lettering a saturated colour with a bold dark outline, and place it so it
-    does not overlap the subject's face.
+  * English only, one to three words maximum, in capitals inside quotation marks.
+  * Never reuse the reference's words, and never use a real brand, band, company,
+    book or film name, or a known trademarked slogan.
+  * Place it so it does not overlap the subject's face.
 
 NO BACKGROUND, NO STICKER BORDER.
 The subject stands alone on plain white that will be deleted. Never describe a setting,
-room, furniture, pillow, bed, sky, wall, floor, panel, rectangle or scene. This is NOT a
-sticker — no white outline, no contour, no die-cut edge, no border around the artwork.
+room, street, city, furniture, sky, wall, floor, panel, rectangle or scene. This is NOT
+a sticker — no white outline, no die-cut edge, no border around the artwork.
 
-COLOUR RULE.
-White, cream, ivory and pale grey areas vanish on a white shirt. So:
-- Name an explicit saturated mid-to-deep colour for clothing, hair, props, lettering
-  and every other large non-skin area.
-- No large white or cream area anywhere. A white dress becomes emerald, rust or navy;
-  white foam becomes blue-grey; a white mug becomes mustard.
-- Skin is the one exception — render it naturally, but always enclosed by bold dark
-  outlines so it reads on a white shirt.
-- Ignore the reference's palette if it is pale or pastel — deepen it substantially.
-- No neon or glow effects, which only read on dark garments.
-- Bold dark outlines on every element, with clear darkness differences between
-  neighbouring shapes.
+COLOUR RULE — subordinate to the style rule.
+The print must read on a white shirt as well as black.
+- For ILLUSTRATED styles: bold dark outlines on every element, saturated mid-to-deep
+  colours, no large white or cream fills, strong contrast between adjacent shapes.
+- For PHOTOREALISTIC style: do NOT add outlines — that would break the realism.
+  Instead specify deep saturated clothing and hair, dramatic directional lighting and
+  strong tonal contrast, so the subject separates clearly from a white garment. Skin is
+  rendered naturally.
+- In both cases, avoid neon or glow effects, which only read on dark garments.
 
 COMPOSITION RULE.
-The entire subject, including raised arms, hair, lettering and held objects, sits well
-inside the frame with clear empty space on all four sides. Nothing touches the edge.
+The entire subject, including raised arms, hair and lettering, sits well inside the
+frame with clear empty space on all four sides. Nothing touches the edge.
 
 Also: no logos, no brand names, no real people, no recognisable copyrighted characters.
 
-Write 2-4 sentences as a direct image-generation prompt in English, naming the
-saturated colour of each major element, and quoting any lettering exactly.
-End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, bold dark outlines, no white or cream fills, deep saturated colours, strong value contrast, correctly spelled lettering, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
-Output ONLY the prompt. No preamble.`;
+OUTPUT FORMAT — follow exactly.
+First line: either
+STYLE: photoreal
+or
+STYLE: illustration
+Then a blank line, then 2-4 sentences as a direct image-generation prompt in English.
+No preamble, no markdown, nothing else.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -130,13 +135,13 @@ async function analyzeAndReimagine(base64Data, mediaType) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 400,
+      max_tokens: 450,
       system: ANALYSIS_SYSTEM_PROMPT,
       messages: [{
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Same art style, same subject category — different pose, activity, outfit and palette. If the reference has text, invent different English wording of 1-3 words. No background, no sticker border, saturated colours, nothing touching the frame edge." },
+          { type: "text", text: "Match the reference's rendering technique exactly. Same subject category, different pose, activity, outfit and palette. Subject alone, no objects beside it. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -147,24 +152,36 @@ async function analyzeAndReimagine(base64Data, mediaType) {
     throw new Error("Analysis failed");
   }
   const data = await r.json();
-  const text = (data?.content || [])
+  const raw = (data?.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text)
     .join(" ")
     .trim();
-  if (!text) throw new Error("No analysis text returned");
-  console.log("[reimagine] prompt:", text.slice(0, 300));
-  return text;
+  if (!raw) throw new Error("No analysis text returned");
+
+  const m = raw.match(/^\s*STYLE:\s*(photoreal|illustration)\s*/i);
+  const style = m ? m[1].toLowerCase() : "illustration";
+  const prompt = raw.replace(/^\s*STYLE:\s*(photoreal|illustration)\s*/i, "").trim();
+
+  console.log(`[reimagine] style=${style} prompt:`, prompt.slice(0, 250));
+  return { style, prompt };
 }
 
 /* ---------------- step 2: generate ---------------- */
-const STYLE_SUFFIX =
-  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, deep saturated colours, bold dark outlines, no neon glow, lettering spelled exactly as written, no gibberish letters, no extra words";
+const COMMON_SUFFIX =
+  ", single subject only, nothing beside the subject, no extra objects, no props, no plants, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, no neon glow, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
-async function generate(prompt, dataUri) {
+const ILLUSTRATION_SUFFIX =
+  ", bold dark outlines on every element, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
+
+const PHOTOREAL_SUFFIX =
+  ", photorealistic, sharp photographic detail, realistic skin texture, realistic fabric, dramatic directional lighting, strong tonal contrast, deep saturated clothing, no illustration, no anime, no cartoon, no vector art, no drawn outlines, no painterly brushwork" + COMMON_SUFFIX;
+
+async function generate(prompt, style, dataUri) {
+  const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `Use the reference for art style only. Keep the same kind of subject but draw a different pose, activity, outfit and palette: ${prompt}${STYLE_SUFFIX}`,
+      prompt: `Match the reference's rendering technique exactly. Keep the same kind of subject but draw a different pose, activity, outfit and palette, alone with nothing next to it: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -173,7 +190,7 @@ async function generate(prompt, dataUri) {
     console.warn("nano-banana failed, falling back to FLUX:", e.message);
   }
   return await fal("fal-ai/flux/dev", {
-    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork${STYLE_SUFFIX}`,
+    prompt: `${prompt}, high detail, isolated subject, t-shirt print artwork${suffix}`,
     image_size: { width: 1152, height: 1536 },
     num_inference_steps: 32,
     guidance_scale: 3.5,
@@ -224,10 +241,10 @@ async function inspect(url) {
 function retryHint(qc) {
   const parts = [];
   if (qc.cropped) {
-    parts.push("CRITICAL: the previous attempt was cut off by the frame. Zoom out. Make the subject noticeably smaller and fully contained, with wide empty margins on every side. Nothing may touch the edge");
+    parts.push("CRITICAL: the previous attempt was cut off by the frame. Zoom out. Make the subject noticeably smaller and fully contained, with wide empty margins on every side");
   }
   if (qc.tooPale) {
-    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Replace every white, cream, ivory and pale grey area with a deep saturated colour. Darken the whole palette substantially. Keep the same kind of subject");
+    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Use much deeper, more saturated clothing and hair, and stronger tonal contrast. Keep the same rendering technique and the same kind of subject");
   }
   return ". " + parts.join(". ") + ".";
 }
@@ -328,10 +345,10 @@ export default async function handler(req, res) {
     const elapsed = () => Date.now() - t0;
     const step = (name) => console.log(`[reimagine] ${name}: ${elapsed()}ms`);
 
-    const prompt = await analyzeAndReimagine(base64Data, mediaType);
+    const { style, prompt } = await analyzeAndReimagine(base64Data, mediaType);
     step("analyze");
 
-    let art = await generate(prompt, image);
+    let art = await generate(prompt, style, image);
     let cutout = await fal("fal-ai/birefnet", { image_url: art });
     step("attempt1");
 
@@ -340,7 +357,7 @@ export default async function handler(req, res) {
     if ((qc.cropped || qc.tooPale) && elapsed() < 30000) {
       console.log("[reimagine] QC failed - regenerating with corrections");
       try {
-        const art2 = await generate(prompt + retryHint(qc), image);
+        const art2 = await generate(prompt + retryHint(qc), style, image);
         const cut2 = await fal("fal-ai/birefnet", { image_url: art2 });
         const qc2 = await inspect(cut2);
         step("attempt2");
@@ -389,6 +406,7 @@ export default async function handler(req, res) {
       width: CANVAS_W,
       height: CANVAS_H,
       dpi: DPI,
+      style,
       quality: { edge: +qc.edgeRatio.toFixed(3), pale: +qc.paleRatio.toFixed(3) },
     });
   } catch (err) {
