@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v10
+// api/reimagine.js — "עיצוב מחדש" v11 (invented English text allowed)
 
 import sharp from "sharp";
 
@@ -74,10 +74,22 @@ Whatever the reference shows, the new design shows the same kind of thing:
 CHANGE EVERYTHING ELSE.
 The result must not look like a redraw of the reference. Change all of these:
 - The pose and body position — lying down becomes sitting, standing, walking, dancing.
-- The activity and the props she is holding or using.
+- The activity and the props being held or used.
 - Hair colour and style, outfit, and colour palette.
 - The camera angle and the composition.
 If your description could be mistaken for the reference image, rewrite it.
+
+TEXT RULE.
+- If the reference contains NO text, the new design contains no text either.
+- If the reference DOES contain text, invent DIFFERENT wording of your own.
+  * English only. Never Hebrew or any non-Latin script.
+  * One to three words maximum. Short phrases render cleanly; sentences do not.
+  * Never reuse the reference's words, and never use a real brand name, band name,
+    company name, book or film title, or a well-known trademarked slogan.
+  * Spell it out explicitly in the prompt, in capital letters, inside quotation marks,
+    for example: the word "WILDHEART" in bold condensed capitals.
+  * Give the lettering a saturated colour with a bold dark outline, and place it so it
+    does not overlap the subject's face.
 
 NO BACKGROUND, NO STICKER BORDER.
 The subject stands alone on plain white that will be deleted. Never describe a setting,
@@ -86,8 +98,8 @@ sticker — no white outline, no contour, no die-cut edge, no border around the 
 
 COLOUR RULE.
 White, cream, ivory and pale grey areas vanish on a white shirt. So:
-- Name an explicit saturated mid-to-deep colour for clothing, hair, props and every
-  other large non-skin area.
+- Name an explicit saturated mid-to-deep colour for clothing, hair, props, lettering
+  and every other large non-skin area.
 - No large white or cream area anywhere. A white dress becomes emerald, rust or navy;
   white foam becomes blue-grey; a white mug becomes mustard.
 - Skin is the one exception — render it naturally, but always enclosed by bold dark
@@ -98,15 +110,14 @@ White, cream, ivory and pale grey areas vanish on a white shirt. So:
   neighbouring shapes.
 
 COMPOSITION RULE.
-The entire subject, including raised arms, hair and held objects, sits well inside the
-frame with clear empty space on all four sides. Nothing touches or crosses the edge.
+The entire subject, including raised arms, hair, lettering and held objects, sits well
+inside the frame with clear empty space on all four sides. Nothing touches the edge.
 
-Also: no readable text, no book titles, no logos, no brand names, no real people, no
-recognisable copyrighted characters.
+Also: no logos, no brand names, no real people, no recognisable copyrighted characters.
 
 Write 2-4 sentences as a direct image-generation prompt in English, naming the
-saturated colour of each major element.
-End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
+saturated colour of each major element, and quoting any lettering exactly.
+End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, bold dark outlines, no white or cream fills, deep saturated colours, strong value contrast, correctly spelled lettering, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
 Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -125,7 +136,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Same art style, same subject category — but a different pose, activity, outfit and palette. No background, no sticker border, saturated colours, nothing touching the frame edge." },
+          { type: "text", text: "Same art style, same subject category — different pose, activity, outfit and palette. If the reference has text, invent different English wording of 1-3 words. No background, no sticker border, saturated colours, nothing touching the frame edge." },
         ],
       }],
     }),
@@ -148,7 +159,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const STYLE_SUFFIX =
-  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, deep saturated colours, bold dark outlines, no neon glow";
+  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, deep saturated colours, bold dark outlines, no neon glow, lettering spelled exactly as written, no gibberish letters, no extra words";
 
 async function generate(prompt, dataUri) {
   try {
