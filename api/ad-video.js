@@ -74,6 +74,27 @@ const AVATAR_CANDIDATES = [
   },
 ];
 
+// סנכרון שפתיים: וידאו קיים + אודיו חדש → אותו וידאו עם שפתיים מתאימות.
+// הרבה יותר מהיר וזול מיצירת אווטאר מאפס, כי לא מייצרים וידאו —
+// רק משנים את אזור הפה. זה מה שמאפשר קליפ דוברת קבוע לשימוש חוזר.
+const LIPSYNC_CANDIDATES = [
+  {
+    // bounce ולא cut_off: קליפ הבסיס באורך 5 שניות, וטקסט ארוך יותר
+    // היה נחתך באמצע. bounce מריץ את הקליפ קדימה־אחורה עד שהוא מכסה
+    // את כל האודיו, וזה נראה חלק יותר מלולאה שקופצת חזרה להתחלה.
+    model: "fal-ai/sync-lipsync",
+    input: (vid, aud) => ({ video_url: vid, audio_url: aud, sync_mode: "bounce" }),
+  },
+  {
+    model: "fal-ai/veed/lipsync",
+    input: (vid, aud) => ({ video_url: vid, audio_url: aud }),
+  },
+  {
+    model: "fal-ai/latentsync",
+    input: (vid, aud) => ({ video_url: vid, audio_url: aud }),
+  },
+];
+
 const DEFAULT_AVATAR_PROMPT =
   "A person speaking directly to the camera in a warm, natural, friendly way, " +
   "subtle head movement and natural facial expression, static camera, indoor daylight";
@@ -98,9 +119,11 @@ export default async function handler(req, res) {
       case "engines":   return res.json({
         engines: TTS_CANDIDATES.map((c) => c.model),
         avatars: AVATAR_CANDIDATES.map((c) => c.model),
+        lipsync: LIPSYNC_CANDIDATES.map((c) => c.model),
       });
       case "presenter": return res.json(await falSubmit(MODELS.presenter, presenterInput(body)));
       case "avatar":    return res.json(await submitAvatar(body));
+      case "lipsync":   return res.json(await submitLipsync(body));
       case "status":    return res.json(await falStatus(body));
       default:          return res.status(400).json({ error: "action לא מוכר: " + action });
     }
@@ -430,6 +453,42 @@ function presenterInput({ describe = "", vertical = true }) {
     image_size: vertical ? "portrait_16_9" : "square_hd",
     num_images: 1,
   };
+}
+
+async function submitLipsync({ videoUrl, audioUrl, model = null, extra = null }) {
+  if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
+  if (!videoUrl) throw new Error("חסר קליפ דוברת");
+  if (!audioUrl) throw new Error("חסר קובץ קריינות");
+
+  const list = model
+    ? LIPSYNC_CANDIDATES.filter((c) => c.model === model)
+    : LIPSYNC_CANDIDATES;
+
+  if (model && list.length === 0) throw new Error("מודל סנכרון לא מוכר: " + model);
+
+  const failures = [];
+
+  for (const cand of list) {
+    try {
+      const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
+        method: "POST",
+        body: JSON.stringify({ ...cand.input(videoUrl, audioUrl), ...(extra || {}) }),
+      });
+      return {
+        requestId: data.request_id,
+        model: cand.model,
+        statusUrl: data.status_url || null,
+        responseUrl: data.response_url || null,
+        skipped: failures,
+        queued: true,
+      };
+    } catch (e) {
+      failures.push(`${cand.model} → ${e.message}`);
+      if (e.status === 401 || e.status === 403) break;
+    }
+  }
+
+  throw new Error("אף מודל סנכרון שפתיים לא עבד.\n" + failures.join("\n"));
 }
 
 async function submitAvatar({ imageUrl, audioUrl, model = null, prompt = null, seconds = null, extra = null }) {
