@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v4
+// api/reimagine.js — "עיצוב מחדש" v5
 // pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> 2x upscale
 //           -> bg removal (LAST, so alpha survives) -> centered 4500x5400 @300DPI -> Cloudinary
 
@@ -71,15 +71,25 @@ Hard rules:
   recognisable copyrighted characters. Replace any branded object with a generic one.
 - Do not mention the t-shirt, garment, fabric, folds, model or photo background.
 
-Garment compatibility (critical — the print must read on BOTH white and black shirts):
-- Require bold, confident dark outlines on every element.
-- Forbid pure white and near-white fills; specify cream, warm beige, soft grey or
-  saturated colour instead, so nothing disappears on a white shirt.
-- Require mid-to-deep saturated tones with clear value contrast between neighbouring
-  shapes — no pale washed-out areas.
+COLOUR RULE — THE SINGLE MOST IMPORTANT CONSTRAINT.
+The print must be clearly visible on a WHITE shirt as well as a black one. Anything
+white, cream, ivory, off-white or pale grey becomes INVISIBLE on a white shirt and
+ruins the product. Therefore:
+- Every large object MUST be given an explicit, saturated, mid-to-deep colour. Name
+  the colour in the prompt. Examples of the required treatment: a bathtub becomes deep
+  teal or burnt terracotta, NOT white porcelain. Foam or clouds become soft blue-grey
+  with visible dark outlines, NOT white. A mug becomes mustard or forest green. A book
+  becomes deep burgundy or navy.
+- The design must contain NO large white, cream or near-white filled area whatsoever.
+  Small highlights of a few pixels are acceptable; large fills are not.
+- Ignore the reference image's own palette if it is pale or pastel — deepen it. A pale
+  reference must still produce a richly coloured result.
+- Every element carries a bold dark outline, and neighbouring shapes differ clearly in
+  darkness so the artwork reads as a silhouette from a distance.
 
-- Write 2-4 sentences as a direct image-generation prompt in English.
-- End with exactly: "isolated subject centered in frame on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, bold dark outlines, no pure white fills, rich saturated colours with strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
+- Write 2-4 sentences as a direct image-generation prompt in English, naming the
+  specific saturated colour of each major object.
+- End with exactly: "isolated subject centered in frame on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, bold dark outlines on every element, absolutely no white or cream or ivory fills anywhere in the artwork, every object in deep saturated colour, strong value contrast between adjacent shapes, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
 - Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -98,7 +108,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Write the prompt for a new original design inspired by this." },
+          { type: "text", text: "Write the prompt for a new original design inspired by this. Remember: no white or cream fills — name a saturated colour for every major object." },
         ],
       }],
     }),
@@ -115,14 +125,18 @@ async function analyzeAndReimagine(base64Data, mediaType) {
     .join(" ")
     .trim();
   if (!text) throw new Error("No analysis text returned");
+  console.log("[reimagine] prompt:", text.slice(0, 300));
   return text;
 }
 
 /* ---------------- step 2: generate ---------------- */
+const COLOUR_SUFFIX =
+  ", no white fills, no cream fills, every object in deep saturated colour, bold dark outlines, high value contrast";
+
 async function generate(prompt, dataUri) {
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt,
+      prompt: prompt + COLOUR_SUFFIX,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -131,7 +145,7 @@ async function generate(prompt, dataUri) {
     console.warn("nano-banana failed, falling back to FLUX:", e.message);
   }
   return await fal("fal-ai/flux/dev", {
-    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork`,
+    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork${COLOUR_SUFFIX}`,
     image_size: { width: 1152, height: 1536 },
     num_inference_steps: 32,
     guidance_scale: 3.5,
@@ -144,11 +158,8 @@ async function generate(prompt, dataUri) {
 async function toPrintCanvas(url) {
   const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
 
-  const src = sharp(buf).ensureAlpha();
-  const stats = await src.stats();
-  if (stats.isOpaque) {
-    console.warn("[reimagine] WARNING: image has no transparency");
-  }
+  const stats = await sharp(buf).ensureAlpha().stats();
+  if (stats.isOpaque) console.warn("[reimagine] WARNING: image has no transparency");
 
   const inner = await sharp(buf)
     .ensureAlpha()
@@ -244,8 +255,7 @@ export default async function handler(req, res) {
     let art = await generate(prompt, image);
     step("generate");
 
-    // upscale BEFORE cutting out — RealESRGAN drops the alpha channel,
-    // so it must never run on a transparent image.
+    // upscale BEFORE cutting out — RealESRGAN drops the alpha channel
     if (Date.now() - t0 < 22000) {
       try {
         art = await fal("fal-ai/esrgan", {
@@ -261,7 +271,6 @@ export default async function handler(req, res) {
       console.warn("[reimagine] upscale skipped - no time budget");
     }
 
-    // background removal is the LAST image operation, so alpha survives
     const cutout = await fal("fal-ai/birefnet", { image_url: art });
     step("cutout");
 
