@@ -17,13 +17,15 @@ const CLAUDE_MODEL = "claude-sonnet-5";
 // לכל אחד מבנה קלט משלו, כי כל ספק מצפה לשדות אחרים.
 // ─────────────────────────────────────────────────────────────
 const TTS_CANDIDATES = [
-  {
-    model: "fal-ai/elevenlabs/tts/multilingual-v2",
-    input: (t, v) => ({ text: t, voice: v || "Rachel", stability: 0.45, similarity_boost: 0.75 }),
-  },
+  // v3 נבחר בבדיקה מול עברית מנוקדת 2026-08-02: אפס טעויות הגייה,
+  // מבטא קל בלבד. אל תחליף את הסדר בלי בדיקת אוזן מחדש.
   {
     model: "fal-ai/elevenlabs/tts/eleven-v3",
     input: (t, v) => ({ text: t, voice: v || "Rachel" }),
+  },
+  {
+    model: "fal-ai/elevenlabs/tts/multilingual-v2",
+    input: (t, v) => ({ text: t, voice: v || "Rachel", stability: 0.45, similarity_boost: 0.75 }),
   },
   {
     model: "fal-ai/minimax/speech-02-hd",
@@ -36,9 +38,30 @@ const TTS_CANDIDATES = [
 ];
 
 const MODELS = {
-  avatar: "fal-ai/hedra/character-2",
   presenter: "fal-ai/flux/dev",
 };
+
+// אווטאר: תמונה סטטית + אודיו → וידאו מדבר.
+// אותה שיטה כמו בקריינות — מנסים לפי הסדר עד שאחד עונה,
+// כי fal מחליפים מזהי מודלים כל הזמן.
+const AVATAR_CANDIDATES = [
+  {
+    model: "fal-ai/hedra/character-2",
+    input: (img, aud) => ({ image_url: img, audio_url: aud, aspect_ratio: "9:16" }),
+  },
+  {
+    model: "fal-ai/infinitalk",
+    input: (img, aud) => ({ image_url: img, audio_url: aud, resolution: "480p" }),
+  },
+  {
+    model: "fal-ai/ai-avatar",
+    input: (img, aud) => ({ image_url: img, audio_url: aud }),
+  },
+  {
+    model: "fal-ai/sonic",
+    input: (img, aud) => ({ image_url: img, audio_url: aud }),
+  },
+];
 
 // ─────────────────────────────────────────────────────────────
 
@@ -57,9 +80,12 @@ export default async function handler(req, res) {
       case "product":   return res.json(await getProduct(body));
       case "script":    return res.json(await writeScript(body));
       case "voice":     return res.json(await submitVoice(body));
-      case "engines":   return res.json({ engines: TTS_CANDIDATES.map((c) => c.model) });
+      case "engines":   return res.json({
+        engines: TTS_CANDIDATES.map((c) => c.model),
+        avatars: AVATAR_CANDIDATES.map((c) => c.model),
+      });
       case "presenter": return res.json(await falSubmit(MODELS.presenter, presenterInput(body)));
-      case "avatar":    return res.json(await falSubmit(MODELS.avatar, avatarInput(body)));
+      case "avatar":    return res.json(await submitAvatar(body));
       case "status":    return res.json(await falStatus(body));
       default:          return res.status(400).json({ error: "action לא מוכר: " + action });
     }
@@ -391,8 +417,37 @@ function presenterInput({ describe = "", vertical = true }) {
   };
 }
 
-function avatarInput({ imageUrl, audioUrl }) {
+async function submitAvatar({ imageUrl, audioUrl, model = null }) {
+  if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!imageUrl) throw new Error("חסרה תמונת דובר");
   if (!audioUrl) throw new Error("חסר קובץ קריינות");
-  return { image_url: imageUrl, audio_url: audioUrl, aspect_ratio: "9:16" };
+
+  const list = model
+    ? AVATAR_CANDIDATES.filter((c) => c.model === model)
+    : AVATAR_CANDIDATES;
+
+  if (model && list.length === 0) throw new Error("מודל אווטאר לא מוכר: " + model);
+
+  const failures = [];
+
+  for (const cand of list) {
+    try {
+      const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
+        method: "POST",
+        body: JSON.stringify(cand.input(imageUrl, audioUrl)),
+      });
+      return {
+        requestId: data.request_id,
+        model: cand.model,
+        statusUrl: data.status_url || null,
+        responseUrl: data.response_url || null,
+        queued: true,
+      };
+    } catch (e) {
+      failures.push(`${cand.model} → ${e.message}`);
+      if (e.status === 401 || e.status === 403) break;
+    }
+  }
+
+  throw new Error("אף מודל אווטאר לא עבד.\n" + failures.join("\n"));
 }
