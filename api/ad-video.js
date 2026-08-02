@@ -102,9 +102,105 @@ async function falFetch(url, options = {}) {
 
 // ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
 
-async function submitVoice({ text, voiceId }) {
+// ─── ניקוד אוטומטי ────────────────────────────────────────────
+// עברית נכתבת בלי ניקוד, אז מנוע קריינות צריך לנחש איך לבטא כל
+// מילה — ובעברית הוא מנחש רע. מנקדים לפני, ואין מה לנחש.
+// ראשי: Nakdan של דיקטה. גיבוי: Claude.
+
+async function vocalize(text) {
+  try {
+    const r = await fetch("https://nakdan-5-0.loadbalancer.dicta.org.il/api", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task: "nakdan", data: text, genre: "modern", addmorph: false }),
+    });
+
+    const raw = await r.text();
+    if (!r.ok || !raw) throw new Error("dicta " + r.status);
+
+    const out = JSON.parse(raw);
+
+    // דיקטה מחזירה מערך של מילים; לכל אחת אפשרויות ניקוד מדורגות.
+    // לוקחים את הראשונה, ומשמרים רווחים וסימני פיסוק כמו שהם.
+    const words = Array.isArray(out) ? out : out.data;
+    if (!Array.isArray(words)) throw new Error("מבנה תשובה לא מוכר");
+
+    const built = words
+      .map((w) => {
+        if (typeof w === "string") return w;
+        if (w.sep) return w.word ?? "";
+        const opt = w.options?.[0];
+        const v = typeof opt === "string" ? opt : opt?.w ?? opt?.word;
+        return (v || w.word || "").replace(/\|/g, "");
+      })
+      .join("");
+
+    if (built.trim() && /[\u0591-\u05C7]/.test(built)) {
+      return { text: built, method: "dicta" };
+    }
+    throw new Error("דיקטה לא החזירה ניקוד");
+  } catch (e) {
+    return await vocalizeWithClaude(text, e.message);
+  }
+}
+
+async function vocalizeWithClaude(text, why = "") {
+  if (!process.env.ANTHROPIC_API_KEY) return { text, method: "none", note: why };
+
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 1500,
+        messages: [
+          {
+            role: "user",
+            content:
+              "נקד את הטקסט הבא בניקוד מלא ותקני, בעברית ישראלית מודרנית.\n" +
+              "החזר אך ורק את הטקסט המנוקד — בלי הסבר, בלי הקדמה, בלי מרכאות.\n" +
+              "אל תשנה אף מילה ואל תוסיף מילים. רק ניקוד.\n\n" +
+              text,
+          },
+        ],
+      }),
+    });
+
+    if (!r.ok) return { text, method: "none", note: why };
+
+    const data = await r.json();
+    const out = (data.content || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+
+    if (out && /[\u0591-\u05C7]/.test(out)) return { text: out, method: "claude", note: why };
+    return { text, method: "none", note: why };
+  } catch {
+    return { text, method: "none", note: why };
+  }
+}
+
+// ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
+
+async function submitVoice({ text, voiceId, niqqud = false }) {
   if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!text) throw new Error("חסר טקסט לקריינות");
+
+  let spoken = text;
+  let niqqudInfo = null;
+
+  if (niqqud) {
+    const v = await vocalize(text);
+    spoken = v.text;
+    niqqudInfo = { method: v.method, text: v.text };
+  }
 
   const failures = [];
 
@@ -112,13 +208,14 @@ async function submitVoice({ text, voiceId }) {
     try {
       const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
         method: "POST",
-        body: JSON.stringify(cand.input(text, voiceId)),
+        body: JSON.stringify(cand.input(spoken, voiceId)),
       });
       return {
         requestId: data.request_id,
         model: cand.model,
         statusUrl: data.status_url || null,
         responseUrl: data.response_url || null,
+        niqqud: niqqudInfo,
         queued: true,
       };
     } catch (e) {
