@@ -1,8 +1,7 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v2
-// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> background removal
-//           -> 4500x5400 @300DPI transparent PNG -> Cloudinary
-// env: FAL_KEY, ANTHROPIC_API_KEY
+// api/reimagine.js — "עיצוב מחדש" v3
+// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> bg removal
+//           -> 2x upscale -> centered 4500x5400 @300DPI transparent PNG -> Cloudinary
 
 import sharp from "sharp";
 
@@ -61,19 +60,26 @@ async function fal(model, input) {
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
 You will be shown an image containing a printed design.
 
-Your job is to write a prompt for a NEW, DIFFERENT design that is only INSPIRED
-by the one shown — same general style, mood and palette family — but NOT a copy.
+Write a prompt for a NEW, DIFFERENT design that is only INSPIRED by the one shown —
+same general style and mood — but NOT a copy.
 
 Hard rules:
-- If the design has a specific character, animal or figure, you MUST swap it for
-  a different one in the same category. Never describe the original subject directly.
+- If the design has a specific character, animal or figure, you MUST swap it for a
+  different one in the same category. Never describe the original subject directly.
 - Change at least three of: pose, scene, props, outfit, palette accent, camera angle.
 - NEVER include readable text, book titles, logos, brand names, real people, or
-  recognisable copyrighted characters. If the reference contains a book, product or
-  brand, replace it with a generic unbranded object.
+  recognisable copyrighted characters. Replace any branded object with a generic one.
 - Do not mention the t-shirt, garment, fabric, folds, model or photo background.
+
+Garment compatibility (critical — the print must read on BOTH white and black shirts):
+- Require bold, confident dark outlines on every element.
+- Forbid pure white and near-white fills; specify cream, warm beige, soft grey or
+  saturated colour instead, so nothing disappears on a white shirt.
+- Require mid-to-deep saturated tones with clear value contrast between neighbouring
+  shapes — no pale washed-out areas.
+
 - Write 2-4 sentences as a direct image-generation prompt in English.
-- End with exactly: "isolated subject on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, sharp clean outlines, high contrast rich colours, commercial illustration quality, full subject inside frame with generous margins on all sides, vertical 4:5 composition"
+- End with exactly: "isolated subject centered in frame on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, bold dark outlines, no pure white fills, rich saturated colours with strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
 - Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -125,7 +131,7 @@ async function generate(prompt, dataUri) {
     console.warn("nano-banana failed, falling back to FLUX:", e.message);
   }
   return await fal("fal-ai/flux/dev", {
-    prompt: `${prompt}, rich modern illustration, soft shading with highlights, bold clean linework, vibrant colors, high detail, isolated subject, t-shirt print artwork`,
+    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork`,
     image_size: { width: 1152, height: 1536 },
     num_inference_steps: 32,
     guidance_scale: 3.5,
@@ -134,13 +140,14 @@ async function generate(prompt, dataUri) {
   });
 }
 
-/* ---------------- step 3: print canvas ---------------- */
+/* ---------------- step 4: centered print canvas ---------------- */
 async function toPrintCanvas(url) {
   const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
 
+  // threshold trim so soft anti-aliased edges don't skew the centering
   const inner = await sharp(buf)
     .ensureAlpha()
-    .trim()
+    .trim({ threshold: 12 })
     .resize(Math.round(CANVAS_W * SAFE), Math.round(CANVAS_H * SAFE), {
       fit: "inside",
       kernel: "lanczos3",
@@ -150,6 +157,7 @@ async function toPrintCanvas(url) {
     .toBuffer();
 
   const m = await sharp(inner).metadata();
+  console.log(`[reimagine] artwork ${m.width}x${m.height} on ${CANVAS_W}x${CANVAS_H}`);
 
   return sharp({
     create: {
@@ -234,7 +242,24 @@ export default async function handler(req, res) {
     const cutout = await fal("fal-ai/birefnet", { image_url: generated });
     step("cutout");
 
-    let canvas = await toPrintCanvas(cutout);
+    // sharpen before enlarging — skipped automatically if we are running late
+    let source = cutout;
+    if (Date.now() - t0 < 22000) {
+      try {
+        source = await fal("fal-ai/esrgan", {
+          image_url: cutout,
+          scale: 2,
+          model: "RealESRGAN_x4plus",
+        });
+        step("upscale");
+      } catch (e) {
+        console.warn("upscale skipped:", e.message);
+      }
+    } else {
+      console.warn("[reimagine] upscale skipped - no time budget");
+    }
+
+    let canvas = await toPrintCanvas(source);
     console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
     canvas = await fitUploadSize(canvas);
     step("canvas");
