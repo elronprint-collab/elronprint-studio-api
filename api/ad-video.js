@@ -57,6 +57,7 @@ export default async function handler(req, res) {
       case "product":   return res.json(await getProduct(body));
       case "script":    return res.json(await writeScript(body));
       case "voice":     return res.json(await submitVoice(body));
+      case "engines":   return res.json({ engines: TTS_CANDIDATES.map((c) => c.model) });
       case "presenter": return res.json(await falSubmit(MODELS.presenter, presenterInput(body)));
       case "avatar":    return res.json(await falSubmit(MODELS.avatar, avatarInput(body)));
       case "status":    return res.json(await falStatus(body));
@@ -189,7 +190,7 @@ async function vocalizeWithClaude(text, why = "") {
 
 // ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
 
-async function submitVoice({ text, voiceId, niqqud = false }) {
+async function submitVoice({ text, voiceId, niqqud = false, model = null }) {
   if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!text) throw new Error("חסר טקסט לקריינות");
 
@@ -204,7 +205,14 @@ async function submitVoice({ text, voiceId, niqqud = false }) {
 
   const failures = [];
 
-  for (const cand of TTS_CANDIDATES) {
+  // אם נשלח model מפורש — בודקים רק אותו. אחרת עוברים על כל הרשימה.
+  const list = model
+    ? TTS_CANDIDATES.filter((c) => c.model === model)
+    : TTS_CANDIDATES;
+
+  if (model && list.length === 0) throw new Error("מודל לא מוכר: " + model);
+
+  for (const cand of list) {
     try {
       const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
         method: "POST",
