@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v15 (edge cleanup for dark garments)
+// api/reimagine.js — "עיצוב מחדש" v16 (detects drawn white outlines)
 
 import sharp from "sharp";
 
@@ -11,8 +11,9 @@ const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
 const EDGE_LIMIT = 0.015;
 const PALE_LIMIT = 0.12;
-const ERODE_RADIUS = 2;    // px of alpha shaved off the outline
-const ALPHA_FLOOR = 130;   // anything fainter than this is fringe, not artwork
+const RIM_LIMIT  = 0.35;
+const ERODE_RADIUS = 2;
+const ALPHA_FLOOR = 130;
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -74,11 +75,15 @@ garment itself, the room, the street, the sky, the lighting and the photographic
 of the photo. The subject, the rendering technique, the colours and the text you
 describe must all come from the printed graphic alone. NEVER describe the person
 wearing the shirt — that is the single worst mistake you can make here.
-If the printed graphic is small, partly hidden by folds or hard to read, describe what
-you can see of it and infer the rest; still never fall back to describing the wearer.
 
 Now write a prompt for a NEW design in the SAME rendering style and the SAME subject
 category as THAT GRAPHIC — but a clearly different picture.
+
+NO OUTLINE AROUND THE ARTWORK. THIS IS A HARD RULE.
+Do not describe a white outline, a light contour, a keyline, a stroke, a glow, a die-cut
+edge or any band of colour tracing the silhouette of the subject or the lettering. The
+artwork ends exactly where the drawing ends. State plainly that there is no outline
+around the artwork.
 
 STYLE RULE — OVERRIDES THE COLOUR RULE BELOW.
 Identify how the GRAPHIC is rendered, and reproduce that exact technique:
@@ -112,22 +117,21 @@ TEXT RULE.
     word.
   * Never reuse the original words, and never use a real brand, band, company, book or
     film name, or a known trademarked slogan.
+  * Solid saturated letters with no outline, no stroke and no drop shadow around them.
   * Place it so it does not overlap the subject's face.
 
-NO BACKGROUND, NO STICKER BORDER.
+NO BACKGROUND.
 The subject stands alone on plain white that will be deleted. Never describe a setting,
-room, street, city, furniture, sky, wall, floor, panel, rectangle or scene. This is NOT
-a sticker — no white outline, no die-cut edge, no border around the artwork.
+room, street, city, furniture, sky, wall, floor, panel, rectangle or scene.
 
 COLOUR RULE — subordinate to the style rule.
 The print must read on a white shirt as well as black.
-- For ILLUSTRATED styles: bold dark outlines on every element, saturated mid-to-deep
+- For ILLUSTRATED styles: dark linework inside the drawing, saturated mid-to-deep
   colours, no large white or cream fills, strong contrast between adjacent shapes.
-- For PHOTOREALISTIC style: no drawn outlines. Instead specify deep saturated clothing
+- For PHOTOREALISTIC style: no drawn linework. Instead specify deep saturated clothing
   and hair, dramatic directional lighting and strong tonal contrast.
-- In both cases avoid neon, glow and pale fluorescent colours — they only read on dark
-  garments. Lettering in particular must be a deep saturated colour, never pale cyan,
-  pale yellow or white.
+- In both cases avoid neon, glow and pale fluorescent colours. Lettering in particular
+  must be a deep saturated colour, never pale cyan, pale yellow or white.
 
 COMPOSITION RULE.
 The entire subject, including raised arms, hair and lettering, sits well inside the
@@ -159,7 +163,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -187,10 +191,10 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, nothing beside the subject, no extra objects, no props, no plants, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, no neon glow, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, nothing beside the subject, no extra objects, no props, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
-  ", bold dark outlines on every element, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
+  ", dark linework inside the drawing, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
 
 const PHOTOREAL_SUFFIX =
   ", photorealistic, sharp photographic detail, realistic skin texture, realistic fabric, dramatic directional lighting, strong tonal contrast, deep saturated clothing, no illustration, no anime, no cartoon, no vector art, no drawn outlines, no painterly brushwork" + COMMON_SUFFIX;
@@ -199,7 +203,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -227,14 +231,14 @@ async function inspect(url) {
     .toBuffer({ resolveWithObject: true });
 
   const { width: w, height: h, channels: ch } = info;
-  const at = (x, y) => (y * w + x) * ch;
+  const A = (x, y) => data[(y * w + x) * ch + 3];
 
   let edgeHits = 0, edgeTotal = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       if (!(x < 2 || y < 2 || x >= w - 2 || y >= h - 2)) continue;
       edgeTotal++;
-      if (data[at(x, y) + 3] > 128) edgeHits++;
+      if (A(x, y) > 128) edgeHits++;
     }
   }
 
@@ -245,14 +249,28 @@ async function inspect(url) {
     if (data[i] > 224 && data[i + 1] > 224 && data[i + 2] > 224) pale++;
   }
 
+  // a drawn white outline shows up as near-white pixels sitting on the silhouette
+  let boundary = 0, whiteRim = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * ch;
+      if (data[i + 3] < 200) continue;
+      if (A(x - 1, y) > 60 && A(x + 1, y) > 60 && A(x, y - 1) > 60 && A(x, y + 1) > 60) continue;
+      boundary++;
+      if (data[i] > 215 && data[i + 1] > 215 && data[i + 2] > 215) whiteRim++;
+    }
+  }
+
   const edgeRatio = edgeTotal ? edgeHits / edgeTotal : 0;
   const paleRatio = solid ? pale / solid : 0;
+  const rimRatio = boundary ? whiteRim / boundary : 0;
   const report = {
-    edgeRatio, paleRatio,
+    edgeRatio, paleRatio, rimRatio,
     cropped: edgeRatio > EDGE_LIMIT,
     tooPale: paleRatio > PALE_LIMIT,
+    outlined: rimRatio > RIM_LIMIT,
   };
-  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale}`);
+  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} rim=${rimRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale} outlined=${report.outlined}`);
   return report;
 }
 
@@ -264,14 +282,16 @@ function retryHint(qc) {
   if (qc.tooPale) {
     parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Use much deeper, more saturated colours and stronger tonal contrast. Keep the same rendering technique and the same kind of subject");
   }
+  if (qc.outlined) {
+    parts.push("CRITICAL: the previous attempt had a white outline traced around the artwork and the lettering, like a sticker. Draw NO outline, NO keyline, NO stroke and NO glow around the subject or the letters. The artwork must end exactly where the drawing ends");
+  }
   return ". " + parts.join(". ") + ".";
 }
 
 /* ---------------- edge cleanup ----------------
-   Background removal leaves a faint light halo one or two pixels wide. On a black
-   garment that halo prints as a visible grey outline. This shaves it off: drop very
-   faint alpha, then erode the alpha channel by a couple of pixels (separable min
-   filter, so it stays fast even on large images). */
+   Background removal leaves a faint light halo a pixel or two wide, which prints as a
+   grey outline on a black garment. Drop very faint alpha, then erode the alpha channel
+   with a separable min filter. */
 async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h, channels: ch } = info;
@@ -415,8 +435,10 @@ export default async function handler(req, res) {
     step("attempt1");
 
     let qc = await inspect(cutout);
+    const bad = (q) => q.cropped || q.tooPale || q.outlined;
+    const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0) + (q.outlined ? 1 : 0);
 
-    if ((qc.cropped || qc.tooPale) && elapsed() < 30000) {
+    if (bad(qc) && elapsed() < 30000) {
       console.log("[reimagine] QC failed - regenerating with corrections");
       try {
         const art2 = await generate(prompt + retryHint(qc), style, image);
@@ -424,7 +446,6 @@ export default async function handler(req, res) {
         const qc2 = await inspect(cut2);
         step("attempt2");
 
-        const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0);
         if (score(qc2) < score(qc)) {
           art = art2; cutout = cut2; qc = qc2;
           console.log("[reimagine] retry accepted");
@@ -434,7 +455,7 @@ export default async function handler(req, res) {
       } catch (e) {
         console.warn("retry failed:", e.message);
       }
-    } else if (qc.cropped || qc.tooPale) {
+    } else if (bad(qc)) {
       console.warn("[reimagine] QC failed but no time budget for a retry");
     }
 
@@ -469,7 +490,11 @@ export default async function handler(req, res) {
       height: CANVAS_H,
       dpi: DPI,
       style,
-      quality: { edge: +qc.edgeRatio.toFixed(3), pale: +qc.paleRatio.toFixed(3) },
+      quality: {
+        edge: +qc.edgeRatio.toFixed(3),
+        pale: +qc.paleRatio.toFixed(3),
+        rim: +qc.rimRatio.toFixed(3),
+      },
     });
   } catch (err) {
     console.error(err);
