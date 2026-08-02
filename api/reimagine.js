@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v7
+// api/reimagine.js — "עיצוב מחדש" v8 (with automatic quality retry)
 
 import sharp from "sharp";
 
@@ -8,6 +8,9 @@ export const config = { maxDuration: 60 };
 const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.90, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
+
+const EDGE_LIMIT = 0.015;   // >1.5% of border pixels opaque = artwork is cut off
+const PALE_LIMIT = 0.12;    // >12% near-white = will vanish on a white shirt
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -70,31 +73,37 @@ new subject and a new situation. Specifically:
 - Never reuse the reference's pose, camera angle, props, or composition.
 - If you find yourself describing what is in the reference image, stop and invent
   something else in the same spirit.
-- Consider replacing a human subject with an animal, plant or object in the same style —
-  this is often the strongest result.
+- Prefer replacing a human subject with an animal, plant or object in the same style —
+  this gives full control over colour and is usually the strongest result.
 
 NO BACKGROUND, NO STICKER BORDER.
 The subject stands alone on plain white that will be deleted. Never describe a setting,
 room, furniture, pillow, bed, sky, wall, floor, panel, rectangle or scene. Equally
-important: this is NOT a sticker — there must be no white outline, no contour, no
-die-cut edge, no border of any kind drawn around the artwork.
+important: this is NOT a sticker — no white outline, no contour, no die-cut edge, no
+border of any kind drawn around the artwork.
 
 COLOUR RULE — applies to the subject only.
-The print must be visible on a WHITE shirt as well as black. White, cream, ivory or
-pale grey areas on the subject vanish on a white shirt. Therefore:
+White, cream, ivory or pale grey areas on the subject vanish on a white shirt. So:
 - Name an explicit saturated mid-to-deep colour for every large part of the subject.
-- No large white, cream or very pale area anywhere on the subject.
+- No large white, cream or very pale area anywhere on the subject. If the natural
+  subject would be white (swan, polar bear, fox chest, foam, porcelain), recolour it
+  to a saturated alternative or choose a different subject.
 - Ignore the reference's palette if it is pale or pastel — deepen it substantially.
 - No neon or glow effects — they only read on dark garments.
 - Bold dark outlines on every element, with clear darkness differences between
-  neighbouring shapes so the artwork reads from a distance.
+  neighbouring shapes.
+
+COMPOSITION RULE.
+The entire subject, including raised arms, tails, wings and held objects, must sit well
+inside the frame with clear empty space on all four sides. Nothing may touch or cross
+the frame edge. Prefer compact, centred compositions over tall narrow ones.
 
 Also: no readable text, no book titles, no logos, no brand names, no real people, no
 recognisable copyrighted characters.
 
 Write 2-4 sentences as a direct image-generation prompt in English, naming the
 saturated colour of each major part of the subject.
-End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills on the subject, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
+End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills on the subject, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
 Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -113,7 +122,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Borrow ONLY the art style. Invent a completely different subject and situation. No background, no sticker border, saturated colours." },
+          { type: "text", text: "Borrow ONLY the art style. Invent a completely different subject and situation. No background, no sticker border, saturated colours, nothing touching the frame edge." },
         ],
       }],
     }),
@@ -140,7 +149,6 @@ const STYLE_SUFFIX =
 
 async function generate(prompt, dataUri) {
   try {
-    // low strength keeps the style but frees the model from copying the layout
     return await fal("fal-ai/nano-banana/edit", {
       prompt: `Use the reference ONLY for art style. Draw a completely different subject: ${prompt}${STYLE_SUFFIX}`,
       image_urls: [dataUri],
@@ -160,7 +168,57 @@ async function generate(prompt, dataUri) {
   });
 }
 
-/* ---------------- step 5: centered print canvas ---------------- */
+/* ---------------- quality control ---------------- */
+async function inspect(url) {
+  const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+  const { data, info } = await sharp(buf)
+    .ensureAlpha()
+    .resize(220, 220, { fit: "inside" })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const { width: w, height: h, channels: ch } = info;
+  const at = (x, y) => (y * w + x) * ch;
+
+  let edgeHits = 0, edgeTotal = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!(x < 2 || y < 2 || x >= w - 2 || y >= h - 2)) continue;
+      edgeTotal++;
+      if (data[at(x, y) + 3] > 128) edgeHits++;
+    }
+  }
+
+  let solid = 0, pale = 0;
+  for (let i = 0; i < data.length; i += ch) {
+    if (data[i + 3] < 200) continue;
+    solid++;
+    if (data[i] > 224 && data[i + 1] > 224 && data[i + 2] > 224) pale++;
+  }
+
+  const edgeRatio = edgeTotal ? edgeHits / edgeTotal : 0;
+  const paleRatio = solid ? pale / solid : 0;
+  const report = {
+    edgeRatio, paleRatio,
+    cropped: edgeRatio > EDGE_LIMIT,
+    tooPale: paleRatio > PALE_LIMIT,
+  };
+  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale}`);
+  return report;
+}
+
+function retryHint(qc) {
+  const parts = [];
+  if (qc.cropped) {
+    parts.push("CRITICAL: the previous attempt was cut off by the frame. Zoom out. Make the subject noticeably smaller and fully contained, with wide empty margins on every side. Nothing may touch the edge");
+  }
+  if (qc.tooPale) {
+    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Replace every white, cream, ivory and pale grey area with a deep saturated colour. Darken the whole palette substantially");
+  }
+  return ". " + parts.join(". ") + ".";
+}
+
+/* ---------------- print canvas ---------------- */
 async function toPrintCanvas(url) {
   const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
 
@@ -253,21 +311,52 @@ export default async function handler(req, res) {
 
   try {
     const t0 = Date.now();
-    const step = (name) => console.log(`[reimagine] ${name}: ${Date.now() - t0}ms`);
+    const elapsed = () => Date.now() - t0;
+    const step = (name) => console.log(`[reimagine] ${name}: ${elapsed()}ms`);
 
     const prompt = await analyzeAndReimagine(base64Data, mediaType);
     step("analyze");
 
+    // attempt 1
     let art = await generate(prompt, image);
-    step("generate");
+    let cutout = await fal("fal-ai/birefnet", { image_url: art });
+    step("attempt1");
 
-    if (Date.now() - t0 < 22000) {
+    let qc = await inspect(cutout);
+
+    // one corrective retry, only if there is time for it
+    if ((qc.cropped || qc.tooPale) && elapsed() < 30000) {
+      console.log("[reimagine] QC failed - regenerating with corrections");
       try {
-        art = await fal("fal-ai/esrgan", {
+        const art2 = await generate(prompt + retryHint(qc), image);
+        const cut2 = await fal("fal-ai/birefnet", { image_url: art2 });
+        const qc2 = await inspect(cut2);
+        step("attempt2");
+
+        // keep attempt 2 only if it actually improved
+        const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0);
+        if (score(qc2) < score(qc)) {
+          art = art2; cutout = cut2; qc = qc2;
+          console.log("[reimagine] retry accepted");
+        } else {
+          console.log("[reimagine] retry rejected - keeping first attempt");
+        }
+      } catch (e) {
+        console.warn("retry failed:", e.message);
+      }
+    } else if (qc.cropped || qc.tooPale) {
+      console.warn("[reimagine] QC failed but no time budget for a retry");
+    }
+
+    // upscale the accepted art, then cut out again (ESRGAN drops alpha)
+    if (elapsed() < 40000) {
+      try {
+        const big = await fal("fal-ai/esrgan", {
           image_url: art,
           scale: 2,
           model: "RealESRGAN_x4plus",
         });
+        cutout = await fal("fal-ai/birefnet", { image_url: big });
         step("upscale");
       } catch (e) {
         console.warn("upscale skipped:", e.message);
@@ -275,9 +364,6 @@ export default async function handler(req, res) {
     } else {
       console.warn("[reimagine] upscale skipped - no time budget");
     }
-
-    const cutout = await fal("fal-ai/birefnet", { image_url: art });
-    step("cutout");
 
     let canvas = await toPrintCanvas(cutout);
     console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
@@ -293,6 +379,7 @@ export default async function handler(req, res) {
       width: CANVAS_W,
       height: CANVAS_H,
       dpi: DPI,
+      quality: { edge: +qc.edgeRatio.toFixed(3), pale: +qc.paleRatio.toFixed(3) },
     });
   } catch (err) {
     console.error(err);
