@@ -145,9 +145,10 @@ async function toPrintCanvas(url) {
     .trim()
     .resize(Math.round(CANVAS_W * SAFE), Math.round(CANVAS_H * SAFE), {
       fit: "inside",
+      kernel: "lanczos3",
       background: { r: 0, g: 0, b: 0, alpha: 0 },
     })
-    .png()
+    .png({ compressionLevel: 1 })
     .toBuffer();
 
   const m = await sharp(inner).metadata();
@@ -164,7 +165,7 @@ async function toPrintCanvas(url) {
       top: Math.round((CANVAS_H - m.height) / 2),
     }])
     .withMetadata({ density: DPI })
-    .png({ compressionLevel: 6 })
+    .png({ compressionLevel: 3, effort: 1 })
     .toBuffer();
 }
 
@@ -236,21 +237,7 @@ export default async function handler(req, res) {
     const cutout = await fal("fal-ai/birefnet", { image_url: generated });
     step("cutout");
 
-    let upscaled = cutout;
-    if (Date.now() - t0 < 18000) {
-      try {
-        upscaled = await fal("fal-ai/esrgan", {
-          image_url: cutout,
-          scale: 2,
-          model: "RealESRGAN_x4plus",
-        });
-        step("upscale");
-      } catch (e) {
-        console.warn("upscale skipped:", e.message);
-      }
-    } else {
-      console.warn("[reimagine] upscale skipped - no time budget");
-    }
+    const upscaled = cutout;
 
     let canvas = await toPrintCanvas(upscaled);
     console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
