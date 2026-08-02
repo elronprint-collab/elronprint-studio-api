@@ -53,11 +53,15 @@ const AVATAR_CANDIDATES = [
     input: (img, aud, prompt) => ({
       image_url: img, audio_url: aud, prompt, aspect_ratio: "9:16",
     }),
+    // hedra גוזר את האורך מהאודיו לבד, אין לו פרמטר שניות
   },
   {
+    // num_frames ~25 fps. ברירת המחדל של המודל היא ~5 שניות.
+    // כל שנייה נוספת עולה בזמן ובכסף כמעט ליניארית.
     model: "fal-ai/infinitalk",
-    input: (img, aud, prompt) => ({
+    input: (img, aud, prompt, seconds) => ({
       image_url: img, audio_url: aud, prompt, resolution: "480p",
+      ...(seconds ? { num_frames: Math.min(Math.round(seconds * 25), 500) } : {}),
     }),
   },
   {
@@ -428,7 +432,7 @@ function presenterInput({ describe = "", vertical = true }) {
   };
 }
 
-async function submitAvatar({ imageUrl, audioUrl, model = null, prompt = null }) {
+async function submitAvatar({ imageUrl, audioUrl, model = null, prompt = null, seconds = null, extra = null }) {
   if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!imageUrl) throw new Error("חסרה תמונת דובר");
   if (!audioUrl) throw new Error("חסר קובץ קריינות");
@@ -445,13 +449,18 @@ async function submitAvatar({ imageUrl, audioUrl, model = null, prompt = null })
     try {
       const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
         method: "POST",
-        body: JSON.stringify(cand.input(imageUrl, audioUrl, prompt || DEFAULT_AVATAR_PROMPT)),
+        body: JSON.stringify({
+          ...cand.input(imageUrl, audioUrl, prompt || DEFAULT_AVATAR_PROMPT, seconds),
+          ...(extra || {}),   // מאפשר לנסות פרמטרים חדשים בלי לפרוס מחדש
+        }),
       });
       return {
         requestId: data.request_id,
         model: cand.model,
         statusUrl: data.status_url || null,
         responseUrl: data.response_url || null,
+        // מי נכשל לפניו ולמה — כדי שלא נעבוד בעיוורון
+        skipped: failures,
         queued: true,
       };
     } catch (e) {
