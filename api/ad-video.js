@@ -1,33 +1,44 @@
-// api/ad-video.js
+// api/ad-video.js  —  גרסה 2
 // ElronPrint — מנוע פרסומות AI (Creatify clone)
-// Endpoint אחד, מספר פעולות. כל קריאה מהדפדפן שולחת { action: "..." }
 //
-// פעולות:
-//   product  → שולף נתוני מוצר מהחנות לפי URL
-//   script   → Claude כותב תסריט פרסומת בעברית
-//   presenter→ יוצר תמונת דוברת/דובר (flux) — רק אם המשתמש לא העלה תמונה
-//   voice    → קריינות עברית (TTS)
-//   avatar   → אווטאר מדבר (תמונה + אודיו → וידאו)
-//   status   → בדיקת סטטוס של משימה בתור של fal
+// שינויים מגרסה 1:
+//   - שגיאות של fal מדווחות במלואן (קוד + טקסט) במקום "Unexpected end of JSON input"
+//   - הקריינות מנסה כמה מודלים בזה אחר זה עד שאחד מצליח
 //
 // משתני סביבה נדרשים (כבר קיימים ב-Vercel): FAL_KEY, ANTHROPIC_API_KEY
 
 export const config = { maxDuration: 60 };
 
-// ─────────────────────────────────────────────────────────────
-// מזהי מודלים — כל שינוי עתידי נעשה כאן בלבד.
-// חשוב: fal מחליפים/מעדכנים מודלים כל הזמן. אם קריאה מחזירה 404,
-// תיכנס ל-fal.ai/models, תעתיק את המזהה החדש ותחליף כאן.
-// ─────────────────────────────────────────────────────────────
-const MODELS = {
-  tts:       "fal-ai/elevenlabs/tts/multilingual-v2", // תומך עברית
-  avatar:    "fal-ai/hedra/character-2",              // תמונה + אודיו → וידאו מדבר
-  presenter: "fal-ai/flux/dev",                       // יצירת תמונת דובר
-};
-
+const FAL_QUEUE = "https://queue.fal.run";
 const CLAUDE_MODEL = "claude-sonnet-5";
 
-const FAL_QUEUE = "https://queue.fal.run";
+// ─────────────────────────────────────────────────────────────
+// מועמדים לקריינות עברית — מנוסים לפי הסדר עד שאחד עונה.
+// לכל אחד מבנה קלט משלו, כי כל ספק מצפה לשדות אחרים.
+// ─────────────────────────────────────────────────────────────
+const TTS_CANDIDATES = [
+  {
+    model: "fal-ai/elevenlabs/tts/multilingual-v2",
+    input: (t, v) => ({ text: t, voice: v || "Rachel", stability: 0.45, similarity_boost: 0.75 }),
+  },
+  {
+    model: "fal-ai/elevenlabs/tts/eleven-v3",
+    input: (t, v) => ({ text: t, voice: v || "Rachel" }),
+  },
+  {
+    model: "fal-ai/minimax/speech-02-hd",
+    input: (t, v) => ({ text: t, voice_setting: { voice_id: v || "Wise_Woman", speed: 1, vol: 1 } }),
+  },
+  {
+    model: "fal-ai/minimax-tts/text-to-speech",
+    input: (t, v) => ({ text: t, voice_setting: { voice_id: v || "Wise_Woman" } }),
+  },
+];
+
+const MODELS = {
+  avatar: "fal-ai/hedra/character-2",
+  presenter: "fal-ai/flux/dev",
+};
 
 // ─────────────────────────────────────────────────────────────
 
@@ -45,8 +56,8 @@ export default async function handler(req, res) {
     switch (action) {
       case "product":   return res.json(await getProduct(body));
       case "script":    return res.json(await writeScript(body));
+      case "voice":     return res.json(await submitVoice(body));
       case "presenter": return res.json(await falSubmit(MODELS.presenter, presenterInput(body)));
-      case "voice":     return res.json(await falSubmit(MODELS.tts, voiceInput(body)));
       case "avatar":    return res.json(await falSubmit(MODELS.avatar, avatarInput(body)));
       case "status":    return res.json(await falStatus(body));
       default:          return res.status(400).json({ error: "action לא מוכר: " + action });
@@ -57,9 +68,101 @@ export default async function handler(req, res) {
   }
 }
 
-// ─── 1. נתוני מוצר ────────────────────────────────────────────
-// אנחנו בעלי החנות, אז אין צורך בסקרייפינג — Shopify מחזיר JSON
-// לכל מוצר בכתובת <product-url>.js
+// ─── קריאה בטוחה ל-fal ────────────────────────────────────────
+// קוראים קודם כטקסט. רק אז מנסים לפרסר. ככה שגיאת 404 או HTML
+// לא מתחזה ל"JSON פגום" ואנחנו רואים מה באמת קרה.
+
+async function falFetch(url, options = {}) {
+  const r = await fetch(url, {
+    ...options,
+    headers: {
+      Authorization: `Key ${process.env.FAL_KEY}`,
+      "content-type": "application/json",
+      ...(options.headers || {}),
+    },
+  });
+
+  const raw = await r.text();
+
+  if (!r.ok) {
+    const detail = raw ? raw.slice(0, 400) : "(תשובה ריקה)";
+    const e = new Error(`fal ${r.status}: ${detail}`);
+    e.status = r.status;
+    throw e;
+  }
+
+  if (!raw) throw new Error("fal החזיר תשובה ריקה עם קוד " + r.status);
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error("fal החזיר תשובה שאינה JSON: " + raw.slice(0, 200));
+  }
+}
+
+// ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
+
+async function submitVoice({ text, voiceId }) {
+  if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
+  if (!text) throw new Error("חסר טקסט לקריינות");
+
+  const failures = [];
+
+  for (const cand of TTS_CANDIDATES) {
+    try {
+      const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
+        method: "POST",
+        body: JSON.stringify(cand.input(text, voiceId)),
+      });
+      return { requestId: data.request_id, model: cand.model, queued: true };
+    } catch (e) {
+      failures.push(`${cand.model} → ${e.message}`);
+      // 401/403 = בעיית מפתח, לא בעיית מודל. אין טעם להמשיך לנסות.
+      if (e.status === 401 || e.status === 403) break;
+    }
+  }
+
+  throw new Error("אף מודל קריינות לא עבד.\n" + failures.join("\n"));
+}
+
+// ─── שאר הפעולות ──────────────────────────────────────────────
+
+async function falSubmit(model, input) {
+  if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
+  const data = await falFetch(`${FAL_QUEUE}/${model}`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return { requestId: data.request_id, model, queued: true };
+}
+
+async function falStatus({ requestId, model }) {
+  if (!requestId || !model) throw new Error("חסר requestId או model");
+
+  const st = await falFetch(`${FAL_QUEUE}/${model}/requests/${requestId}/status`);
+
+  if (st.status !== "COMPLETED") {
+    return { status: st.status || "IN_QUEUE", position: st.queue_position ?? null, model };
+  }
+
+  const out = await falFetch(`${FAL_QUEUE}/${model}/requests/${requestId}`);
+  return { status: "COMPLETED", url: extractUrl(out), model };
+}
+
+function extractUrl(out = {}) {
+  return (
+    out?.video?.url ||
+    out?.audio?.url ||
+    out?.audio_url?.url ||
+    out?.audio_url ||
+    out?.images?.[0]?.url ||
+    out?.image?.url ||
+    out?.url ||
+    null
+  );
+}
+
+// ─── נתוני מוצר ───────────────────────────────────────────────
 
 async function getProduct({ url }) {
   if (!url) throw new Error("חסר URL של מוצר");
@@ -85,12 +188,13 @@ function stripHtml(s = "") {
   return s.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// ─── 2. תסריט ─────────────────────────────────────────────────
+// ─── תסריט ────────────────────────────────────────────────────
 
 async function writeScript({ product, tone = "אנרגטי", seconds = 20 }) {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error("ANTHROPIC_API_KEY לא מוגדר ב-Vercel");
   if (!product) throw new Error("חסרים נתוני מוצר");
 
-  const words = Math.round((seconds * 2.4)); // ~2.4 מילים לשנייה בעברית מדוברת
+  const words = Math.round(seconds * 2.4);
 
   const prompt = `אתה קופירייטר של פרסומות UGC לטיקטוק ואינסטגרם בעברית.
 
@@ -125,9 +229,10 @@ async function writeScript({ product, tone = "אנרגטי", seconds = 20 }) {
     }),
   });
 
-  if (!r.ok) throw new Error("שגיאת Claude: " + (await r.text()).slice(0, 200));
-  const data = await r.json();
+  const raw = await r.text();
+  if (!r.ok) throw new Error("Claude " + r.status + ": " + raw.slice(0, 300));
 
+  const data = JSON.parse(raw);
   const text = (data.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text)
@@ -142,7 +247,7 @@ async function writeScript({ product, tone = "אנרגטי", seconds = 20 }) {
   }
 }
 
-// ─── 3. קלטים למודלים ─────────────────────────────────────────
+// ─── קלטים ────────────────────────────────────────────────────
 
 function presenterInput({ describe = "", vertical = true }) {
   return {
@@ -156,75 +261,8 @@ function presenterInput({ describe = "", vertical = true }) {
   };
 }
 
-function voiceInput({ text, voiceId }) {
-  if (!text) throw new Error("חסר טקסט לקריינות");
-  return {
-    text,
-    voice: voiceId || "Rachel",
-    stability: 0.45,
-    similarity_boost: 0.75,
-    speed: 1.0,
-  };
-}
-
 function avatarInput({ imageUrl, audioUrl }) {
   if (!imageUrl) throw new Error("חסרה תמונת דובר");
   if (!audioUrl) throw new Error("חסר קובץ קריינות");
-  return {
-    image_url: imageUrl,
-    audio_url: audioUrl,
-    aspect_ratio: "9:16",
-  };
-}
-
-// ─── 4. תור fal ───────────────────────────────────────────────
-// כל המודלים הכבדים רצים דרך התור: שולחים, מקבלים request_id,
-// והדפדפן בודק סטטוס כל כמה שניות. זה מה שמונע timeout של Vercel
-// (60 שניות מקסימום ב-Hobby, ואווטאר לוקח 1-4 דקות).
-
-async function falSubmit(model, input) {
-  const r = await fetch(`${FAL_QUEUE}/${model}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${process.env.FAL_KEY}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(input),
-  });
-
-  const data = await r.json();
-  if (!r.ok) throw new Error("fal (" + model + "): " + JSON.stringify(data).slice(0, 300));
-
-  return { requestId: data.request_id, model, queued: true };
-}
-
-async function falStatus({ requestId, model }) {
-  if (!requestId || !model) throw new Error("חסר requestId או model");
-
-  const auth = { Authorization: `Key ${process.env.FAL_KEY}` };
-
-  const s = await fetch(`${FAL_QUEUE}/${model}/requests/${requestId}/status`, { headers: auth });
-  const st = await s.json();
-
-  if (st.status !== "COMPLETED") {
-    return { status: st.status || "IN_QUEUE", position: st.queue_position ?? null };
-  }
-
-  const r = await fetch(`${FAL_QUEUE}/${model}/requests/${requestId}`, { headers: auth });
-  const out = await r.json();
-
-  return { status: "COMPLETED", url: extractUrl(out), raw: out };
-}
-
-// כל מודל מחזיר מבנה קצת אחר — מושכים את ה-URL מכל המקומות המוכרים
-function extractUrl(out = {}) {
-  return (
-    out?.video?.url ||
-    out?.audio?.url ||
-    out?.audio_url?.url ||
-    out?.images?.[0]?.url ||
-    out?.image?.url ||
-    out?.url ||
-    null
-  );
+  return { image_url: imageUrl, audio_url: audioUrl, aspect_ratio: "9:16" };
 }
