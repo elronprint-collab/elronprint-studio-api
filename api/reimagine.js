@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v5
+// api/reimagine.js — "עיצוב מחדש" v6
 // pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> 2x upscale
 //           -> bg removal (LAST, so alpha survives) -> centered 4500x5400 @300DPI -> Cloudinary
 
@@ -71,25 +71,29 @@ Hard rules:
   recognisable copyrighted characters. Replace any branded object with a generic one.
 - Do not mention the t-shirt, garment, fabric, folds, model or photo background.
 
-COLOUR RULE — THE SINGLE MOST IMPORTANT CONSTRAINT.
-The print must be clearly visible on a WHITE shirt as well as a black one. Anything
-white, cream, ivory, off-white or pale grey becomes INVISIBLE on a white shirt and
-ruins the product. Therefore:
-- Every large object MUST be given an explicit, saturated, mid-to-deep colour. Name
-  the colour in the prompt. Examples of the required treatment: a bathtub becomes deep
-  teal or burnt terracotta, NOT white porcelain. Foam or clouds become soft blue-grey
-  with visible dark outlines, NOT white. A mug becomes mustard or forest green. A book
-  becomes deep burgundy or navy.
-- The design must contain NO large white, cream or near-white filled area whatsoever.
-  Small highlights of a few pixels are acceptable; large fills are not.
-- Ignore the reference image's own palette if it is pale or pastel — deepen it. A pale
-  reference must still produce a richly coloured result.
+BACKGROUND RULE — ABSOLUTE, OVERRIDES EVERYTHING BELOW.
+The artwork is a die-cut sticker. There is NO background of any kind: no coloured
+panel, no rectangle, no circle, no scene backdrop, no sky, no wall, no gradient, no
+border. The subject floats alone on empty pure white that will be deleted. Never
+describe a setting, environment or backdrop — only the object or character itself
+plus small props that touch it.
+
+COLOUR RULE — applies ONLY to the subject and its props, never to the background.
+The print must be visible on a WHITE shirt as well as black. White, cream, ivory or
+pale grey fills on the SUBJECT become invisible on a white shirt. Therefore:
+- Every large part of the subject gets an explicit saturated mid-to-deep colour, named
+  in the prompt. A bathtub becomes deep teal, not white porcelain. A mug becomes
+  mustard. A book becomes burgundy.
+- No large white or cream filled area anywhere on the subject. Small highlights are fine.
+- Ignore the reference image's palette if it is pale or pastel — deepen it.
+- Avoid neon or glow effects, which only read on dark garments. Use solid colour with
+  bold dark outlines instead.
 - Every element carries a bold dark outline, and neighbouring shapes differ clearly in
   darkness so the artwork reads as a silhouette from a distance.
 
 - Write 2-4 sentences as a direct image-generation prompt in English, naming the
-  specific saturated colour of each major object.
-- End with exactly: "isolated subject centered in frame on a flat pure white background, no shirt, no mockup, no frame, no shadow, no text, bold dark outlines on every element, absolutely no white or cream or ivory fills anywhere in the artwork, every object in deep saturated colour, strong value contrast between adjacent shapes, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
+  specific saturated colour of each major part of the subject.
+- End with exactly: "die-cut sticker style, isolated subject centered on a plain pure white background, absolutely no background panel, no rectangle, no backdrop, no scene, no border, no shadow, no shirt, no mockup, no text, bold dark outlines on every element, no white or cream fills on the subject itself, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
 - Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -108,7 +112,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Write the prompt for a new original design inspired by this. Remember: no white or cream fills — name a saturated colour for every major object." },
+          { type: "text", text: "Write the prompt for a new original design inspired by this. Remember: die-cut sticker with no background at all, and a named saturated colour for every major part of the subject." },
         ],
       }],
     }),
@@ -131,7 +135,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COLOUR_SUFFIX =
-  ", no white fills, no cream fills, every object in deep saturated colour, bold dark outlines, high value contrast";
+  ", die-cut sticker, plain white background, no background panel, no rectangle, no backdrop, no scene, no border, subject in deep saturated colour, bold dark outlines, no neon glow";
 
 async function generate(prompt, dataUri) {
   try {
