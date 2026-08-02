@@ -1,5 +1,8 @@
 {
   "name": "elronprint-studio-api",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "sharp": "^0.33.5"
+  }
 }
