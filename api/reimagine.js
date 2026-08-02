@@ -1,7 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v6
-// pipeline: Claude vision -> nano-banana edit (fallback FLUX) -> 2x upscale
-//           -> bg removal (LAST, so alpha survives) -> centered 4500x5400 @300DPI -> Cloudinary
+// api/reimagine.js — "עיצוב מחדש" v7
 
 import sharp from "sharp";
 
@@ -60,41 +58,44 @@ async function fal(model, input) {
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
 You will be shown an image containing a printed design.
 
-Write a prompt for a NEW, DIFFERENT design that is only INSPIRED by the one shown —
-same general style and mood — but NOT a copy.
+Write a prompt for a NEW design that borrows only the ART STYLE of the reference —
+its rendering technique and mood — and nothing else.
 
-Hard rules:
-- If the design has a specific character, animal or figure, you MUST swap it for a
-  different one in the same category. Never describe the original subject directly.
-- Change at least three of: pose, scene, props, outfit, palette accent, camera angle.
-- NEVER include readable text, book titles, logos, brand names, real people, or
-  recognisable copyrighted characters. Replace any branded object with a generic one.
-- Do not mention the t-shirt, garment, fabric, folds, model or photo background.
+ORIGINALITY RULE — THE MOST IMPORTANT RULE.
+The result must be unmistakably a different picture, not a redraw. You MUST invent a
+new subject and a new situation. Specifically:
+- If the reference shows a person, change their activity entirely — not just their
+  hair colour or outfit. Someone lying down becomes someone standing, walking,
+  dancing, gardening, cycling. Someone holding a book holds something else.
+- Never reuse the reference's pose, camera angle, props, or composition.
+- If you find yourself describing what is in the reference image, stop and invent
+  something else in the same spirit.
+- Consider replacing a human subject with an animal, plant or object in the same style —
+  this is often the strongest result.
 
-BACKGROUND RULE — ABSOLUTE, OVERRIDES EVERYTHING BELOW.
-The artwork is a die-cut sticker. There is NO background of any kind: no coloured
-panel, no rectangle, no circle, no scene backdrop, no sky, no wall, no gradient, no
-border. The subject floats alone on empty pure white that will be deleted. Never
-describe a setting, environment or backdrop — only the object or character itself
-plus small props that touch it.
+NO BACKGROUND, NO STICKER BORDER.
+The subject stands alone on plain white that will be deleted. Never describe a setting,
+room, furniture, pillow, bed, sky, wall, floor, panel, rectangle or scene. Equally
+important: this is NOT a sticker — there must be no white outline, no contour, no
+die-cut edge, no border of any kind drawn around the artwork.
 
-COLOUR RULE — applies ONLY to the subject and its props, never to the background.
+COLOUR RULE — applies to the subject only.
 The print must be visible on a WHITE shirt as well as black. White, cream, ivory or
-pale grey fills on the SUBJECT become invisible on a white shirt. Therefore:
-- Every large part of the subject gets an explicit saturated mid-to-deep colour, named
-  in the prompt. A bathtub becomes deep teal, not white porcelain. A mug becomes
-  mustard. A book becomes burgundy.
-- No large white or cream filled area anywhere on the subject. Small highlights are fine.
-- Ignore the reference image's palette if it is pale or pastel — deepen it.
-- Avoid neon or glow effects, which only read on dark garments. Use solid colour with
-  bold dark outlines instead.
-- Every element carries a bold dark outline, and neighbouring shapes differ clearly in
-  darkness so the artwork reads as a silhouette from a distance.
+pale grey areas on the subject vanish on a white shirt. Therefore:
+- Name an explicit saturated mid-to-deep colour for every large part of the subject.
+- No large white, cream or very pale area anywhere on the subject.
+- Ignore the reference's palette if it is pale or pastel — deepen it substantially.
+- No neon or glow effects — they only read on dark garments.
+- Bold dark outlines on every element, with clear darkness differences between
+  neighbouring shapes so the artwork reads from a distance.
 
-- Write 2-4 sentences as a direct image-generation prompt in English, naming the
-  specific saturated colour of each major part of the subject.
-- End with exactly: "die-cut sticker style, isolated subject centered on a plain pure white background, absolutely no background panel, no rectangle, no backdrop, no scene, no border, no shadow, no shirt, no mockup, no text, bold dark outlines on every element, no white or cream fills on the subject itself, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
-- Output ONLY the prompt. No preamble.`;
+Also: no readable text, no book titles, no logos, no brand names, no real people, no
+recognisable copyrighted characters.
+
+Write 2-4 sentences as a direct image-generation prompt in English, naming the
+saturated colour of each major part of the subject.
+End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills on the subject, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, vertical 4:5 composition"
+Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -112,7 +113,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Write the prompt for a new original design inspired by this. Remember: die-cut sticker with no background at all, and a named saturated colour for every major part of the subject." },
+          { type: "text", text: "Borrow ONLY the art style. Invent a completely different subject and situation. No background, no sticker border, saturated colours." },
         ],
       }],
     }),
@@ -134,13 +135,14 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 }
 
 /* ---------------- step 2: generate ---------------- */
-const COLOUR_SUFFIX =
-  ", die-cut sticker, plain white background, no background panel, no rectangle, no backdrop, no scene, no border, subject in deep saturated colour, bold dark outlines, no neon glow";
+const STYLE_SUFFIX =
+  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, subject in deep saturated colour, bold dark outlines, no neon glow";
 
 async function generate(prompt, dataUri) {
   try {
+    // low strength keeps the style but frees the model from copying the layout
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: prompt + COLOUR_SUFFIX,
+      prompt: `Use the reference ONLY for art style. Draw a completely different subject: ${prompt}${STYLE_SUFFIX}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -149,7 +151,7 @@ async function generate(prompt, dataUri) {
     console.warn("nano-banana failed, falling back to FLUX:", e.message);
   }
   return await fal("fal-ai/flux/dev", {
-    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork${COLOUR_SUFFIX}`,
+    prompt: `${prompt}, rich modern illustration, bold dark linework, vibrant saturated colors, high detail, isolated subject, t-shirt print artwork${STYLE_SUFFIX}`,
     image_size: { width: 1152, height: 1536 },
     num_inference_steps: 32,
     guidance_scale: 3.5,
@@ -259,7 +261,6 @@ export default async function handler(req, res) {
     let art = await generate(prompt, image);
     step("generate");
 
-    // upscale BEFORE cutting out — RealESRGAN drops the alpha channel
     if (Date.now() - t0 < 22000) {
       try {
         art = await fal("fal-ai/esrgan", {
