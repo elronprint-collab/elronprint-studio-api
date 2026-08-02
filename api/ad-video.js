@@ -114,7 +114,13 @@ async function submitVoice({ text, voiceId }) {
         method: "POST",
         body: JSON.stringify(cand.input(text, voiceId)),
       });
-      return { requestId: data.request_id, model: cand.model, queued: true };
+      return {
+        requestId: data.request_id,
+        model: cand.model,
+        statusUrl: data.status_url || null,
+        responseUrl: data.response_url || null,
+        queued: true,
+      };
     } catch (e) {
       failures.push(`${cand.model} → ${e.message}`);
       // 401/403 = בעיית מפתח, לא בעיית מודל. אין טעם להמשיך לנסות.
@@ -133,19 +139,38 @@ async function falSubmit(model, input) {
     method: "POST",
     body: JSON.stringify(input),
   });
-  return { requestId: data.request_id, model, queued: true };
+  return {
+    requestId: data.request_id,
+    model,
+    statusUrl: data.status_url || null,
+    responseUrl: data.response_url || null,
+    queued: true,
+  };
 }
 
-async function falStatus({ requestId, model }) {
-  if (!requestId || !model) throw new Error("חסר requestId או model");
+// חשוב: את המשימה שולחים לנתיב המלא של המודל
+// (fal-ai/elevenlabs/tts/multilingual-v2), אבל את הסטטוס בודקים
+// רק בשתי הרמות הראשונות (fal-ai/elevenlabs). fal מחזיר לנו את
+// הכתובות הנכונות בתשובת השליחה, אז מעדיפים אותן כשהן קיימות.
 
-  const st = await falFetch(`${FAL_QUEUE}/${model}/requests/${requestId}/status`);
+function queueBase(model = "") {
+  return model.split("/").slice(0, 2).join("/");
+}
+
+async function falStatus({ requestId, model, statusUrl, responseUrl }) {
+  if (!requestId && !statusUrl) throw new Error("חסר requestId");
+
+  const base = `${FAL_QUEUE}/${queueBase(model)}/requests/${requestId}`;
+  const sUrl = statusUrl || `${base}/status`;
+  const rUrl = responseUrl || base;
+
+  const st = await falFetch(sUrl);
 
   if (st.status !== "COMPLETED") {
     return { status: st.status || "IN_QUEUE", position: st.queue_position ?? null, model };
   }
 
-  const out = await falFetch(`${FAL_QUEUE}/${model}/requests/${requestId}`);
+  const out = await falFetch(rUrl);
   return { status: "COMPLETED", url: extractUrl(out), model };
 }
 
