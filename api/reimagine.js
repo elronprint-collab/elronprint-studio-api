@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v14 (reads the PRINT, not the photo around it)
+// api/reimagine.js — "עיצוב מחדש" v15 (edge cleanup for dark garments)
 
 import sharp from "sharp";
 
@@ -11,6 +11,8 @@ const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
 const EDGE_LIMIT = 0.015;
 const PALE_LIMIT = 0.12;
+const ERODE_RADIUS = 2;    // px of alpha shaved off the outline
+const ALPHA_FLOOR = 130;   // anything fainter than this is fringe, not artwork
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -265,12 +267,56 @@ function retryHint(qc) {
   return ". " + parts.join(". ") + ".";
 }
 
+/* ---------------- edge cleanup ----------------
+   Background removal leaves a faint light halo one or two pixels wide. On a black
+   garment that halo prints as a visible grey outline. This shaves it off: drop very
+   faint alpha, then erode the alpha channel by a couple of pixels (separable min
+   filter, so it stays fast even on large images). */
+async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+
+  const a = new Uint8Array(w * h);
+  for (let p = 0, i = 3; p < w * h; p++, i += ch) a[p] = data[i] < floor ? 0 : data[i];
+
+  const tmp = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = 255;
+      for (let k = -radius; k <= radius; k++) {
+        const xx = x + k;
+        if (xx < 0 || xx >= w) { m = 0; break; }
+        const v = a[row + xx];
+        if (v < m) m = v;
+      }
+      tmp[row + x] = m;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let m = 255;
+      for (let k = -radius; k <= radius; k++) {
+        const yy = y + k;
+        if (yy < 0 || yy >= h) { m = 0; break; }
+        const v = tmp[yy * w + x];
+        if (v < m) m = v;
+      }
+      data[(y * w + x) * ch + 3] = m;
+    }
+  }
+
+  return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
+}
+
 /* ---------------- print canvas ---------------- */
 async function toPrintCanvas(url) {
-  const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+  let buf = Buffer.from(await (await fetch(url)).arrayBuffer());
 
   const stats = await sharp(buf).ensureAlpha().stats();
   if (stats.isOpaque) console.warn("[reimagine] WARNING: image has no transparency");
+
+  buf = await cleanEdges(buf);
 
   const inner = await sharp(buf)
     .ensureAlpha()
