@@ -1,11 +1,11 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v9
+// api/reimagine.js — "עיצוב מחדש" v10
 
 import sharp from "sharp";
 
 export const config = { maxDuration: 60 };
 
-const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.90, DPI = 300;
+const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.97, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
