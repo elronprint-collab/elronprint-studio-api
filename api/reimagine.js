@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v8 (with automatic quality retry)
+// api/reimagine.js — "עיצוב מחדש" v9
 
 import sharp from "sharp";
 
@@ -9,8 +9,8 @@ const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.90, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
-const EDGE_LIMIT = 0.015;   // >1.5% of border pixels opaque = artwork is cut off
-const PALE_LIMIT = 0.12;    // >12% near-white = will vanish on a white shirt
+const EDGE_LIMIT = 0.015;
+const PALE_LIMIT = 0.12;
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -61,49 +61,52 @@ async function fal(model, input) {
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
 You will be shown an image containing a printed design.
 
-Write a prompt for a NEW design that borrows only the ART STYLE of the reference —
-its rendering technique and mood — and nothing else.
+Write a prompt for a NEW design in the SAME art style and the SAME subject category as
+the reference — but a clearly different picture.
 
-ORIGINALITY RULE — THE MOST IMPORTANT RULE.
-The result must be unmistakably a different picture, not a redraw. You MUST invent a
-new subject and a new situation. Specifically:
-- If the reference shows a person, change their activity entirely — not just their
-  hair colour or outfit. Someone lying down becomes someone standing, walking,
-  dancing, gardening, cycling. Someone holding a book holds something else.
-- Never reuse the reference's pose, camera angle, props, or composition.
-- If you find yourself describing what is in the reference image, stop and invent
-  something else in the same spirit.
-- Prefer replacing a human subject with an animal, plant or object in the same style —
-  this gives full control over colour and is usually the strongest result.
+KEEP THE SUBJECT TYPE. THIS IS MANDATORY.
+Whatever the reference shows, the new design shows the same kind of thing:
+- A woman stays a woman. A man stays a man. A child stays a child.
+- A dog stays a dog. A flower stays a flower. A car stays a car.
+- NEVER substitute a different category. Never turn a person into an animal, a plant
+  or an object. That is a failure.
+
+CHANGE EVERYTHING ELSE.
+The result must not look like a redraw of the reference. Change all of these:
+- The pose and body position — lying down becomes sitting, standing, walking, dancing.
+- The activity and the props she is holding or using.
+- Hair colour and style, outfit, and colour palette.
+- The camera angle and the composition.
+If your description could be mistaken for the reference image, rewrite it.
 
 NO BACKGROUND, NO STICKER BORDER.
 The subject stands alone on plain white that will be deleted. Never describe a setting,
-room, furniture, pillow, bed, sky, wall, floor, panel, rectangle or scene. Equally
-important: this is NOT a sticker — no white outline, no contour, no die-cut edge, no
-border of any kind drawn around the artwork.
+room, furniture, pillow, bed, sky, wall, floor, panel, rectangle or scene. This is NOT a
+sticker — no white outline, no contour, no die-cut edge, no border around the artwork.
 
-COLOUR RULE — applies to the subject only.
-White, cream, ivory or pale grey areas on the subject vanish on a white shirt. So:
-- Name an explicit saturated mid-to-deep colour for every large part of the subject.
-- No large white, cream or very pale area anywhere on the subject. If the natural
-  subject would be white (swan, polar bear, fox chest, foam, porcelain), recolour it
-  to a saturated alternative or choose a different subject.
+COLOUR RULE.
+White, cream, ivory and pale grey areas vanish on a white shirt. So:
+- Name an explicit saturated mid-to-deep colour for clothing, hair, props and every
+  other large non-skin area.
+- No large white or cream area anywhere. A white dress becomes emerald, rust or navy;
+  white foam becomes blue-grey; a white mug becomes mustard.
+- Skin is the one exception — render it naturally, but always enclosed by bold dark
+  outlines so it reads on a white shirt.
 - Ignore the reference's palette if it is pale or pastel — deepen it substantially.
-- No neon or glow effects — they only read on dark garments.
+- No neon or glow effects, which only read on dark garments.
 - Bold dark outlines on every element, with clear darkness differences between
   neighbouring shapes.
 
 COMPOSITION RULE.
-The entire subject, including raised arms, tails, wings and held objects, must sit well
-inside the frame with clear empty space on all four sides. Nothing may touch or cross
-the frame edge. Prefer compact, centred compositions over tall narrow ones.
+The entire subject, including raised arms, hair and held objects, sits well inside the
+frame with clear empty space on all four sides. Nothing touches or crosses the edge.
 
 Also: no readable text, no book titles, no logos, no brand names, no real people, no
 recognisable copyrighted characters.
 
 Write 2-4 sentences as a direct image-generation prompt in English, naming the
-saturated colour of each major part of the subject.
-End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills on the subject, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
+saturated colour of each major element.
+End with exactly: "isolated subject centered on plain pure white, no background, no scene, no furniture, no panel, no rectangle, no border, no white outline around the artwork, not a sticker, no shadow, no shirt, no mockup, no text, bold dark outlines, no white or cream fills, deep saturated colours, strong value contrast, commercial illustration quality, entire subject fully inside the frame with generous empty margins on all four sides, nothing touching the frame edge, vertical 4:5 composition"
 Output ONLY the prompt. No preamble.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
@@ -122,7 +125,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Borrow ONLY the art style. Invent a completely different subject and situation. No background, no sticker border, saturated colours, nothing touching the frame edge." },
+          { type: "text", text: "Same art style, same subject category — but a different pose, activity, outfit and palette. No background, no sticker border, saturated colours, nothing touching the frame edge." },
         ],
       }],
     }),
@@ -145,12 +148,12 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const STYLE_SUFFIX =
-  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, subject in deep saturated colour, bold dark outlines, no neon glow";
+  ", plain white background, no background panel, no rectangle, no scene, no furniture, no border, no white outline, not a sticker, deep saturated colours, bold dark outlines, no neon glow";
 
 async function generate(prompt, dataUri) {
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `Use the reference ONLY for art style. Draw a completely different subject: ${prompt}${STYLE_SUFFIX}`,
+      prompt: `Use the reference for art style only. Keep the same kind of subject but draw a different pose, activity, outfit and palette: ${prompt}${STYLE_SUFFIX}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -213,7 +216,7 @@ function retryHint(qc) {
     parts.push("CRITICAL: the previous attempt was cut off by the frame. Zoom out. Make the subject noticeably smaller and fully contained, with wide empty margins on every side. Nothing may touch the edge");
   }
   if (qc.tooPale) {
-    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Replace every white, cream, ivory and pale grey area with a deep saturated colour. Darken the whole palette substantially");
+    parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Replace every white, cream, ivory and pale grey area with a deep saturated colour. Darken the whole palette substantially. Keep the same kind of subject");
   }
   return ". " + parts.join(". ") + ".";
 }
@@ -317,14 +320,12 @@ export default async function handler(req, res) {
     const prompt = await analyzeAndReimagine(base64Data, mediaType);
     step("analyze");
 
-    // attempt 1
     let art = await generate(prompt, image);
     let cutout = await fal("fal-ai/birefnet", { image_url: art });
     step("attempt1");
 
     let qc = await inspect(cutout);
 
-    // one corrective retry, only if there is time for it
     if ((qc.cropped || qc.tooPale) && elapsed() < 30000) {
       console.log("[reimagine] QC failed - regenerating with corrections");
       try {
@@ -333,7 +334,6 @@ export default async function handler(req, res) {
         const qc2 = await inspect(cut2);
         step("attempt2");
 
-        // keep attempt 2 only if it actually improved
         const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0);
         if (score(qc2) < score(qc)) {
           art = art2; cutout = cut2; qc = qc2;
@@ -348,7 +348,6 @@ export default async function handler(req, res) {
       console.warn("[reimagine] QC failed but no time budget for a retry");
     }
 
-    // upscale the accepted art, then cut out again (ESRGAN drops alpha)
     if (elapsed() < 40000) {
       try {
         const big = await fal("fal-ai/esrgan", {
