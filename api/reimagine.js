@@ -168,19 +168,34 @@ async function toPrintCanvas(url) {
     .toBuffer();
 }
 
+// Cloudinary unsigned uploads are size-capped; shrink only if we must.
+async function fitUploadSize(buffer) {
+  const MAX = 9.5 * 1024 * 1024;
+  if (buffer.length <= MAX) return buffer;
+  console.warn(`[reimagine] png ${(buffer.length / 1048576).toFixed(1)}MB - re-encoding as palette`);
+  return sharp(buffer)
+    .png({ compressionLevel: 9, palette: true, colours: 256, dither: 1 })
+    .withMetadata({ density: DPI })
+    .toBuffer();
+}
+
 /* ---------------- upload ---------------- */
 async function uploadCloudinary(buffer) {
   const form = new FormData();
   form.append("file", new Blob([buffer], { type: "image/png" }), "design.png");
   form.append("upload_preset", CLOUD_PRESET);
-  form.append("folder", "elronprint-designs");
   const r = await fetch(
     `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`,
     { method: "POST", body: form }
   );
-  const d = await r.json();
-  if (d.error) {
-    console.error("cloudinary failed:", d.error);
+  const text = await r.text();
+  if (!r.ok) {
+    console.error("cloudinary failed:", r.status, text.slice(0, 500));
+    throw new Error("Upload failed");
+  }
+  const d = JSON.parse(text);
+  if (!d.secure_url) {
+    console.error("cloudinary no url:", text.slice(0, 500));
     throw new Error("Upload failed");
   }
   return d.secure_url;
@@ -233,7 +248,9 @@ export default async function handler(req, res) {
       console.warn("upscale skipped:", e.message);
     }
 
-    const canvas = await toPrintCanvas(upscaled);
+    let canvas = await toPrintCanvas(upscaled);
+    console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
+    canvas = await fitUploadSize(canvas);
     step("canvas");
 
     const imageUrl = await uploadCloudinary(canvas);
