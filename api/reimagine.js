@@ -1,8 +1,12 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v17
+// api/reimagine.js — "עיצוב מחדש" v18
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
+// v18 change: prompt-only. The model was reproducing not just the drawing TECHNIQUE but the
+// paper it was drawn on — cream/toned stock — and birefnet treats that tinted paper as part
+// of the artwork, so it survived removal as a solid block behind the subject. The prompts now
+// separate technique from substrate and demand pure white. No logic touched.
 
 import sharp from "sharp";
 
@@ -98,6 +102,15 @@ Note: a photo of a person wearing a shirt is NOT a photographic graphic. Judge o
 artwork printed on the fabric.
 Name the technique explicitly at the start of your prompt.
 
+TECHNIQUE IS NOT THE SAME AS THE SURFACE IT SITS ON.
+Copy how the marks are made — the linework, the shading, the brushwork, the rendering.
+Never copy the paper, board, canvas or backdrop those marks sit on. Even when the
+reference graphic is clearly drawn on cream, tan, kraft, sepia, aged, textured or
+speckled stock, the new design is drawn on nothing at all. Do not write the words paper,
+parchment, newsprint, canvas, board, vintage, aged, weathered, sepia, toned, off-white,
+cream, tan or beige anywhere in your prompt, and never describe grain, fibre, tooth,
+stains or texture behind the subject.
+
 KEEP THE SUBJECT TYPE. THIS IS MANDATORY.
 Whatever the printed graphic depicts, the new design depicts the same kind of thing.
 A woman stays a woman. A skull stays a skull. A car stays a car.
@@ -124,8 +137,12 @@ TEXT RULE.
   * Place it so it does not overlap the subject's face.
 
 NO BACKGROUND.
-The subject stands alone on plain white that will be deleted. Never describe a setting,
-room, street, city, furniture, sky, wall, floor, panel, rectangle or scene.
+The subject stands alone on pure white — hex #FFFFFF, flat and empty — which will be cut
+away automatically. Never describe a setting, room, street, city, furniture, sky, wall,
+floor, panel, rectangle or scene. The white must be pure: not cream, not ivory, not
+eggshell, not warm white, not a wash, not a gradient, not a halo, not lightly tinted and
+not textured. State explicitly in your prompt that the background is pure white #FFFFFF
+and completely empty.
 
 COLOUR RULE — subordinate to the style rule.
 The print must read on a white shirt as well as black.
@@ -166,7 +183,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -194,7 +211,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, nothing beside the subject, no extra objects, no props, no decorations, plain white background, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
   ", dark linework inside the drawing, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
@@ -206,7 +223,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
