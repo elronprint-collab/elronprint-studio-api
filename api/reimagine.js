@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v19
+// api/reimagine.js — "עיצוב מחדש" v20
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -12,6 +12,11 @@ import { checkRateLimit } from "./_ratelimit.js";
 // solid block. If QC reports the edges are still opaque, we now strip it ourselves with an
 // edge-seeded scanline flood fill - the same connectivity approach as the magic wand in the
 // app, so enclosed light areas (skin, eyes) are never touched. Runs ONLY on failed output.
+// v20 change: fixes v19. birefnet normally leaves a transparent margin around its mask, so
+// the outermost pixels are NOT the surface we need to strip - v19 sampled them, read
+// (0,0,0), decided the background was dark and refused to run. v20 walks inward from the
+// border THROUGH transparent pixels and samples the first opaque surface it meets, and the
+// fill itself now passes freely through already-transparent pixels.
 
 import sharp from "sharp";
 
@@ -369,16 +374,44 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
    background is near-white. */
 function floodFillBackground(data, w, h, ch, tolIn = 24, tolOut = 70) {
   const idx = (x, y) => (y * w + x) * ch;
+  const OPAQUE = 128;
+  const key = (i) => (data[i] >> 4) * 289 + (data[i + 1] >> 4) * 17 + (data[i + 2] >> 4);
 
-  // background reference = modal 16-level-quantised colour among border pixels
-  const buckets = new Map();
-  const noteBorder = (x, y) => {
-    const i = idx(x, y);
-    const key = (data[i] >> 4) * 289 + (data[i + 1] >> 4) * 17 + (data[i + 2] >> 4);
-    buckets.set(key, (buckets.get(key) || 0) + 1);
+  /* Pass 1 - find the background colour.
+     birefnet usually leaves a transparent margin already, so the outermost pixels are not
+     the background we need to strip; the background is the first OPAQUE thing we meet
+     walking inward. Walk in from the border through transparent pixels and sample the
+     colour of every opaque pixel we bump into. */
+  const reached = new Uint8Array(w * h);
+  let probe = [];
+  const seed = (x, y) => {
+    const p = y * w + x;
+    if (reached[p]) return;
+    reached[p] = 1;
+    probe.push(x, y);
   };
-  for (let x = 0; x < w; x++) { noteBorder(x, 0); noteBorder(x, h - 1); }
-  for (let y = 0; y < h; y++) { noteBorder(0, y); noteBorder(w - 1, y); }
+  for (let x = 0; x < w; x++) { seed(x, 0); seed(x, h - 1); }
+  for (let y = 0; y < h; y++) { seed(0, y); seed(w - 1, y); }
+
+  const buckets = new Map();
+  while (probe.length) {
+    const y = probe.pop(), x = probe.pop();
+    const i = idx(x, y);
+    if (data[i + 3] >= OPAQUE) {
+      // first opaque pixel on this path - this is the surface we would be stripping
+      buckets.set(key(i), (buckets.get(key(i)) || 0) + 1);
+      continue;
+    }
+    if (x > 0) seed(x - 1, y);
+    if (x < w - 1) seed(x + 1, y);
+    if (y > 0) seed(x, y - 1);
+    if (y < h - 1) seed(x, y + 1);
+  }
+
+  if (!buckets.size) {
+    console.warn("[reimagine] flood fill skipped - nothing opaque reachable from the edges");
+    return false;
+  }
 
   let bestKey = 0, bestCount = -1;
   for (const [k, c] of buckets) if (c > bestCount) { bestCount = c; bestKey = k; }
@@ -388,10 +421,10 @@ function floodFillBackground(data, w, h, ch, tolIn = 24, tolOut = 70) {
     (bestKey % 17) * 16 + 8,
   ];
 
-  // guard: only strip a light background (white through cream/ivory), never a dark or
+  // guard: only strip a light surface (white through cream/ivory), never a dark or
   // saturated one - those are far more likely to be the artwork itself
   if (Math.min(bg[0], bg[1], bg[2]) < 170) {
-    console.warn(`[reimagine] flood fill skipped - background is not light enough (${bg.join(",")})`);
+    console.warn(`[reimagine] flood fill skipped - surface is not light enough (${bg.join(",")})`);
     return false;
   }
 
@@ -402,12 +435,17 @@ function floodFillBackground(data, w, h, ch, tolIn = 24, tolOut = 70) {
       Math.abs(data[i + 2] - bg[2])
     );
 
+  /* Pass 2 - the actual fill. Already-transparent pixels are free to walk through, so a
+     transparent margin left by birefnet does not block us. Opaque pixels are only entered
+     when their colour is within tolerance of the background. */
   const seen = new Uint8Array(w * h);
   const stack = [];
   const push = (x, y) => {
     const p = y * w + x;
     if (seen[p]) return;
-    if (dist(idx(x, y)) > tolOut) return;
+    const i = idx(x, y);
+    if (data[i + 3] < OPAQUE) { seen[p] = 1; stack.push(x, y); return; }
+    if (dist(i) > tolOut) return;
     seen[p] = 1;
     stack.push(x, y);
   };
@@ -418,10 +456,12 @@ function floodFillBackground(data, w, h, ch, tolIn = 24, tolOut = 70) {
   while (stack.length) {
     const y = stack.pop(), x = stack.pop();
     const i = idx(x, y);
-    const d = dist(i);
-    // soft edge: fully clear inside tolIn, ramp up to tolOut
-    const alpha = d <= tolIn ? 0 : Math.round(((d - tolIn) / (tolOut - tolIn)) * 255);
-    if (alpha < data[i + 3]) { data[i + 3] = alpha; cleared++; }
+    if (data[i + 3] >= OPAQUE) {
+      const d = dist(i);
+      // soft edge: fully clear inside tolIn, ramp up to tolOut
+      const alpha = d <= tolIn ? 0 : Math.round(((d - tolIn) / (tolOut - tolIn)) * 255);
+      if (alpha < data[i + 3]) { data[i + 3] = alpha; cleared++; }
+    }
 
     if (x > 0) push(x - 1, y);
     if (x < w - 1) push(x + 1, y);
