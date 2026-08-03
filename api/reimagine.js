@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v18
+// api/reimagine.js — "עיצוב מחדש" v19
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -7,6 +7,11 @@ import { checkRateLimit } from "./_ratelimit.js";
 // paper it was drawn on — cream/toned stock — and birefnet treats that tinted paper as part
 // of the artwork, so it survived removal as a solid block behind the subject. The prompts now
 // separate technique from substrate and demand pure white. No logic touched.
+// v19 change: added a fallback. When the generated artwork is a tight close-up that fills its
+// frame, birefnet's mask covers the whole rectangle and the plain background survives as a
+// solid block. If QC reports the edges are still opaque, we now strip it ourselves with an
+// edge-seeded scanline flood fill - the same connectivity approach as the magic wand in the
+// app, so enclosed light areas (skin, eyes) are never touched. Runs ONLY on failed output.
 
 import sharp from "sharp";
 
@@ -349,10 +354,97 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
   return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
 }
 
-/* ---------------- print canvas ---------------- */
-async function toPrintCanvas(url) {
-  let buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+/* ---------------- fallback: edge-seeded background flood fill ----------------
+   birefnet returns a mask of "the salient object". When the generated artwork is a tight
+   close-up that fills its frame, that mask covers essentially the whole rectangle and the
+   plain background survives as a solid block. This is the recovery path.
 
+   It is a scanline flood fill seeded from the four borders, so ONLY background connected
+   to an edge is removed — light areas enclosed inside the drawing (skin, the hole in a
+   letter, an eye) are never touched, because the fill cannot reach them. That connectivity
+   is what makes this safe on artwork whose subject is nearly the same tone as its
+   background; a plain colour threshold would eat the face.
+
+   Guarded twice: it only runs when birefnet has clearly failed, and only when the detected
+   background is near-white. */
+function floodFillBackground(data, w, h, ch, tolIn = 24, tolOut = 70) {
+  const idx = (x, y) => (y * w + x) * ch;
+
+  // background reference = modal 16-level-quantised colour among border pixels
+  const buckets = new Map();
+  const noteBorder = (x, y) => {
+    const i = idx(x, y);
+    const key = (data[i] >> 4) * 289 + (data[i + 1] >> 4) * 17 + (data[i + 2] >> 4);
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  };
+  for (let x = 0; x < w; x++) { noteBorder(x, 0); noteBorder(x, h - 1); }
+  for (let y = 0; y < h; y++) { noteBorder(0, y); noteBorder(w - 1, y); }
+
+  let bestKey = 0, bestCount = -1;
+  for (const [k, c] of buckets) if (c > bestCount) { bestCount = c; bestKey = k; }
+  const bg = [
+    ((bestKey / 289) | 0) * 16 + 8,
+    (((bestKey % 289) / 17) | 0) * 16 + 8,
+    (bestKey % 17) * 16 + 8,
+  ];
+
+  // guard: only strip a light background (white through cream/ivory), never a dark or
+  // saturated one - those are far more likely to be the artwork itself
+  if (Math.min(bg[0], bg[1], bg[2]) < 170) {
+    console.warn(`[reimagine] flood fill skipped - background is not light enough (${bg.join(",")})`);
+    return false;
+  }
+
+  const dist = (i) =>
+    Math.max(
+      Math.abs(data[i] - bg[0]),
+      Math.abs(data[i + 1] - bg[1]),
+      Math.abs(data[i + 2] - bg[2])
+    );
+
+  const seen = new Uint8Array(w * h);
+  const stack = [];
+  const push = (x, y) => {
+    const p = y * w + x;
+    if (seen[p]) return;
+    if (dist(idx(x, y)) > tolOut) return;
+    seen[p] = 1;
+    stack.push(x, y);
+  };
+  for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+  for (let y = 0; y < h; y++) { push(0, y); push(w - 1, y); }
+
+  let cleared = 0;
+  while (stack.length) {
+    const y = stack.pop(), x = stack.pop();
+    const i = idx(x, y);
+    const d = dist(i);
+    // soft edge: fully clear inside tolIn, ramp up to tolOut
+    const alpha = d <= tolIn ? 0 : Math.round(((d - tolIn) / (tolOut - tolIn)) * 255);
+    if (alpha < data[i + 3]) { data[i + 3] = alpha; cleared++; }
+
+    if (x > 0) push(x - 1, y);
+    if (x < w - 1) push(x + 1, y);
+    if (y > 0) push(x, y - 1);
+    if (y < h - 1) push(x, y + 1);
+  }
+
+  console.log(`[reimagine] flood fill bg=(${bg.join(",")}) cleared ${((cleared / (w * h)) * 100).toFixed(1)}% of pixels`);
+  return true;
+}
+
+async function stripLeftoverBackground(buf) {
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+  const did = floodFillBackground(data, w, h, ch);
+  if (!did) return buf;
+  return sharp(data, { raw: { width: w, height: h, channels: ch } })
+    .png({ compressionLevel: 1 })
+    .toBuffer();
+}
+
+/* ---------------- print canvas ---------------- */
+async function toPrintCanvas(buf) {
   const stats = await sharp(buf).ensureAlpha().stats();
   if (stats.isOpaque) console.warn("[reimagine] WARNING: image has no transparency");
 
@@ -479,7 +571,19 @@ export default async function handler(req, res) {
       console.warn("[reimagine] QC failed but no time budget for a retry");
     }
 
-    let canvas = await toPrintCanvas(cutout);
+    // birefnet kept the whole frame - recover the background ourselves
+    let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
+    if (qc.cropped) {
+      console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+      try {
+        cutBuf = await stripLeftoverBackground(cutBuf);
+        step("floodfill");
+      } catch (e) {
+        console.warn("flood fill failed, keeping birefnet output:", e.message);
+      }
+    }
+
+    let canvas = await toPrintCanvas(cutBuf);
     console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
     canvas = await fitUploadSize(canvas);
     step("canvas");
