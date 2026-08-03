@@ -1,5 +1,8 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v16 (detects drawn white outlines)
+// api/reimagine.js — "עיצוב מחדש" v17
+// v17 change: removed the esrgan upscale + third birefnet pass. That block started at
+// ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
+// Removing it also means the image the user receives is the one that actually passed QC.
 
 import sharp from "sharp";
 
@@ -457,22 +460,6 @@ export default async function handler(req, res) {
       }
     } else if (bad(qc)) {
       console.warn("[reimagine] QC failed but no time budget for a retry");
-    }
-
-    if (elapsed() < 40000) {
-      try {
-        const big = await fal("fal-ai/esrgan", {
-          image_url: art,
-          scale: 2,
-          model: "RealESRGAN_x4plus",
-        });
-        cutout = await fal("fal-ai/birefnet", { image_url: big });
-        step("upscale");
-      } catch (e) {
-        console.warn("upscale skipped:", e.message);
-      }
-    } else {
-      console.warn("[reimagine] upscale skipped - no time budget");
     }
 
     let canvas = await toPrintCanvas(cutout);
