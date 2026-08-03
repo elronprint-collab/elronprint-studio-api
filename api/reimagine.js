@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v20
+// api/reimagine.js — "עיצוב מחדש" v21
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -17,6 +17,11 @@ import { checkRateLimit } from "./_ratelimit.js";
 // (0,0,0), decided the background was dark and refused to run. v20 walks inward from the
 // border THROUGH transparent pixels and samples the first opaque surface it meets, and the
 // fill itself now passes freely through already-transparent pixels.
+// v21 change: prompt-only, and the real fix. The reference the tool is used with is usually a
+// FULL-BLEED PANEL (the "BORN" square), and the prompts told the model to be faithful to the
+// reference - so it produced full-bleed rectangles, which have no background to remove at all.
+// Composition is now forced to an isolated cut-out with wide margins regardless of the
+// reference's framing. Subject, technique and text fidelity are unchanged.
 
 import sharp from "sharp";
 
@@ -163,9 +168,24 @@ The print must read on a white shirt as well as black.
 - In both cases avoid neon, glow and pale fluorescent colours. Lettering in particular
   must be a deep saturated colour, never pale cyan, pale yellow or white.
 
-COMPOSITION RULE.
-The entire subject, including raised arms, hair and lettering, sits well inside the
-frame with clear empty space on all four sides. Nothing touches the edge.
+COMPOSITION RULE — THIS OVERRIDES THE REFERENCE. READ IT TWICE.
+The reference is very often a FULL-BLEED PANEL: a square or rectangle filled edge to edge
+with imagery, sometimes with lettering sitting on top of it. DO NOT REPRODUCE THAT SHAPE.
+Copy the subject, the technique and the spirit — never the panel.
+
+The new design is always a CUT-OUT: one subject floating free on empty white, the way a
+sticker looks before it is stuck to anything. Concretely:
+- The subject occupies roughly 70-80% of the frame and NOTHING touches any edge. There is
+  clear empty space above, below, left and right of everything you describe.
+- No panel, no rectangle, no square, no rounded square, no circle, no badge, no frame, no
+  border, no card, no block of colour, no photo crop, no vignette, no backdrop.
+- Never a tightly cropped close-up that runs off the edges. If the subject is a face,
+  include the whole head and the shoulders with room around them, not a zoomed crop of a
+  nose and lips.
+- State explicitly in your prompt that the subject is isolated, complete, and surrounded by
+  empty white space on all four sides.
+If your description would fill the frame edge to edge, you have written it wrong. Zoom out
+and rewrite it.
 
 Also: no logos, no brand names, no real people, no recognisable copyrighted characters.
 
@@ -193,7 +213,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -221,7 +241,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, isolated cut-out floating on empty space, complete subject with wide empty margins on all four sides, nothing touching any edge, not full-bleed, no panel, no rectangle, no square, no rounded square, no circle, no badge, no card, no frame, no vignette, no photo crop, not a tight close-up, zoomed out, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
   ", dark linework inside the drawing, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
@@ -233,7 +253,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it. Never reproduce the reference's panel or full-bleed framing - draw one isolated subject, zoomed out, complete, with wide empty margins on all four sides and nothing touching any edge. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
