@@ -74,6 +74,66 @@ const AVATAR_CANDIDATES = [
   },
 ];
 
+// מדידה וירטואלית: תמונת אדם + תמונת בגד → האדם לובש את הבגד.
+// זה מה שמאפשר דוברת שלובשת את החולצה שנמכרת בפועל.
+const TRYON_CANDIDATES = [
+  {
+    model: "fal-ai/idm-vton",
+    input: (human, garment, desc) => ({
+      human_image_url: human,
+      garment_image_url: garment,
+      description: desc || "a printed t-shirt",
+      category: "upper_body",
+    }),
+  },
+  {
+    model: "fal-ai/kling/v1-5/kolors-virtual-try-on",
+    input: (human, garment) => ({ human_image_url: human, garment_image_url: garment }),
+  },
+  {
+    model: "fal-ai/cat-vton",
+    input: (human, garment) => ({
+      human_image_url: human, garment_image_url: garment, cloth_type: "upper",
+    }),
+  },
+];
+
+async function submitTryon({ humanUrl, garmentUrl, description, model = null }) {
+  if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
+  if (!humanUrl) throw new Error("חסרה תמונת דוברת");
+  if (!garmentUrl) throw new Error("חסרה תמונת חולצה");
+
+  const known = TRYON_CANDIDATES.filter((c) => c.model === model);
+  const list = model
+    ? (known.length ? known
+                    : [{ model, input: (h, g) => ({ human_image_url: h, garment_image_url: g }) }])
+    : TRYON_CANDIDATES;
+
+  const failures = [];
+
+  for (const cand of list) {
+    try {
+      const data = await falFetch(`${FAL_QUEUE}/${cand.model}`, {
+        method: "POST",
+        body: JSON.stringify(cand.input(humanUrl, garmentUrl, description)),
+      });
+      return {
+        requestId: data.request_id,
+        model: cand.model,
+        statusUrl: data.status_url || null,
+        responseUrl: data.response_url || null,
+        skipped: failures,
+        queued: true,
+      };
+    } catch (e) {
+      failures.push(`${cand.model} → ${e.message}`);
+      if (e.status === 401 || e.status === 403) break;
+    }
+  }
+
+  throw new Error("אף מודל מדידה לא עבד.\n" + failures.join("\n"));
+}
+
 // סנכרון שפתיים: וידאו קיים + אודיו חדש → אותו וידאו עם שפתיים מתאימות.
 // הרבה יותר מהיר וזול מיצירת אווטאר מאפס, כי לא מייצרים וידאו —
 // רק משנים את אזור הפה. זה מה שמאפשר קליפ דוברת קבוע לשימוש חוזר.
@@ -130,6 +190,7 @@ export default async function handler(req, res) {
       case "presenter": return res.json(await falSubmit(MODELS.presenter, presenterInput(body)));
       case "avatar":    return res.json(await submitAvatar(body));
       case "lipsync":   return res.json(await submitLipsync(body));
+      case "tryon":     return res.json(await submitTryon(body));
       case "status":    return res.json(await falStatus(body));
       default:          return res.status(400).json({ error: "action לא מוכר: " + action });
     }
@@ -169,6 +230,77 @@ async function falFetch(url, options = {}) {
   } catch {
     throw new Error("fal החזיר תשובה שאינה JSON: " + raw.slice(0, 200));
   }
+}
+
+// ─── Azure — קולות עבריים אמיתיים ─────────────────────────────
+// הילה ואברי הוקלטו בעברית על ידי דוברי עברית, בניגוד לקולות של
+// ElevenLabs שהם דוברי אנגלית שמבטאים עברית. בנוסף Azure מחזיר
+// את האודיו מיד, בלי תור — אין פה שום המתנה.
+//
+// fal צריך קישור ולא בייטים, אז מעלים את התוצאה ל-Cloudinary.
+
+const AZURE_VOICES = {
+  hila: "he-IL-HilaNeural",
+  avri: "he-IL-AvriNeural",
+};
+
+const CLOUD_NAME = process.env.CLOUDINARY_CLOUD || "dztd5g0p8";
+const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
+
+function ssml(text, voice, rate) {
+  const safe = String(text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="he-IL">` +
+         `<voice name="${voice}"><prosody rate="${rate || "0%"}">${safe}</prosody></voice></speak>`;
+}
+
+async function azureSpeak(text, voiceKey = "hila", rate = "0%") {
+  const key = process.env.AZURE_SPEECH_KEY;
+  const region = process.env.AZURE_SPEECH_REGION;
+  if (!key || !region) throw new Error("AZURE_SPEECH_KEY או AZURE_SPEECH_REGION לא מוגדרים ב-Vercel");
+
+  const voice = AZURE_VOICES[voiceKey] || voiceKey;
+
+  const r = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+    method: "POST",
+    headers: {
+      "Ocp-Apim-Subscription-Key": key,
+      "Content-Type": "application/ssml+xml",
+      "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3",
+      "User-Agent": "ElronPrint",
+    },
+    body: ssml(text, voice, rate),
+  });
+
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`Azure ${r.status}: ${detail.slice(0, 300) || "(תשובה ריקה)"}`);
+  }
+
+  const audio = Buffer.from(await r.arrayBuffer());
+  if (!audio.length) throw new Error("Azure החזיר אודיו ריק");
+
+  const url = await uploadToCloudinary(audio);
+  return { url, provider: "azure", voice, done: true };
+}
+
+// העלאה לא־חתומה, אותו preset שכבר משמש את שאר הכלים
+async function uploadToCloudinary(buf) {
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: "audio/mpeg" }), "voice.mp3");
+  form.append("upload_preset", CLOUD_PRESET);
+
+  const r = await fetch(
+    `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`,
+    { method: "POST", body: form }
+  );
+
+  const raw = await r.text();
+  if (!r.ok) throw new Error(`Cloudinary ${r.status}: ${raw.slice(0, 300)}`);
+
+  const out = JSON.parse(raw);
+  if (!out.secure_url) throw new Error("Cloudinary לא החזיר קישור");
+  return out.secure_url;
 }
 
 // ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
@@ -260,7 +392,29 @@ async function vocalizeWithClaude(text, why = "") {
 
 // ─── קריינות: מנסה מודל אחרי מודל ─────────────────────────────
 
-async function submitVoice({ text, voiceId, niqqud = false, model = null }) {
+async function submitVoice({ text, voiceId, niqqud = false, model = null, provider = null }) {
+  if (!text) throw new Error("חסר טקסט לקריינות");
+
+  // ברירת מחדל: Azure אם הוא מוגדר. fal נשאר כגיבוי ולהשוואה.
+  const useAzure = provider === "azure" ||
+                   (!provider && process.env.AZURE_SPEECH_KEY && process.env.AZURE_SPEECH_REGION);
+
+  if (useAzure) {
+    let spoken = text;
+    let niqqudInfo = null;
+    if (niqqud) {
+      const v = await vocalize(text);
+      spoken = v.text;
+      niqqudInfo = { method: v.method, text: v.text };
+    }
+    const out = await azureSpeak(spoken, voiceId || "hila");
+    return { ...out, niqqud: niqqudInfo };
+  }
+
+  return falVoice({ text, voiceId, niqqud, model });
+}
+
+async function falVoice({ text, voiceId, niqqud = false, model = null }) {
   if (!process.env.FAL_KEY) throw new Error("FAL_KEY לא מוגדר ב-Vercel");
   if (!text) throw new Error("חסר טקסט לקריינות");
 
@@ -449,13 +603,20 @@ async function writeScript({ product, tone = "אנרגטי", seconds = 20 }) {
 
 // ─── קלטים ────────────────────────────────────────────────────
 
-function presenterInput({ describe = "", vertical = true }) {
+function presenterInput({ describe = "", vertical = true, wide = false }) {
+  // wide = פריים רחב שרואים בו את פלג הגוף העליון, כדי שהחולצה תיראה.
+  // בלי זה מקבלים תקריב פנים ואין מקום להלביש עליו כלום.
+  const framing = wide
+    ? "waist-up shot, full torso and plain t-shirt clearly visible, arms relaxed at sides, "
+    : "head and shoulders centered, ";
+
   return {
     prompt:
-      "Photorealistic portrait photo of " +
-      (describe || "a friendly young Israeli woman, natural makeup, casual t-shirt") +
-      ", looking straight at the camera, head and shoulders centered, neutral closed mouth, " +
-      "soft even daylight, plain uncluttered background, smartphone selfie quality, sharp face",
+      "Photorealistic photo of " +
+      (describe || "a friendly young woman, natural makeup, plain white crew-neck t-shirt") +
+      ", standing facing the camera, " + framing +
+      "neutral closed mouth, soft even daylight, plain uncluttered light background, " +
+      "smartphone photo quality, sharp face, no text on clothing",
     image_size: vertical ? "portrait_16_9" : "square_hd",
     num_images: 1,
   };
