@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v22
+// api/reimagine.js — "עיצוב מחדש" v23
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -30,6 +30,18 @@ import { checkRateLimit } from "./_ratelimit.js";
 // completely is thin, and those pixels keep their (floor-filtered) alpha instead of being
 // eroded. Thick regions come out byte-identical to v21 and the faint halo is still removed,
 // because the guarded branch still applies ALPHA_FLOOR. Nothing else in the file is touched.
+// v23 change: three fixes, from a run whose reference was a crow standing on a skull.
+// (a) cleanEdges — v22 protected EVERY thin structure, including the short hairline spurs the
+//     generator hangs off the corners of heavy lettering, which v21's erosion used to delete
+//     silently. The thin mask is now split into connected components and judged by longest
+//     dimension: caption strokes and hatching (tens of px) stay protected, spurs (under ten)
+//     go back through the erosion. Thick artwork is still byte-identical to v21.
+// (b) prompt — the analysis dropped the crow and promoted the skull it stood on. Added a
+//     "which element is the subject" rule: the living/foreground figure wins over the object
+//     it rests on, and it must be named before anything is written.
+// (c) prompt — the reference was one-colour black ink and the output invented red lettering,
+//     because CHANGE EVERYTHING ELSE explicitly told it to change the palette. Palette is now
+//     carried across, ranks above the colour rule, and monochrome stays monochrome.
 
 import sharp from "sharp";
 
@@ -45,6 +57,8 @@ const RIM_LIMIT  = 0.35;
 const ERODE_RADIUS = 2;
 const ALPHA_FLOOR = 130;
 const THIN_GUARD_RADIUS = ERODE_RADIUS + 2;
+const MIN_THIN_LEN_DIV = 64;
+const MIN_THIN_LEN_FLOOR = 16;
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -140,14 +154,36 @@ Whatever the printed graphic depicts, the new design depicts the same kind of th
 A woman stays a woman. A skull stays a skull. A car stays a car.
 NEVER substitute a different category.
 
+WHICH ELEMENT IS THE SUBJECT — DECIDE THIS FIRST AND NAME IT.
+Reference graphics are usually built from several elements: a creature, an object it
+rests on, branches, banners, ornaments. Exactly one of them is the SUBJECT, and it is
+almost always the living or foreground figure — the animal, bird, person, creature or
+character — not the object it perches on, stands on, holds or is framed by. A crow
+standing on a skull is a CROW design, not a skull design. A snake coiled round a dagger
+is a SNAKE design. A tiger inside a wreath is a TIGER design.
+Before you write anything, name the subject in your own head, then carry THAT element
+across. Dropping the main figure and promoting a secondary prop to be the new subject is
+a failure, even though the result may look good on its own. If you are torn between two
+elements, choose the one a person would name if asked "what is on that shirt?".
+
 ONE SUBJECT ONLY — NOTHING BESIDE IT.
 The artwork contains the single subject and nothing else. No stacks of books, plants,
 cups, flowers, leaves, sparkles, wreaths, frames or decorative motifs beside, behind or
 under it. If the pose needs something in the hands, allow at most ONE small held item.
 
-CHANGE EVERYTHING ELSE.
-Change the pose, the activity, the hair, the outfit, the colour palette and the camera
+CHANGE EVERYTHING ELSE — EXCEPT THE PALETTE.
+Change the pose, the activity, the hair, the outfit, the composition and the camera
 angle. If your description could be mistaken for the original graphic, rewrite it.
+
+PALETTE FIDELITY — RANKS ABOVE THE COLOUR RULE BELOW.
+The new design uses the SAME colours as the reference graphic and introduces no others.
+- If the graphic is single-colour work — black ink only, one-colour screen print,
+  monochrome linework — the new design is the SAME single colour throughout, lettering
+  included. Do not add a second colour. Do not make the text red, gold or any accent
+  colour that is absent from the reference.
+- If the graphic uses two or three colours, name those colours and use only those.
+- Only when the graphic is genuinely full-colour may you range freely.
+Name the palette explicitly in your prompt, and say how many colours it has.
 
 TEXT RULE.
 - If the printed graphic contains NO text, the new design contains no text either.
@@ -157,7 +193,10 @@ TEXT RULE.
     word.
   * Never reuse the original words, and never use a real brand, band, company, book or
     film name, or a known trademarked slogan.
-  * Solid saturated letters with no outline, no stroke and no drop shadow around them.
+  * Solid clean letters with no outline, no stroke and no drop shadow around them, and no
+    spurs, whiskers, spikes, hairlines, ticks or stray marks sticking out of the letter
+    corners. Smooth, closed letterforms.
+  * The lettering takes its colour from the reference palette, not from a new accent colour.
   * Place it so it does not overlap the subject's face.
 
 NO BACKGROUND.
@@ -168,7 +207,9 @@ eggshell, not warm white, not a wash, not a gradient, not a halo, not lightly ti
 not textured. State explicitly in your prompt that the background is pure white #FFFFFF
 and completely empty.
 
-COLOUR RULE — subordinate to the style rule.
+COLOUR RULE — subordinate to the style rule AND to palette fidelity. It tells you how
+to pick colours only when the reference leaves you a choice; it never licenses adding a
+hue the reference does not have.
 The print must read on a white shirt as well as black.
 - For ILLUSTRATED styles: dark linework inside the drawing, saturated mid-to-deep
   colours, no large white or cream fills, strong contrast between adjacent shapes.
@@ -222,7 +263,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic, but a different pose, palette and details. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic - and if the graphic has several elements, carry across the MAIN figure (the creature or person), not the object it sits on - but a different pose and different details. Keep the reference's colour palette: if the graphic is one-colour ink, yours is that same single colour, lettering included. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -250,7 +291,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, isolated cut-out floating on empty space, complete subject with wide empty margins on all four sides, nothing touching any edge, not full-bleed, no panel, no rectangle, no square, no rounded square, no circle, no badge, no card, no frame, no vignette, no photo crop, not a tight close-up, zoomed out, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, isolated cut-out floating on empty space, complete subject with wide empty margins on all four sides, nothing touching any edge, not full-bleed, no panel, no rectangle, no square, no rounded square, no circle, no badge, no card, no frame, no vignette, no photo crop, not a tight close-up, zoomed out, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, clean closed letterforms, no spurs on the letters, no whiskers or spikes on the letters, no stray hairlines, no ticks or specks around the lettering, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
   ", dark linework inside the drawing, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
@@ -262,7 +303,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject, different pose, palette and details, alone with nothing next to it and no outline traced around it. Never reproduce the reference's panel or full-bleed framing - draw one isolated subject, zoomed out, complete, with wide empty margins on all four sides and nothing touching any edge. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject - keep the graphic's MAIN figure, not a secondary prop it rests on - same colour palette as the reference with no new colours added, different pose and different details, alone with nothing next to it and no outline traced around it. Never reproduce the reference's panel or full-bleed framing - draw one isolated subject, zoomed out, complete, with wide empty margins on all four sides and nothing touching any edge. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -415,6 +456,45 @@ function thinGuard(a, w, h, r) {
   return out;
 }
 
+/* A thin structure is worth protecting only if it is a real piece of artwork. The v22 guard
+   protected every thin structure, including the short hairline spurs the generator likes to
+   hang off the corners of heavy lettering — v21's erosion used to delete those silently. So
+   label the connected components of the thin mask and judge each by its longest dimension:
+   a caption letter or a hatching line runs tens of pixels, a spur is under ten. */
+function protectThinArtwork(a, guard, w, h) {
+  const n = w * h;
+  const minLen = Math.max(MIN_THIN_LEN_FLOOR, Math.round(Math.max(w, h) / MIN_THIN_LEN_DIV));
+  const protect = new Uint8Array(n);
+  const seen = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  const pixels = new Int32Array(n);
+  let kept = 0, specks = 0;
+
+  for (let p = 0; p < n; p++) {
+    if (seen[p] || !a[p] || guard[p]) continue;
+    let sp = 0, cnt = 0;
+    let x0 = w, x1 = -1, y0 = h, y1 = -1;
+    seen[p] = 1; stack[sp++] = p;
+    while (sp > 0) {
+      const q = stack[--sp];
+      pixels[cnt++] = q;
+      const x = q % w, y = (q / w) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0)     { const r = q - 1; if (!seen[r] && a[r] && !guard[r]) { seen[r] = 1; stack[sp++] = r; } }
+      if (x < w - 1) { const r = q + 1; if (!seen[r] && a[r] && !guard[r]) { seen[r] = 1; stack[sp++] = r; } }
+      if (y > 0)     { const r = q - w; if (!seen[r] && a[r] && !guard[r]) { seen[r] = 1; stack[sp++] = r; } }
+      if (y < h - 1) { const r = q + w; if (!seen[r] && a[r] && !guard[r]) { seen[r] = 1; stack[sp++] = r; } }
+    }
+    if (Math.max(x1 - x0 + 1, y1 - y0 + 1) >= minLen) {
+      for (let i = 0; i < cnt; i++) protect[pixels[i]] = 1;
+      kept += cnt;
+    } else specks += cnt;
+  }
+  console.log(`[reimagine] cleanEdges: ${kept} thin-artwork px protected, ${specks} spur px eroded (minLen ${minLen})`);
+  return protect;
+}
+
 async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h, channels: ch } = info;
@@ -423,6 +503,7 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
   for (let p = 0, i = 3; p < w * h; p++, i += ch) a[p] = data[i] < floor ? 0 : data[i];
 
   const guard = thinGuard(a, w, h, THIN_GUARD_RADIUS);
+  const protect = protectThinArtwork(a, guard, w, h);
 
   const tmp = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
@@ -438,11 +519,10 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
       tmp[row + x] = m;
     }
   }
-  let kept = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const p = y * w + x;
-      if (!guard[p]) { data[p * ch + 3] = a[p]; if (a[p]) kept++; continue; }
+      if (protect[p]) { data[p * ch + 3] = a[p]; continue; }
       let m = 255;
       for (let k = -radius; k <= radius; k++) {
         const yy = y + k;
@@ -453,8 +533,6 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
       data[p * ch + 3] = m;
     }
   }
-  console.log(`[reimagine] cleanEdges: ${kept} thin-detail px protected from erosion`);
-
   return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
 }
 
