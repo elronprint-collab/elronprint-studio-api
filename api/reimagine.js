@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v23
+// api/reimagine.js — "עיצוב מחדש" v24
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -42,6 +42,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // (c) prompt — the reference was one-colour black ink and the output invented red lettering,
 //     because CHANGE EVERYTHING ELSE explicitly told it to change the palette. Palette is now
 //     carried across, ranks above the colour rule, and monochrome stays monochrome.
+// v24 change: fixes a regression introduced by v23(c). Palette fidelity was allowed to outrank
+// the colour rule outright, so a reference whose graphic was WHITE lettering on a black shirt
+// produced white lettering — and white artwork drawn on the mandatory pure-white #FFFFFF
+// background is cut away by the background removal, leaving only the thin dark outlines. The
+// "GAME DAY" run came back as hollow outline letters, invisible on a black shirt. Palette
+// fidelity now has one hard exception: nothing in the artwork may be white or near-white,
+// because white IS the background here. A light-on-dark reference is translated to a deep
+// version of the same hue. Also adds a `hollow` QC check (share of transparency that is
+// enclosed empty space) so an outline-only result triggers the existing retry instead of shipping.
 
 import sharp from "sharp";
 
@@ -54,6 +63,7 @@ const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 const EDGE_LIMIT = 0.015;
 const PALE_LIMIT = 0.12;
 const RIM_LIMIT  = 0.35;
+const HOLE_LIMIT = 0.55;
 const ERODE_RADIUS = 2;
 const ALPHA_FLOOR = 130;
 const THIN_GUARD_RADIUS = ERODE_RADIUS + 2;
@@ -185,6 +195,17 @@ The new design uses the SAME colours as the reference graphic and introduces no 
 - Only when the graphic is genuinely full-colour may you range freely.
 Name the palette explicitly in your prompt, and say how many colours it has.
 
+ONE HARD EXCEPTION TO PALETTE FIDELITY — WHITE.
+Nothing you describe may be white, near-white, ivory, cream, pale grey or any very light
+tint, because the background of the new design IS pure white and everything white will be
+cut away automatically. Anything you paint white simply disappears and leaves a hollow
+outline behind.
+Reference graphics printed on black, charcoal or navy garments are very often WHITE
+artwork. When that is the case you must FLIP it: describe the same subject, the same
+technique and the same shapes, but rendered in a deep, dark, saturated version — solid
+black ink, deep charcoal, or a deep saturated hue. Never write "white lettering", "white
+linework", "white silhouette" or "light coloured". Say the palette is dark on white.
+
 TEXT RULE.
 - If the printed graphic contains NO text, the new design contains no text either.
 - If it DOES contain text, invent DIFFERENT wording of your own.
@@ -193,6 +214,9 @@ TEXT RULE.
     word.
   * Never reuse the original words, and never use a real brand, band, company, book or
     film name, or a known trademarked slogan.
+  * The letters are FILLED SOLID with dark colour, edge to edge. Never hollow, never
+    outline-only, never open letterforms with an empty or white interior, never a
+    "colouring book" bubble outline waiting to be filled in.
   * Solid clean letters with no outline, no stroke and no drop shadow around them, and no
     spurs, whiskers, spikes, hairlines, ticks or stray marks sticking out of the letter
     corners. Smooth, closed letterforms.
@@ -263,7 +287,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic - and if the graphic has several elements, carry across the MAIN figure (the creature or person), not the object it sits on - but a different pose and different details. Keep the reference's colour palette: if the graphic is one-colour ink, yours is that same single colour, lettering included. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
+          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic - and if the graphic has several elements, carry across the MAIN figure (the creature or person), not the object it sits on - but a different pose and different details. Keep the reference's colour palette: if the graphic is one-colour ink, yours is that same single colour, lettering included - EXCEPT that nothing may be white or pale, because the background is white and would swallow it, so a white-on-black reference becomes deep dark ink on white. Every letter and shape is filled solid, never a hollow outline. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
         ],
       }],
     }),
@@ -291,7 +315,7 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
 /* ---------------- step 2: generate ---------------- */
 const COMMON_SUFFIX =
-  ", single subject only, isolated cut-out floating on empty space, complete subject with wide empty margins on all four sides, nothing touching any edge, not full-bleed, no panel, no rectangle, no square, no rounded square, no circle, no badge, no card, no frame, no vignette, no photo crop, not a tight close-up, zoomed out, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, clean closed letterforms, no spurs on the letters, no whiskers or spikes on the letters, no stray hairlines, no ticks or specks around the lettering, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
+  ", single subject only, isolated cut-out floating on empty space, complete subject with wide empty margins on all four sides, nothing touching any edge, not full-bleed, no panel, no rectangle, no square, no rounded square, no circle, no badge, no card, no frame, no vignette, no photo crop, not a tight close-up, zoomed out, nothing beside the subject, no extra objects, no props, no decorations, isolated on a pure white #FFFFFF background, flat empty pure white backdrop, no paper, no paper texture, no toned paper, no cream background, no ivory, no beige, no tan, no kraft, no parchment, no newsprint, no canvas texture, no aged paper, no vintage paper, no weathered surface, no sepia tone, no off-white, no warm white, no grain, no speckle, no stains, no tint, no gradient behind the subject, no background panel, no rectangle, no scene, no furniture, no border, no outline around the artwork, no white keyline, no contour stroke, no glow, not a sticker, no die-cut edge, no neon, no pale fluorescent colours, solid filled letters, no hollow letters, no outline-only lettering, no open letterforms, no empty letter interiors, no colouring-book outlines, nothing white in the artwork, no white fills, no white linework, clean closed letterforms, no spurs on the letters, no whiskers or spikes on the letters, no stray hairlines, no ticks or specks around the lettering, entire subject inside the frame with empty margins on all sides, vertical 4:5 composition";
 
 const ILLUSTRATION_SUFFIX =
   ", dark linework inside the drawing, deep saturated colours, strong value contrast, no white or cream fills, commercial illustration quality" + COMMON_SUFFIX;
@@ -303,7 +327,7 @@ async function generate(prompt, style, dataUri) {
   const suffix = style === "photoreal" ? PHOTOREAL_SUFFIX : ILLUSTRATION_SUFFIX;
   try {
     return await fal("fal-ai/nano-banana/edit", {
-      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject - keep the graphic's MAIN figure, not a secondary prop it rests on - same colour palette as the reference with no new colours added, different pose and different details, alone with nothing next to it and no outline traced around it. Never reproduce the reference's panel or full-bleed framing - draw one isolated subject, zoomed out, complete, with wide empty margins on all four sides and nothing touching any edge. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
+      prompt: `The reference may be a photo of someone wearing a printed shirt — if so, use ONLY the graphic printed on the shirt as your reference and ignore the wearer, the garment and the surroundings completely. Draw a new standalone artwork in that graphic's technique, same kind of subject - keep the graphic's MAIN figure, not a secondary prop it rests on - same colour palette as the reference with no new colours added but nothing white or pale (white would vanish into the white background - a white-on-black reference becomes deep dark ink), every letter and shape filled solid and never a hollow outline, different pose and different details, alone with nothing next to it and no outline traced around it. Never reproduce the reference's panel or full-bleed framing - draw one isolated subject, zoomed out, complete, with wide empty margins on all four sides and nothing touching any edge. Match the drawing technique but never the surface it is drawn on: the background here is pure white #FFFFFF, flat and empty, never cream or toned or textured paper: ${prompt}${suffix}`,
       image_urls: [dataUri],
       num_images: 1,
       output_format: "png",
@@ -361,16 +385,48 @@ async function inspect(url) {
     }
   }
 
+  /* white fills sit on a white background, so background removal eats them and leaves only
+     the dark outlines behind. The tell is not how much ink there is but where the empty
+     space is: hollow letterforms enclose huge pockets of nothing that never touch the
+     border. Flood the transparent area inwards from the four edges; whatever transparency
+     it cannot reach is enclosed. Measured on real output: a solid design scores 0.17, the
+     hollow "GAME DAY" run scored 0.78. */
+  const ink = new Uint8Array(w * h);
+  let inkCount = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (A(x, y) >= 128) { ink[y * w + x] = 1; inkCount++; }
+    }
+  }
+  const reached = new Uint8Array(w * h);
+  const fstack = new Int32Array(w * h);
+  let fsp = 0;
+  const seed = (q) => { if (!ink[q] && !reached[q]) { reached[q] = 1; fstack[fsp++] = q; } };
+  for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
+  while (fsp > 0) {
+    const q = fstack[--fsp];
+    const x = q % w, y = (q / w) | 0;
+    if (x > 0) seed(q - 1);
+    if (x < w - 1) seed(q + 1);
+    if (y > 0) seed(q - w);
+    if (y < h - 1) seed(q + w);
+  }
+  let enclosed = 0;
+  for (let q = 0; q < w * h; q++) if (!ink[q] && !reached[q]) enclosed++;
+  const holeRatio = inkCount + enclosed ? enclosed / (inkCount + enclosed) : 0;
+
   const edgeRatio = edgeTotal ? edgeHits / edgeTotal : 0;
   const paleRatio = solid ? pale / solid : 0;
   const rimRatio = boundary ? whiteRim / boundary : 0;
   const report = {
-    edgeRatio, paleRatio, rimRatio,
+    edgeRatio, paleRatio, rimRatio, holeRatio,
     cropped: edgeRatio > EDGE_LIMIT,
     tooPale: paleRatio > PALE_LIMIT,
     outlined: rimRatio > RIM_LIMIT,
+    hollow: inkCount > 0.01 * w * h && holeRatio > HOLE_LIMIT,
   };
-  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} rim=${rimRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale} outlined=${report.outlined}`);
+  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} rim=${rimRatio.toFixed(3)} hole=${holeRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale} outlined=${report.outlined} hollow=${report.hollow}`);
   return report;
 }
 
@@ -381,6 +437,9 @@ function retryHint(qc) {
   }
   if (qc.tooPale) {
     parts.push("CRITICAL: the previous attempt was too light and would disappear on a white shirt. Use much deeper, more saturated colours and stronger tonal contrast. Keep the same rendering technique and the same kind of subject");
+  }
+  if (qc.hollow) {
+    parts.push("CRITICAL: the previous attempt came back as HOLLOW OUTLINE SHAPES with nothing inside them - empty letters and empty forms, like a colouring book page. That happens when you paint something white: white is the background here and it is cut away. Fill every letter and every shape SOLID with dark saturated colour, edge to edge. Nothing in the artwork may be white, near-white, cream or pale");
   }
   if (qc.outlined) {
     parts.push("CRITICAL: the previous attempt had a white outline traced around the artwork and the lettering, like a sticker. Draw NO outline, NO keyline, NO stroke and NO glow around the subject or the letters. The artwork must end exactly where the drawing ends");
@@ -764,8 +823,8 @@ export default async function handler(req, res) {
     step("attempt1");
 
     let qc = await inspect(cutout);
-    const bad = (q) => q.cropped || q.tooPale || q.outlined;
-    const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0) + (q.outlined ? 1 : 0);
+    const bad = (q) => q.cropped || q.tooPale || q.outlined || q.hollow;
+    const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0) + (q.outlined ? 1 : 0) + (q.hollow ? 2 : 0);
 
     if (bad(qc) && elapsed() < 30000) {
       console.log("[reimagine] QC failed - regenerating with corrections");
@@ -819,6 +878,7 @@ export default async function handler(req, res) {
         edge: +qc.edgeRatio.toFixed(3),
         pale: +qc.paleRatio.toFixed(3),
         rim: +qc.rimRatio.toFixed(3),
+        hole: +qc.holeRatio.toFixed(3),
       },
     });
   } catch (err) {
