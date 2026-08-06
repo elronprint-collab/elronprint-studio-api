@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v21
+// api/reimagine.js — "עיצוב מחדש" v22
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -22,6 +22,14 @@ import { checkRateLimit } from "./_ratelimit.js";
 // reference - so it produced full-bleed rectangles, which have no background to remove at all.
 // Composition is now forced to an isolated cut-out with wide margins regardless of the
 // reference's framing. Subject, technique and text fidelity are unchanged.
+// v22 change: cleanEdges only. The alpha erosion is a min filter of radius 2, so it shrinks
+// EVERY shape by 2px on every side. Thick artwork does not notice, but thin lettering does:
+// a 6px stroke came back as a 2px ghost, which is why small caption text ("PURE", "SOUND &
+// FIRE") almost vanished while the heavy blackletter above it survived intact. The erosion
+// is now guarded by a morphological opening: any structure that a radius-4 opening wipes out
+// completely is thin, and those pixels keep their (floor-filtered) alpha instead of being
+// eroded. Thick regions come out byte-identical to v21 and the faint halo is still removed,
+// because the guarded branch still applies ALPHA_FLOOR. Nothing else in the file is touched.
 
 import sharp from "sharp";
 
@@ -36,6 +44,7 @@ const PALE_LIMIT = 0.12;
 const RIM_LIMIT  = 0.35;
 const ERODE_RADIUS = 2;
 const ALPHA_FLOOR = 130;
+const THIN_GUARD_RADIUS = ERODE_RADIUS + 2;
 
 /* ---------------- CORS ---------------- */
 const ALLOWED = [
@@ -341,13 +350,79 @@ function retryHint(qc) {
 /* ---------------- edge cleanup ----------------
    Background removal leaves a faint light halo a pixel or two wide, which prints as a
    grey outline on a black garment. Drop very faint alpha, then erode the alpha channel
-   with a separable min filter. */
+   with a separable min filter.
+
+   The erosion is unavoidably indiscriminate: it takes `radius` pixels off every shape,
+   which is invisible on a 100px blackletter stroke and fatal on a 6px caption stroke.
+   So it is guarded. `thinGuard` runs a binary morphological opening (erode then dilate,
+   both separable, both with early exit) at a slightly larger radius; anything the opening
+   erases completely is a thin structure. Those pixels skip the erosion and keep their
+   floor-filtered alpha. Pixels inside thick shapes are unaffected, so thick artwork is
+   byte-for-byte what v21 produced, and the halo is still removed everywhere because the
+   guarded branch is fed the same ALPHA_FLOOR-filtered alpha. */
+function thinGuard(a, w, h, r) {
+  const n = w * h;
+  const b = new Uint8Array(n);
+  for (let p = 0; p < n; p++) b[p] = a[p] ? 1 : 0;
+
+  const ex = new Uint8Array(n);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = 1;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k;
+        if (xx < 0 || xx >= w || !b[row + xx]) { m = 0; break; }
+      }
+      ex[row + x] = m;
+    }
+  }
+  const er = new Uint8Array(n);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let m = 1;
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k;
+        if (yy < 0 || yy >= h || !ex[yy * w + x]) { m = 0; break; }
+      }
+      er[y * w + x] = m;
+    }
+  }
+
+  const dx = new Uint8Array(n);
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let m = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = x + k;
+        if (xx >= 0 && xx < w && er[row + xx]) { m = 1; break; }
+      }
+      dx[row + x] = m;
+    }
+  }
+  const out = new Uint8Array(n);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let m = 0;
+      for (let k = -r; k <= r; k++) {
+        const yy = y + k;
+        if (yy >= 0 && yy < h && dx[yy * w + x]) { m = 1; break; }
+      }
+      out[y * w + x] = m;
+    }
+  }
+  return out;
+}
+
 async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
   const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
   const { width: w, height: h, channels: ch } = info;
 
   const a = new Uint8Array(w * h);
   for (let p = 0, i = 3; p < w * h; p++, i += ch) a[p] = data[i] < floor ? 0 : data[i];
+
+  const guard = thinGuard(a, w, h, THIN_GUARD_RADIUS);
 
   const tmp = new Uint8Array(w * h);
   for (let y = 0; y < h; y++) {
@@ -363,8 +438,11 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
       tmp[row + x] = m;
     }
   }
+  let kept = 0;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (!guard[p]) { data[p * ch + 3] = a[p]; if (a[p]) kept++; continue; }
       let m = 255;
       for (let k = -radius; k <= radius; k++) {
         const yy = y + k;
@@ -372,9 +450,10 @@ async function cleanEdges(buf, radius = ERODE_RADIUS, floor = ALPHA_FLOOR) {
         const v = tmp[yy * w + x];
         if (v < m) m = v;
       }
-      data[(y * w + x) * ch + 3] = m;
+      data[p * ch + 3] = m;
     }
   }
+  console.log(`[reimagine] cleanEdges: ${kept} thin-detail px protected from erosion`);
 
   return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
 }
