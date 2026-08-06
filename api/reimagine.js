@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v24
+// api/reimagine.js — "עיצוב מחדש" v25
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -51,6 +51,16 @@ import { checkRateLimit } from "./_ratelimit.js";
 // because white IS the background here. A light-on-dark reference is translated to a deep
 // version of the same hue. Also adds a `hollow` QC check (share of transparency that is
 // enclosed empty space) so an outline-only result triggers the existing retry instead of shipping.
+// v25 change: the reference is usually a PHOTO OF A MODEL WEARING a printed shirt, and every
+// version so far has fought that with words alone — "ignore the wearer" appears four times in
+// the prompts. It does not hold, because nano-banana/edit is an image-EDIT model: hand it a
+// photo of a woman holding a football and it will hand back a woman holding a football with
+// different shirt text. The GAME DAY v24 run came back as exactly that, model and all.
+// So stop arguing with it and stop showing it the wearer. The analysis call already looks at
+// the image, so it now also returns GRAPHIC: x0,y0,x1,y1 — the printed graphic's box in
+// percent — and the handler crops the reference to that box before the generator ever sees
+// it. No extra API call. Falls back to the full image whenever the box is missing, malformed
+// or implausibly small.
 
 import sharp from "sharp";
 
@@ -268,6 +278,15 @@ First line: either
 STYLE: photoreal
 or
 STYLE: illustration
+Second line: the location of the PRINTED GRAPHIC inside the image you were shown, as
+GRAPHIC: x0,y0,x1,y1
+where each value is a whole number from 0 to 100, a percentage of the image's width or
+height, x0,y0 being the top-left corner of the box and x1,y1 the bottom-right. Draw the box
+tightly around the printed artwork itself — not the shirt, not the person, not the photo.
+If the image is already a standalone artwork file with no garment or wearer in it, write
+GRAPHIC: full
+Getting this box right matters as much as the prompt: the wearer is cropped away using it,
+and anything you leave inside the box may end up in the new design.
 Then a blank line, then 2-4 sentences as a direct image-generation prompt in English.
 No preamble, no markdown, nothing else.`;
 
@@ -307,10 +326,72 @@ async function analyzeAndReimagine(base64Data, mediaType) {
 
   const m = raw.match(/^\s*STYLE:\s*(photoreal|illustration)\s*/i);
   const style = m ? m[1].toLowerCase() : "illustration";
-  const prompt = raw.replace(/^\s*STYLE:\s*(photoreal|illustration)\s*/i, "").trim();
+  let rest = raw.replace(/^\s*STYLE:\s*(photoreal|illustration)\s*/i, "").trim();
 
-  console.log(`[reimagine] style=${style} prompt:`, prompt.slice(0, 250));
-  return { style, prompt };
+  let box = null;
+  const g = rest.match(/^\s*GRAPHIC:\s*([^\n]*)/i);
+  if (g) {
+    const v = g[1].trim();
+    const nums = v.match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+    if (nums) {
+      const [x0, y0, x1, y1] = nums.slice(1, 5).map(Number);
+      if (x1 > x0 && y1 > y0 && x1 <= 100 && y1 <= 100) box = { x0, y0, x1, y1 };
+    }
+    rest = rest.replace(/^\s*GRAPHIC:\s*[^\n]*\n?/i, "").trim();
+  }
+  const prompt = rest;
+
+  console.log(`[reimagine] style=${style} graphic=${box ? `${box.x0},${box.y0},${box.x1},${box.y1}` : "full"} prompt:`, prompt.slice(0, 250));
+  return { style, prompt, box };
+}
+
+/* ---------------- crop the reference down to the printed graphic ----------------
+   Words never won this argument. nano-banana/edit reproduces what it is shown, so the
+   wearer, the football and the denim shorts have to physically leave the input, not merely
+   be forbidden in the prompt. The box comes free with the analysis call. Padded slightly so
+   a tight box does not clip the artwork, and refused when it is implausibly small — a bad
+   box that throws away the graphic is worse than no crop at all. */
+const CROP_PAD = 3;
+const MIN_CROP_FRAC = 0.03;
+const MIN_REF_DIM = 768;
+
+async function cropToGraphic(dataUri, box) {
+  if (!box) return dataUri;
+  const m = dataUri.match(/^data:(image\/\w+);base64,(.+)$/);
+  if (!m) return dataUri;
+
+  const buf = Buffer.from(m[2], "base64");
+  const meta = await sharp(buf).metadata();
+  if (!meta.width || !meta.height) return dataUri;
+
+  const pct = (v) => Math.min(100, Math.max(0, v));
+  const x0 = pct(box.x0 - CROP_PAD), y0 = pct(box.y0 - CROP_PAD);
+  const x1 = pct(box.x1 + CROP_PAD), y1 = pct(box.y1 + CROP_PAD);
+
+  const left = Math.round((x0 / 100) * meta.width);
+  const top = Math.round((y0 / 100) * meta.height);
+  const width = Math.max(1, Math.round(((x1 - x0) / 100) * meta.width));
+  const height = Math.max(1, Math.round(((y1 - y0) / 100) * meta.height));
+
+  if ((width * height) / (meta.width * meta.height) < MIN_CROP_FRAC) {
+    console.warn(`[reimagine] graphic box too small (${width}x${height}) - using full reference`);
+    return dataUri;
+  }
+  if (left + width > meta.width || top + height > meta.height) {
+    console.warn("[reimagine] graphic box out of bounds - using full reference");
+    return dataUri;
+  }
+
+  let pipe = sharp(buf).extract({ left, top, width, height });
+  // a shirt graphic inside a 600px product photo crops down to a couple of hundred pixels;
+  // give the edit model something it can actually read
+  if (Math.max(width, height) < MIN_REF_DIM) {
+    pipe = pipe.resize(MIN_REF_DIM, MIN_REF_DIM, { fit: "inside", kernel: "lanczos3" });
+  }
+  const out = await pipe.png({ compressionLevel: 3 }).toBuffer();
+  const om = await sharp(out).metadata();
+  console.log(`[reimagine] cropped reference ${meta.width}x${meta.height} -> ${width}x${height} at ${left},${top} (sent ${om.width}x${om.height})`);
+  return `data:image/png;base64,${out.toString("base64")}`;
 }
 
 /* ---------------- step 2: generate ---------------- */
@@ -815,10 +896,17 @@ export default async function handler(req, res) {
     const elapsed = () => Date.now() - t0;
     const step = (name) => console.log(`[reimagine] ${name}: ${elapsed()}ms`);
 
-    const { style, prompt } = await analyzeAndReimagine(base64Data, mediaType);
+    const { style, prompt, box } = await analyzeAndReimagine(base64Data, mediaType);
     step("analyze");
 
-    let art = await generate(prompt, style, image);
+    let reference = image;
+    try {
+      reference = await cropToGraphic(image, box);
+    } catch (e) {
+      console.warn("[reimagine] crop failed, using full reference:", e.message);
+    }
+
+    let art = await generate(prompt, style, reference);
     let cutout = await fal("fal-ai/birefnet", { image_url: art });
     step("attempt1");
 
@@ -829,7 +917,7 @@ export default async function handler(req, res) {
     if (bad(qc) && elapsed() < 30000) {
       console.log("[reimagine] QC failed - regenerating with corrections");
       try {
-        const art2 = await generate(prompt + retryHint(qc), style, image);
+        const art2 = await generate(prompt + retryHint(qc), style, reference);
         const cut2 = await fal("fal-ai/birefnet", { image_url: art2 });
         const qc2 = await inspect(cut2);
         step("attempt2");
