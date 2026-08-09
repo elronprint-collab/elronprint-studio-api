@@ -125,15 +125,14 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'חתימה לא תקינה' });
   }
 
-  const customerId = req.query.logged_in_customer_id;
-  if (!customerId) {
-    // אבחון זמני — מראה אילו פרמטרים שופיפיי באמת שולחת
-    console.log('NO CUSTOMER ID. query keys:', Object.keys(req.query).join(', '));
-    return res.status(401).json({
-      error: 'יש להתחבר לחשבון בחנות כדי לשאול את המורה',
-      debug_keys: Object.keys(req.query),
-    });
-  }
+  // ---- מצב אורח (זמני) ----
+  // שופיפיי לא מוסרת מזהה לקוח בחשבונות מהסוג החדש, לכן כל מי שאינו מזוהה
+  // נספר תחת תלמיד יחיד בשם "guest" עם מכסה כללית גבוהה יותר.
+  // הבקשה עדיין חייבת לעבור אימות חתימה למעלה — זה לא פתוח לכל העולם.
+  // כשנפתור את ההתחברות: להחזיר כאן 401 ולמחוק את GUEST_LIMIT.
+  const customerId = req.query.logged_in_customer_id || 'guest';
+  const isGuest = customerId === 'guest';
+  const GUEST_LIMIT = 100;
 
   // --- 2. קלט ---
   const { message, lessonId } = req.body || {};
@@ -165,9 +164,11 @@ export default async function handler(req, res) {
     );
     const used = usageRows[0]?.questions_count || 0;
 
-    if (used >= student.daily_question_limit) {
+    const limit = isGuest ? GUEST_LIMIT : student.daily_question_limit;
+
+    if (used >= limit) {
       return res.status(429).json({
-        error: `הגעת למכסת ${student.daily_question_limit} השאלות להיום. נתראה מחר!`,
+        error: `הגענו למכסת ${limit} השאלות להיום. נתראה מחר!`,
       });
     }
 
