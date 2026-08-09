@@ -127,7 +127,12 @@ export default async function handler(req, res) {
 
   const customerId = req.query.logged_in_customer_id;
   if (!customerId) {
-    return res.status(401).json({ error: 'יש להתחבר לחשבון בחנות כדי לשאול את המורה' });
+    // אבחון זמני — מראה אילו פרמטרים שופיפיי באמת שולחת
+    console.log('NO CUSTOMER ID. query keys:', Object.keys(req.query).join(', '));
+    return res.status(401).json({
+      error: 'יש להתחבר לחשבון בחנות כדי לשאול את המורה',
+      debug_keys: Object.keys(req.query),
+    });
   }
 
   // --- 2. קלט ---
