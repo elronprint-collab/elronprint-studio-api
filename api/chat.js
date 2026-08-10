@@ -17,7 +17,7 @@
 
 import crypto from 'crypto';
 
-const MODEL = 'gemini-2.5-flash';
+const MODEL = 'gemini-3.5-flash-lite';
 const MAX_QUESTION_CHARS = 1500;
 const HISTORY_LIMIT = 10;
 
