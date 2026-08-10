@@ -284,8 +284,7 @@ export default async function handler(req, res) {
   } catch (err) {
     console.error('chat handler error:', err);
     if (!res.headersSent) {
-      // אבחון זמני — מחזיר את הסיבה האמיתית כדי שנראה אותה בעמוד
-      res.status(500).json({ error: 'שגיאה בשרת: ' + (err && err.message ? err.message : String(err)) });
+    res.status(500).json({ error: 'שגיאה בשרת. נסה שוב בעוד רגע.' }); 
     } else {
       res.end();
     }
