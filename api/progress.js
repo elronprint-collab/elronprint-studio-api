@@ -76,6 +76,40 @@ async function findStudent(customerId, createIfMissing) {
   return created && created[0] ? created[0].id : null;
 }
 
+// זהות התלמיד לפי סשן משלנו (נוצר ב-api/auth.js)
+function epaiHash(s) {
+  return crypto
+    .createHmac('sha256', APP_SECRET || 'fallback')
+    .update(String(s))
+    .digest('hex');
+}
+
+function tokenFromReq(req, body) {
+  return (
+    req.headers['x-epai-token'] ||
+    req.query.token ||
+    (body && body.token) ||
+    null
+  );
+}
+
+async function studentIdFromToken(token) {
+  if (!token || String(token).length < 32) return null;
+  try {
+    const rows = await sbGet(
+      'sessions?token_hash=eq.' + encodeURIComponent(epaiHash(token)) +
+      '&select=student_id,expires_at&limit=1'
+    );
+    const s = rows[0];
+    if (!s) return null;
+    if (new Date(s.expires_at).getTime() < Date.now()) return null;
+    return s.student_id;
+  } catch (e) {
+    console.error('studentIdFromToken:', e);
+    return null;
+  }
+}
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
 
@@ -85,9 +119,10 @@ export default async function handler(req, res) {
     }
 
     const customerId = req.query.logged_in_customer_id;
+    let sessionStudentId = await studentIdFromToken(tokenFromReq(req, null));
 
     // אורח — לא שגיאה. פשוט אין התקדמות להציג ואין מה לשמור.
-    if (!customerId) {
+    if (!sessionStudentId && !customerId) {
       if (req.method === 'POST') {
         return res.status(200).json({ loggedIn: false, saved: false });
       }
@@ -96,7 +131,7 @@ export default async function handler(req, res) {
 
     // ---------- קריאה ----------
     if (req.method === 'GET') {
-      const studentId = await findStudent(customerId, false);
+      const studentId = sessionStudentId || await findStudent(customerId, false);
       if (!studentId) return res.status(200).json({ loggedIn: true, progress: {} });
 
       const rows = await sbGet(
@@ -138,7 +173,10 @@ export default async function handler(req, res) {
         return res.status(404).json({ error: 'שיעור לא נמצא' });
       }
 
-      const studentId = await findStudent(customerId, true);
+      if (!sessionStudentId) {
+        sessionStudentId = await studentIdFromToken(tokenFromReq(req, body));
+      }
+      const studentId = sessionStudentId || await findStudent(customerId, true);
       if (!studentId) {
         return res.status(500).json({ error: 'שגיאה בשרת. נסה שוב בעוד רגע.' });
       }
