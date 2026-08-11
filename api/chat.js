@@ -115,6 +115,34 @@ function buildSystemPrompt(student, lesson) {
 // ------------------------------------------------------------
 // ההנדלר
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// זהות התלמיד לפי סשן משלנו (נוצר ב-api/auth.js)
+// הטוקן אף פעם לא נשמר כמו שהוא — רק טביעה מוצפנת שלו.
+// ------------------------------------------------------------
+function epaiHash(s) {
+  return crypto
+    .createHmac('sha256', process.env.SHOPIFY_APP_SECRET || 'fallback')
+    .update(String(s))
+    .digest('hex');
+}
+
+async function studentFromToken(token) {
+  if (!token || String(token).length < 32) return null;
+  try {
+    const rows = await sbGet(
+      `sessions?token_hash=eq.${encodeURIComponent(epaiHash(token))}` +
+      `&select=expires_at,students(*)&limit=1`
+    );
+    const s = rows[0];
+    if (!s || !s.students) return null;
+    if (new Date(s.expires_at).getTime() < Date.now()) return null;
+    return s.students;
+  } catch (e) {
+    console.error('studentFromToken:', e);
+    return null;
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -125,36 +153,41 @@ export default async function handler(req, res) {
     return res.status(401).json({ error: 'חתימה לא תקינה' });
   }
 
-  // ---- מצב אורח (זמני) ----
-  // שופיפיי לא מוסרת מזהה לקוח בחשבונות מהסוג החדש, לכן כל מי שאינו מזוהה
-  // נספר תחת תלמיד יחיד בשם "guest" עם מכסה כללית גבוהה יותר.
-  // הבקשה עדיין חייבת לעבור אימות חתימה למעלה — זה לא פתוח לכל העולם.
-  // כשנפתור את ההתחברות: להחזיר כאן 401 ולמחוק את GUEST_LIMIT.
-  const customerId = req.query.logged_in_customer_id || 'guest';
-  const isGuest = customerId === 'guest';
-  const GUEST_LIMIT = 100;
-
   // --- 2. קלט ---
-  const { message, lessonId } = req.body || {};
+  const { message, lessonId, token } = req.body || {};
   if (!message || typeof message !== 'string' || !message.trim()) {
     return res.status(400).json({ error: 'לא נשלחה שאלה' });
   }
   const question = message.trim().slice(0, MAX_QUESTION_CHARS);
 
   try {
-    // --- 3. תלמיד (יצירה בפעם הראשונה) ---
-    const found = await sbGet(
-      `students?shopify_customer_id=eq.${encodeURIComponent(customerId)}&select=*&limit=1`
+    // --- 3. זהות התלמיד ---
+    // מקור ראשון: הסשן שלנו (auth.js). מקור גיבוי: ההתחברות הישנה של שופיפיי,
+    // כדי ששום דבר לא יישבר בזמן המעבר.
+    const GUEST_LIMIT = 100;
+    let isGuest = false;
+
+    let student = await studentFromToken(
+      token || req.headers['x-epai-token'] || req.query.token
     );
-    let student = found[0];
 
     if (!student) {
-      const created = await sbPost(
-        'students',
-        { shopify_customer_id: String(customerId) },
-        'return=representation'
+      const customerId = req.query.logged_in_customer_id || 'guest';
+      isGuest = customerId === 'guest';
+
+      const found = await sbGet(
+        `students?shopify_customer_id=eq.${encodeURIComponent(customerId)}&select=*&limit=1`
       );
-      student = created[0];
+      student = found[0];
+
+      if (!student) {
+        const created = await sbPost(
+          'students',
+          { shopify_customer_id: String(customerId) },
+          'return=representation'
+        );
+        student = created[0];
+      }
     }
 
     // --- 4. בדיקת מכסה יומית ---
