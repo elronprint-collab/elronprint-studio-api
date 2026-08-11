@@ -1,0 +1,305 @@
+// api/auth.js — התחברות עצמאית לאקדמיה (קוד חד-פעמי למייל)
+//
+// מחליף את ההתחברות של שופיפיי. התלמיד מקליד מייל בעמוד האקדמיה, מקבל קוד
+// בן 6 ספרות, מקליד אותו באותו עמוד — ונכנס. הוא לא עוזב את הדף.
+//
+// ארבע פעולות, קובץ אחד:
+//   POST {action:"send",    email}        -> שולח קוד למייל
+//   POST {action:"verify",  email, code}  -> מחזיר token
+//   POST {action:"session", token}        -> {loggedIn, email}
+//   POST {action:"logout",  token}        -> מוחק את הסשן
+//
+// אותה תבנית כמו me.js / lessons.js / progress.js: אימות חתימת App Proxy,
+// fetch רגיל מול Supabase REST, בלי חבילות npm חדשות.
+
+import crypto from "crypto";
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const APP_SECRET   = process.env.SHOPIFY_APP_SECRET;
+const RESEND_KEY   = process.env.RESEND_API_KEY;
+
+const FROM             = "ElronPrint Academy <academy@elronprint.co.il>";
+const CODE_TTL_MIN     = 10;   // תוקף הקוד בדקות
+const SESSION_TTL_DAYS = 30;   // כמה זמן התלמיד נשאר מחובר
+const MAX_ATTEMPTS     = 5;    // ניחושים לקוד לפני שהוא נפסל
+const MAX_SENDS_PER_HR = 5;    // כמה קודים אפשר לבקש לאותו מייל בשעה
+
+/* ---------- Supabase ---------- */
+
+function sbHeaders(extra) {
+  return Object.assign({
+    apikey: SUPABASE_KEY,
+    Authorization: "Bearer " + SUPABASE_KEY,
+    "Content-Type": "application/json"
+  }, extra || {});
+}
+
+async function sbGet(path) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, { headers: sbHeaders() });
+  const t = await r.text();
+  if (!r.ok) throw new Error("Supabase GET " + path + " -> " + r.status + " " + t);
+  return t ? JSON.parse(t) : [];
+}
+
+async function sbPost(path, body, prefer) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+    method: "POST",
+    headers: sbHeaders({ Prefer: prefer || "return=representation" }),
+    body: JSON.stringify(body)
+  });
+  const t = await r.text();
+  if (!r.ok) throw new Error("Supabase POST " + path + " -> " + r.status + " " + t);
+  return t ? JSON.parse(t) : [];
+}
+
+async function sbPatch(path, body) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+    method: "PATCH",
+    headers: sbHeaders({ Prefer: "return=minimal" }),
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error("Supabase PATCH " + path + " -> " + r.status + " " + (await r.text()));
+}
+
+async function sbDelete(path) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+    method: "DELETE",
+    headers: sbHeaders({ Prefer: "return=minimal" })
+  });
+  if (!r.ok) throw new Error("Supabase DELETE " + path + " -> " + r.status + " " + (await r.text()));
+}
+
+/* ---------- חתימת App Proxy ---------- */
+
+function verifyProxySignature(query) {
+  if (!APP_SECRET) return false;
+  const rest = Object.assign({}, query);
+  const signature = rest.signature;
+  delete rest.signature;
+  if (!signature) return false;
+
+  const msg = Object.keys(rest).sort().map(function (k) {
+    const v = rest[k];
+    return k + "=" + (Array.isArray(v) ? v.join(",") : v);
+  }).join("");
+
+  const digest = crypto.createHmac("sha256", APP_SECRET).update(msg).digest("hex");
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(digest, "utf8"),
+      Buffer.from(String(signature), "utf8")
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+/* ---------- עזרים ---------- */
+
+// הקוד והטוקן אף פעם לא נשמרים כמו שהם — רק הטביעה שלהם
+function hash(s) {
+  return crypto.createHmac("sha256", APP_SECRET || "fallback").update(String(s)).digest("hex");
+}
+
+function normEmail(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+function validEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s) && s.length <= 254;
+}
+
+function newCode() {
+  // 6 ספרות, מקור אקראי אמיתי
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+function newToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function plus(ms) {
+  return new Date(Date.now() + ms).toISOString();
+}
+
+const enc = encodeURIComponent;
+
+/* ---------- שליחת המייל ---------- */
+
+async function sendCodeEmail(email, code) {
+  const html =
+    '<div dir="rtl" style="font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px">' +
+      '<div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;text-align:center">' +
+        '<h1 style="margin:0 0 8px;font-size:22px;color:#111">האקדמיה ל-AI של ElronPrint</h1>' +
+        '<p style="margin:0 0 24px;color:#555;font-size:15px">זה קוד הכניסה שלך:</p>' +
+        '<div style="font-size:38px;font-weight:700;letter-spacing:10px;color:#2f6fed;' +
+             'background:#f0f4ff;border-radius:10px;padding:18px 0;margin-bottom:24px">' + code + '</div>' +
+        '<p style="margin:0 0 6px;color:#555;font-size:14px">הקוד תקף ל-' + CODE_TTL_MIN + ' דקות.</p>' +
+        '<p style="margin:0;color:#999;font-size:13px">אם לא ביקשת קוד — אפשר להתעלם מהמייל הזה.</p>' +
+      '</div>' +
+      '<p style="text-align:center;color:#aaa;font-size:12px;margin-top:20px">elronprint.co.il</p>' +
+    '</div>';
+
+  const r = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer " + RESEND_KEY,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      from: FROM,
+      to: [email],
+      subject: "קוד הכניסה לאקדמיה: " + code,
+      html: html
+    })
+  });
+
+  if (!r.ok) throw new Error("Resend -> " + r.status + " " + (await r.text()));
+}
+
+/* ---------- סשן ---------- */
+
+async function studentByToken(token) {
+  if (!token || String(token).length < 32) return null;
+  const rows = await sbGet(
+    "sessions?token_hash=eq." + enc(hash(token)) +
+    "&select=id,student_id,expires_at,students(id,email)&limit=1"
+  );
+  const s = rows[0];
+  if (!s) return null;
+  if (new Date(s.expires_at).getTime() < Date.now()) {
+    await sbDelete("sessions?id=eq." + enc(s.id));
+    return null;
+  }
+  // last_seen לא חייב להצליח — לא מפיל את הבקשה
+  sbPatch("sessions?id=eq." + enc(s.id), { last_seen_at: new Date().toISOString() }).catch(function () {});
+  return {
+    sessionId: s.id,
+    studentId: s.student_id,
+    email: (s.students && s.students.email) || null
+  };
+}
+
+/* ---------- הפעולות ---------- */
+
+async function doSend(email) {
+  const since = new Date(Date.now() - 3600 * 1000).toISOString();
+  const recent = await sbGet(
+    "login_codes?email=eq." + enc(email) + "&created_at=gte." + enc(since) + "&select=id"
+  );
+  if (recent.length >= MAX_SENDS_PER_HR) {
+    return { status: 429, body: { error: "ביקשת יותר מדי קודים. נסה שוב בעוד שעה." } };
+  }
+
+  const code = newCode();
+  await sbPost("login_codes", {
+    email: email,
+    code_hash: hash(code),
+    expires_at: plus(CODE_TTL_MIN * 60 * 1000)
+  }, "return=minimal");
+
+  await sendCodeEmail(email, code);
+  return { status: 200, body: { sent: true, ttlMinutes: CODE_TTL_MIN } };
+}
+
+async function doVerify(email, code) {
+  if (!/^\d{6}$/.test(String(code || ""))) {
+    return { status: 400, body: { error: "הקוד צריך להיות 6 ספרות." } };
+  }
+
+  const rows = await sbGet(
+    "login_codes?email=eq." + enc(email) +
+    "&used_at=is.null&order=created_at.desc&limit=1" +
+    "&select=id,code_hash,expires_at,attempts"
+  );
+  const rec = rows[0];
+  if (!rec) return { status: 400, body: { error: "לא נמצא קוד פעיל. בקש קוד חדש." } };
+
+  if (new Date(rec.expires_at).getTime() < Date.now()) {
+    return { status: 400, body: { error: "הקוד פג תוקף. בקש קוד חדש." } };
+  }
+  if (rec.attempts >= MAX_ATTEMPTS) {
+    return { status: 429, body: { error: "יותר מדי ניסיונות. בקש קוד חדש." } };
+  }
+  if (rec.code_hash !== hash(code)) {
+    await sbPatch("login_codes?id=eq." + enc(rec.id), { attempts: rec.attempts + 1 });
+    return { status: 400, body: { error: "קוד שגוי. נסה שוב." } };
+  }
+
+  await sbPatch("login_codes?id=eq." + enc(rec.id), { used_at: new Date().toISOString() });
+
+  // מוצאים או יוצרים את התלמיד לפי המייל
+  let found = await sbGet("students?email=eq." + enc(email) + "&select=id&limit=1");
+  let studentId = found[0] && found[0].id;
+  if (!studentId) {
+    const created = await sbPost("students", { email: email });
+    studentId = created[0] && created[0].id;
+  }
+  if (!studentId) return { status: 500, body: { error: "לא הצלחנו ליצור את התלמיד." } };
+
+  const token = newToken();
+  await sbPost("sessions", {
+    token_hash: hash(token),
+    student_id: studentId,
+    expires_at: plus(SESSION_TTL_DAYS * 86400 * 1000)
+  }, "return=minimal");
+
+  return { status: 200, body: { token: token, email: email, loggedIn: true } };
+}
+
+/* ---------- handler ---------- */
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+
+  try {
+    if (!verifyProxySignature(req.query || {})) {
+      return res.status(401).json({ error: "חתימה לא תקינה" });
+    }
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    let body = req.body;
+    if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
+    body = body || {};
+
+    const action = String(body.action || "");
+    const email  = normEmail(body.email);
+
+    if (action === "send" || action === "verify") {
+      if (!validEmail(email)) {
+        return res.status(400).json({ error: "כתובת המייל לא תקינה." });
+      }
+    }
+
+    if (action === "send") {
+      const out = await doSend(email);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "verify") {
+      const out = await doVerify(email, body.code);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "session") {
+      const s = await studentByToken(body.token);
+      return res.status(200).json(s ? { loggedIn: true, email: s.email } : { loggedIn: false });
+    }
+
+    if (action === "logout") {
+      if (body.token) {
+        await sbDelete("sessions?token_hash=eq." + enc(hash(body.token))).catch(function () {});
+      }
+      return res.status(200).json({ loggedIn: false });
+    }
+
+    return res.status(400).json({ error: "פעולה לא מוכרת" });
+
+  } catch (err) {
+    console.error("auth handler error:", err);
+    return res.status(500).json({ error: "שגיאה בשרת. נסה שוב בעוד רגע." });
+  }
+}
