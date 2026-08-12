@@ -1,6 +1,11 @@
-// api/progress.js — מעקב התקדמות תלמידים באקדמיה
-// GET  /apps/ai-academy/progress            -> { loggedIn, progress: { "<lesson-slug>": "completed" } }
+// api/progress.js — מעקב התקדמות תלמידים באקדמיה + בדיקת בחנים
+// GET  /apps/ai-academy/progress            -> { loggedIn, progress: {...}, quizScores: {...} }
 // POST /apps/ai-academy/progress            -> body: { lessonSlug, status }  ("completed" | "in_progress")
+// POST /apps/ai-academy/progress            -> body: { action:"quiz", lessonSlug, answers:{ "<questionId>": "<index>" } }
+//                                              -> { score, correctCount, total, results:[...] }
+//
+// התשובות הנכונות נשמרות אך ורק כאן, בצד השרת. הדפדפן לא מקבל אותן לעולם
+// לפני שהתלמיד שלח את הבוחן — אחרת אפשר היה לראות אותן בכלי המפתחים.
 //
 // עצמאי לחלוטין: אין תלות בקבצים אחרים ואין חבילות npm חדשות.
 // אותה תבנית כמו me.js / lessons.js — אימות חתימת App Proxy + fetch רגיל מול Supabase REST.
@@ -144,7 +149,25 @@ export default async function handler(req, res) {
           progress[row.lessons.slug] = row.status;
         }
       }
-      return res.status(200).json({ loggedIn: true, progress });
+      // הציון הגבוה ביותר בכל בוחן
+      const quizScores = {};
+      try {
+        const qrows = await sbGet(
+          'quiz_results?student_id=eq.' + encodeURIComponent(studentId) + '&select=score,lessons(slug)'
+        );
+        for (const row of qrows) {
+          if (row && row.lessons && row.lessons.slug) {
+            const s = row.lessons.slug;
+            if (quizScores[s] === undefined || row.score > quizScores[s]) {
+              quizScores[s] = row.score;
+            }
+          }
+        }
+      } catch (e) {
+        console.error('quizScores load failed:', e);
+      }
+
+      return res.status(200).json({ loggedIn: true, progress, quizScores });
     }
 
     // ---------- כתיבה ----------
@@ -179,6 +202,65 @@ export default async function handler(req, res) {
       const studentId = sessionStudentId || await findStudent(customerId, true);
       if (!studentId) {
         return res.status(500).json({ error: 'שגיאה בשרת. נסה שוב בעוד רגע.' });
+      }
+
+      // ---------- בדיקת בוחן ----------
+      if (body.action === 'quiz') {
+        const answers = body.answers && typeof body.answers === 'object' ? body.answers : {};
+
+        const questions = await sbGet(
+          'quiz_questions?lesson_id=eq.' + encodeURIComponent(lessons[0].id) +
+          '&select=id,correct_answer,explanation,points&order=sort_order.asc'
+        );
+        if (!questions.length) {
+          return res.status(404).json({ error: 'אין בוחן לשיעור הזה' });
+        }
+
+        let earned = 0;
+        let total = 0;
+        let correctCount = 0;
+        const results = [];
+
+        for (const q of questions) {
+          const pts = q.points || 1;
+          total += pts;
+          const given = answers[q.id] === undefined || answers[q.id] === null
+            ? null
+            : String(answers[q.id]);
+          const isCorrect = given !== null && given === String(q.correct_answer);
+          if (isCorrect) {
+            earned += pts;
+            correctCount += 1;
+          }
+          results.push({
+            id: q.id,
+            correct: isCorrect,
+            correctAnswer: String(q.correct_answer),
+            explanation: q.explanation || ''
+          });
+        }
+
+        const score = total > 0 ? Math.round((earned / total) * 100) : 0;
+
+        await sbPost(
+          'quiz_results',
+          {
+            student_id: studentId,
+            lesson_id: lessons[0].id,
+            score: score,
+            answers: answers
+          },
+          'return=minimal'
+        );
+
+        return res.status(200).json({
+          loggedIn: true,
+          saved: true,
+          score: score,
+          correctCount: correctCount,
+          total: questions.length,
+          results: results
+        });
       }
 
       const now = new Date().toISOString();
