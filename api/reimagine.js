@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v28
+// api/reimagine.js — "עיצוב מחדש" v32
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -30,6 +30,33 @@ import { checkRateLimit } from "./_ratelimit.js";
 // The "text" field is treated differently on purpose: text there is meant to be DRAWN, and flux
 // cannot draw Hebrew letters legibly. Hebrew in that field is therefore dropped rather than mangled,
 // and the response carries a "notice" saying so.
+//
+// v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
+// Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
+// endpoint. Generation now requires a session token from api/auth.js — the SAME passwordless
+// email login already built for the academy, so a person who registered there is known here too.
+// Quota: FREE_RUNS free designs per account, then paid credits from students.design_credits.
+// Analysis stays open — it costs little, it is the shop window, and it produces nothing sellable.
+//
+// v30 change: THE PRINT FILE IS THE PRODUCT, SO THE FREE RUNS RETURN A WATERMARKED PREVIEW.
+// A print-ready 4500x5400 PNG is exactly what a competing seller would take and print elsewhere;
+// giving three of those away free means giving away the whole product. Free runs now return a
+// ~1200px preview with a tiled diagonal watermark — enough to fall in love with, useless to print.
+// The clean 4500x5400 file is released only when a credit is spent. Everything upstream is
+// identical either way, so the preview and the paid file are the SAME design, not a re-generation.
+//
+// v31 change: OWNER ACCOUNTS BYPASS THE WHOLE GATE.
+// v30 would have watermarked the shop owner's own first three designs and then asked him to buy
+// credits from himself. Emails listed in the OWNER_EMAILS env var (comma separated) skip the
+// quota entirely, always receive the clean 4500x5400 file, and are never charged. They still have
+// to be logged in, so runs stay attributable.
+//
+// v32 change: NO WATERMARK, AND THE FREE TIER IS ONE CLEAN DESIGN PER EMAIL.
+// His call, after weighing it: a watermarked preview is a weaker hook than one real print file.
+// So FREE_RUNS is 1 and that run returns the full clean 4500x5400 file. From the second design on,
+// credits are required. The watermark machinery is KEPT but switched off behind WATERMARK_FREE —
+// flip that one constant back to true to restore watermarked previews without touching anything else.
+// Known and accepted trade-off: someone can register several emails to farm free files.
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -900,6 +927,108 @@ async function uploadCloudinary(buffer) {
 }
 
 /* ---------------- handler ---------------- */
+/* ================= v29: account gate, free quota, paid credits ================= */
+
+const FREE_RUNS = 1;                     // free designs per account (gift on registration)
+const WATERMARK_FREE = false;            // true = free run returns a watermarked preview instead
+
+/* Owner accounts — unlimited clean files, never charged, never watermarked. */
+function isOwner(email) {
+  const list = String(process.env.OWNER_EMAILS || "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+  return !!email && list.includes(String(email).trim().toLowerCase());
+}
+const SB_URL = process.env.SUPABASE_URL;
+const SB_KEY = process.env.SUPABASE_SERVICE_KEY;
+
+function sbHeaders(extra) {
+  return Object.assign(
+    {
+      apikey: SB_KEY,
+      Authorization: "Bearer " + SB_KEY,
+      "Content-Type": "application/json",
+    },
+    extra || {}
+  );
+}
+
+async function sbGet(path) {
+  const r = await fetch(SB_URL + "/rest/v1/" + path, { headers: sbHeaders() });
+  const t = await r.text();
+  if (!r.ok) throw new Error("Supabase GET " + path + " -> " + r.status + " " + t);
+  return t ? JSON.parse(t) : [];
+}
+
+async function sbPost(path, body, prefer) {
+  const r = await fetch(SB_URL + "/rest/v1/" + path, {
+    method: "POST",
+    headers: sbHeaders({ Prefer: prefer || "return=representation" }),
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  if (!r.ok) throw new Error("Supabase POST " + path + " -> " + r.status + " " + t);
+  return t ? JSON.parse(t) : [];
+}
+
+async function sbPatch(path, body) {
+  const r = await fetch(SB_URL + "/rest/v1/" + path, {
+    method: "PATCH",
+    headers: sbHeaders({ Prefer: "return=minimal" }),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error("Supabase PATCH " + path + " -> " + r.status + " " + (await r.text()));
+}
+
+/* Same HMAC as api/auth.js — the raw token is never stored anywhere, only its fingerprint. */
+function tokenHash(t) {
+  return crypto
+    .createHmac("sha256", process.env.SHOPIFY_APP_SECRET || "fallback")
+    .update(String(t))
+    .digest("hex");
+}
+
+async function studentFromToken(token) {
+  if (!token || String(token).length < 32) return null;
+  const rows = await sbGet(
+    "sessions?token_hash=eq." + encodeURIComponent(tokenHash(token)) +
+    "&select=expires_at,students(id,email,design_credits)&limit=1"
+  );
+  const s = rows[0];
+  if (!s || !s.students) return null;
+  if (new Date(s.expires_at).getTime() < Date.now()) return null;
+  return s.students;
+}
+
+async function quotaFor(student) {
+  const runs = await sbGet(
+    "design_runs?student_id=eq." + encodeURIComponent(student.id) + "&select=id&charged=is.false"
+  );
+  const freeUsed = runs.length;
+  const freeLeft = Math.max(0, FREE_RUNS - freeUsed);
+  return {
+    freeLeft,
+    credits: student.design_credits || 0,
+    canRun: freeLeft > 0 || (student.design_credits || 0) > 0,
+  };
+}
+
+/* Charged AFTER a successful generation, never before — a failed run must not cost the user. */
+async function chargeRun(student, quota) {
+  const useCredit = quota.freeLeft <= 0;
+  await sbPost("design_runs", { student_id: student.id, charged: useCredit }, "return=minimal");
+  if (useCredit) {
+    await sbPatch("students?id=eq." + encodeURIComponent(student.id), {
+      design_credits: Math.max(0, (student.design_credits || 0) - 1),
+    });
+  }
+  return {
+    freeLeft: Math.max(0, quota.freeLeft - (useCredit ? 0 : 1)),
+    credits: Math.max(0, quota.credits - (useCredit ? 1 : 0)),
+  };
+}
+
 /* ================= v26: two-step controlled mode =================
    Step 1 reads the reference and writes down WHAT IT IS MADE OF, as fields the user can edit.
    Step 2 draws from those fields only. The reference never reaches the generator. */
@@ -1149,8 +1278,64 @@ async function generateFromSpec(spec) {
   });
 }
 
+const PREVIEW_W = 1200, PREVIEW_H = 1440;
+const WATERMARK_TEXT = "ElronPrint";
+
+/* Tiled diagonal watermark. Drawn as one SVG the size of the preview so it cannot be cropped off,
+   and kept semi-transparent so the design stays readable — the point is to block printing, not
+   to ruin the picture. */
+function watermarkSvg(w, h) {
+  const step = 260;
+  let marks = "";
+  for (let y = -h; y < h * 2; y += step) {
+    for (let x = -w; x < w * 2; x += step * 1.6) {
+      marks +=
+        `<text x="${x}" y="${y}" font-family="Arial, Helvetica, sans-serif" font-size="34" ` +
+        `font-weight="700" fill="#000000" fill-opacity="0.20" ` +
+        `transform="rotate(-30 ${x} ${y})">${WATERMARK_TEXT}</text>`;
+    }
+  }
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${marks}</svg>`
+  );
+}
+
+async function toPreviewCanvas(buf) {
+  buf = await cleanEdges(buf);
+
+  const inner = await sharp(buf)
+    .ensureAlpha()
+    .trim({ threshold: 12 })
+    .resize(Math.round(PREVIEW_W * SAFE), Math.round(PREVIEW_H * SAFE), {
+      fit: "inside",
+      kernel: "lanczos3",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png({ compressionLevel: 6 })
+    .toBuffer();
+
+  const m = await sharp(inner).metadata();
+
+  return sharp({
+    create: {
+      width: PREVIEW_W, height: PREVIEW_H, channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([
+      {
+        input: inner,
+        left: Math.round((PREVIEW_W - m.width) / 2),
+        top: Math.round((PREVIEW_H - m.height) / 2),
+      },
+      { input: watermarkSvg(PREVIEW_W, PREVIEW_H), left: 0, top: 0 },
+    ])
+    .png({ compressionLevel: 6 })
+    .toBuffer();
+}
+
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
-async function finishArtwork(art, t0) {
+async function finishArtwork(art, t0, preview) {
   const elapsed = () => Date.now() - t0;
 
   let cutout = await fal("fal-ai/birefnet", { image_url: art });
@@ -1167,17 +1352,18 @@ async function finishArtwork(art, t0) {
     }
   }
 
-  let canvas = await toPrintCanvas(cutBuf);
-  canvas = await fitUploadSize(canvas);
+  let canvas = preview ? await toPreviewCanvas(cutBuf) : await toPrintCanvas(cutBuf);
+  if (!preview) canvas = await fitUploadSize(canvas);
   const imageUrl = await uploadCloudinary(canvas);
-  console.log(`[reimagine] done: ${elapsed()}ms`);
+  console.log(`[reimagine] done${preview ? " (preview)" : ""}: ${elapsed()}ms`);
 
   return {
     imageUrl,
     url: imageUrl,
-    width: CANVAS_W,
-    height: CANVAS_H,
-    dpi: DPI,
+    preview: !!preview,
+    width: preview ? PREVIEW_W : CANVAS_W,
+    height: preview ? PREVIEW_H : CANVAS_H,
+    dpi: preview ? 72 : DPI,
     quality: {
       edge: +qc.edgeRatio.toFixed(3),
       pale: +qc.paleRatio.toFixed(3),
@@ -1208,12 +1394,67 @@ export default async function handler(req, res) {
       if (!spec.genre && !spec.subject) {
         return res.status(400).json({ error: "Missing spec" });
       }
+
+      // ---- account gate ----
+      const student = await studentFromToken(
+        body.token || req.headers["x-epai-token"] || req.query.token
+      );
+      if (!student) {
+        return res.status(401).json({
+          error: "צריך להתחבר כדי ליצור עיצוב.",
+          needLogin: true,
+        });
+      }
+
+      const owner = isOwner(student.email);
+
+      const quota = owner
+        ? { freeLeft: 0, credits: 0, canRun: true }   // owner: no quota, and freeLeft 0 => full file
+        : await quotaFor(student);
+
+      if (!quota.canRun) {
+        return res.status(402).json({
+          error: "נגמרו העיצובים החינמיים. אפשר לרכוש חבילת קרדיטים ולהמשיך.",
+          needCredits: true,
+          freeLeft: 0,
+          credits: 0,
+        });
+      }
+
+      // WATERMARK_FREE is off, so the free design is a real print file like any paid one
+      const isPreview = WATERMARK_FREE && !owner && quota.freeLeft > 0;
+
       const t0 = Date.now();
       const prepared = await prepareSpec(spec);
       const art = await generateFromSpec(prepared.spec);
-      const out = await finishArtwork(art, t0);
+      const out = await finishArtwork(art, t0, isPreview);
+
+      // charged only now, after a design actually exists
+      let left = { freeLeft: quota.freeLeft, credits: quota.credits };
+      if (owner) {
+        // logged for history, but nothing is deducted
+        await sbPost("design_runs", { student_id: student.id, charged: false }, "return=minimal")
+          .catch((e) => console.error("[reimagine] owner run log failed:", e));
+        left = { freeLeft: null, credits: null, owner: true };
+      } else {
+        try {
+          left = await chargeRun(student, quota);
+        } catch (e) {
+          console.error("[reimagine] charge failed (design was delivered):", e);
+        }
+      }
+
       return res.status(200).json(
-        Object.assign({ spec: prepared.spec, notice: prepared.notice }, out)
+        Object.assign(
+          {
+            spec: prepared.spec,
+            notice: prepared.notice,
+            freeLeft: left.freeLeft,
+            credits: left.credits,
+            owner: !!owner,
+          },
+          out
+        )
       );
     } catch (err) {
       console.error("[reimagine] generate failed:", err);
