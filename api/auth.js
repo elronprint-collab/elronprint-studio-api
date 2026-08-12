@@ -8,6 +8,12 @@
 //   POST {action:"verify",  email, code}  -> מחזיר token
 //   POST {action:"session", token}        -> {loggedIn, email}
 //   POST {action:"logout",  token}        -> מוחק את הסשן
+//   POST {action:"balance", token}        -> {loggedIn, email, freeLeft, credits}
+//   POST {action:"grant", secret, email, credits, reference} -> מוסיף קרדיטים לכלי העיצוב
+//
+// balance/grant משרתים את כלי "עיצוב מחדש", שחולק את אותן טבלאות students/sessions —
+// מי שנרשם לאקדמיה מזוהה גם בכלי, ולהפך. grant מוגן בסוד נפרד (DESIGN_GRANT_SECRET)
+// והוא idempotent לפי reference, כך שאותה הזמנה לא תזוכה פעמיים.
 //
 // אותה תבנית כמו me.js / lessons.js / progress.js: אימות חתימת App Proxy,
 // fetch רגיל מול Supabase REST, בלי חבילות npm חדשות.
@@ -24,6 +30,7 @@ const CODE_TTL_MIN     = 10;   // תוקף הקוד בדקות
 const SESSION_TTL_DAYS = 30;   // כמה זמן התלמיד נשאר מחובר
 const MAX_ATTEMPTS     = 5;    // ניחושים לקוד לפני שהוא נפסל
 const MAX_SENDS_PER_HR = 5;    // כמה קודים אפשר לבקש לאותו מייל בשעה
+const FREE_RUNS        = 1;    // עיצוב חינם אחד לחשבון בכלי "עיצוב מחדש" (חייב להיות זהה ל-reimagine.js)
 
 /* ---------- Supabase ---------- */
 
@@ -248,6 +255,71 @@ async function doVerify(email, code) {
   return { status: 200, body: { token: token, email: email, loggedIn: true } };
 }
 
+/* ---------- כלי "עיצוב מחדש": יתרה וזיכוי ---------- */
+
+function isOwnerEmail(email) {
+  const list = String(process.env.OWNER_EMAILS || "")
+    .split(",")
+    .map(function (x) { return x.trim().toLowerCase(); })
+    .filter(Boolean);
+  return !!email && list.indexOf(String(email).trim().toLowerCase()) !== -1;
+}
+
+async function designBalance(studentId, credits) {
+  const runs = await sbGet(
+    "design_runs?student_id=eq." + enc(studentId) + "&charged=is.false&select=id"
+  );
+  return {
+    freeLeft: Math.max(0, FREE_RUNS - runs.length),
+    credits: credits || 0
+  };
+}
+
+async function doGrant(body) {
+  const secret = process.env.DESIGN_GRANT_SECRET;
+  if (!secret || String(body.secret || "") !== secret) {
+    return { status: 401, body: { error: "לא מורשה" } };
+  }
+
+  const email = normEmail(body.email);
+  if (!validEmail(email)) {
+    return { status: 400, body: { error: "כתובת המייל לא תקינה." } };
+  }
+
+  const credits = parseInt(body.credits, 10);
+  if (!Number.isFinite(credits) || credits < 1 || credits > 1000) {
+    return { status: 400, body: { error: "מספר קרדיטים לא תקין." } };
+  }
+
+  // אותה הזמנה לא מזוכה פעמיים
+  const reference = body.reference ? String(body.reference).slice(0, 200) : null;
+  if (reference) {
+    const seen = await sbGet("design_grants?reference=eq." + enc(reference) + "&select=id&limit=1");
+    if (seen.length) {
+      return { status: 200, body: { granted: false, already: true } };
+    }
+  }
+
+  // החשבון נוצר אם עוד לא קיים, כדי שאפשר יהיה לזכות לפני ההתחברות הראשונה
+  let found = await sbGet("students?email=eq." + enc(email) + "&select=id,design_credits&limit=1");
+  let student = found[0];
+  if (!student) {
+    const created = await sbPost("students", { email: email });
+    student = created[0];
+  }
+  if (!student) return { status: 500, body: { error: "לא הצלחנו ליצור את החשבון." } };
+
+  const next = (student.design_credits || 0) + credits;
+  await sbPatch("students?id=eq." + enc(student.id), { design_credits: next });
+  await sbPost(
+    "design_grants",
+    { student_id: student.id, credits: credits, reference: reference },
+    "return=minimal"
+  );
+
+  return { status: 200, body: { granted: true, credits: next } };
+}
+
 /* ---------- handler ---------- */
 
 export default async function handler(req, res) {
@@ -287,6 +359,22 @@ export default async function handler(req, res) {
     if (action === "session") {
       const s = await studentByToken(body.token);
       return res.status(200).json(s ? { loggedIn: true, email: s.email } : { loggedIn: false });
+    }
+
+    if (action === "balance") {
+      const s = await studentByToken(body.token);
+      if (!s) return res.status(200).json({ loggedIn: false });
+      const rows = await sbGet("students?id=eq." + enc(s.studentId) + "&select=design_credits&limit=1");
+      if (isOwnerEmail(s.email)) {
+        return res.status(200).json({ loggedIn: true, email: s.email, owner: true });
+      }
+      const bal = await designBalance(s.studentId, rows[0] && rows[0].design_credits);
+      return res.status(200).json(Object.assign({ loggedIn: true, email: s.email }, bal));
+    }
+
+    if (action === "grant") {
+      const out = await doGrant(body);
+      return res.status(out.status).json(out.body);
     }
 
     if (action === "logout") {
