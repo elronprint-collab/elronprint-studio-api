@@ -1,5 +1,18 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v25
+// api/reimagine.js — "עיצוב מחדש" v26
+// v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
+// The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
+// told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
+// to preserve what it is shown. Asking it for "similar but different" fought the model itself,
+// which is why every version either came back too close or fell apart. v26 stops fighting it.
+//   POST {action:"analyze", image}        -> Claude reads the reference and returns a SPEC (JSON)
+//                                            the user can EDIT on the page. Nothing is generated.
+//   POST {action:"generate", spec}        -> the spec is turned into a prompt and drawn FROM TEXT
+//                                            by flux/dev. The reference image is never shown to
+//                                            the generator, so "different" is the default, not a
+//                                            request. Then the existing birefnet + QC + canvas
+//                                            pipeline runs unchanged.
+// The legacy one-shot path (POST {image} with no action) is untouched and still works.
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -870,6 +883,189 @@ async function uploadCloudinary(buffer) {
 }
 
 /* ---------------- handler ---------------- */
+/* ================= v26: two-step controlled mode =================
+   Step 1 reads the reference and writes down WHAT IT IS MADE OF, as fields the user can edit.
+   Step 2 draws from those fields only. The reference never reaches the generator. */
+
+const SPEC_SYSTEM_PROMPT = `You are a creative director for a print-on-demand t-shirt studio.
+
+You will be shown a reference design. It may be a standalone artwork file, or a photo of
+someone WEARING a printed garment. If it is a photo, describe ONLY the printed graphic and
+ignore the wearer, the garment, the room and the photography completely.
+
+Your job is NOT to copy it. Your job is to write down what KIND of design it is, in fields
+that a person can edit before a new design is drawn from them.
+
+Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
+
+{
+  "genre":       "the category in 2-6 words, e.g. 'glam birthday celebration design'",
+  "subject":     "the single main focus, 2-8 words",
+  "elements":    ["4-8 supporting motifs, each 1-3 words"],
+  "palette":     "the colours in 3-10 words",
+  "technique":   "the rendering style in 3-10 words, e.g. 'glossy 3D rhinestone and metallic'",
+  "typography":  "how the text is styled in 3-12 words, or '' if the design has no text",
+  "text":        "the exact words that appear in the design, or '' if none",
+  "composition": "how it is arranged in 4-12 words",
+  "notes":       "one short sentence on what makes this genre sell"
+}
+
+RULES
+- Describe the GENRE, never this specific execution. "ornate script over a jewelled block
+  word" is a genre. "the word Birthday in pink script above QUEEN in rhinestones" is a copy.
+- Keep every value short enough to fit in a text input.
+- Write in English (the generator only reads English), except "text", which is verbatim.
+- Never mention the reference, the wearer, or that you were shown an image.`;
+
+async function analyzeSpec(base64Data, mediaType) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 700,
+      system: SPEC_SYSTEM_PROMPT,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
+          { type: "text", text: "Return the JSON spec for this reference. JSON only." },
+        ],
+      }],
+    }),
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    console.error("anthropic spec failed:", r.status, t);
+    throw new Error("Analysis failed");
+  }
+  const data = await r.json();
+  let raw = (data?.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join(" ")
+    .trim();
+  if (!raw) throw new Error("No analysis text returned");
+
+  raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a === -1 || b === -1) throw new Error("Spec was not JSON");
+
+  let spec;
+  try {
+    spec = JSON.parse(raw.slice(a, b + 1));
+  } catch (e) {
+    console.error("spec parse failed:", raw.slice(0, 400));
+    throw new Error("Spec was not valid JSON");
+  }
+  return normaliseSpec(spec);
+}
+
+const SPEC_KEYS = ["genre", "subject", "elements", "palette", "technique", "typography", "text", "composition", "notes"];
+
+function normaliseSpec(input) {
+  const src = input && typeof input === "object" ? input : {};
+  const out = {};
+  for (const k of SPEC_KEYS) {
+    let v = src[k];
+    if (k === "elements") {
+      if (typeof v === "string") v = v.split(/[,;\u060C]/);
+      out.elements = Array.isArray(v)
+        ? v.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 10)
+        : [];
+    } else {
+      out[k] = String(v == null ? "" : v).trim().slice(0, 300);
+    }
+  }
+  return out;
+}
+
+/* The prompt is assembled from the spec ONLY. No reference image is passed to the generator,
+   so the result is a new design in the same genre rather than a variation of the original. */
+function specToPrompt(spec) {
+  const parts = [];
+  if (spec.genre) parts.push(spec.genre);
+  if (spec.subject) parts.push(`main focus: ${spec.subject}`);
+  if (spec.elements && spec.elements.length) parts.push(`featuring ${spec.elements.join(", ")}`);
+  if (spec.technique) parts.push(`rendered as ${spec.technique}`);
+  if (spec.palette) parts.push(`colour palette: ${spec.palette}`);
+  if (spec.composition) parts.push(`composition: ${spec.composition}`);
+  if (spec.text) {
+    parts.push(`with the text "${spec.text}"${spec.typography ? ` set as ${spec.typography}` : ""}, spelled exactly, clearly legible`);
+  } else if (spec.typography) {
+    parts.push(`lettering style: ${spec.typography}`);
+  }
+
+  return (
+    parts.join(", ") +
+    ", original t-shirt print artwork, one self-contained design, " +
+    "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
+    "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border, " +
+    "every shape and letter filled solid, high detail, crisp edges"
+  );
+}
+
+const SPEC_NEGATIVE =
+  "photograph of a person, model wearing a shirt, garment, mockup, hanger, watermark, signature, " +
+  "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
+  "hollow outline text, misspelled text, blurry, low resolution";
+
+async function generateFromSpec(spec) {
+  const prompt = specToPrompt(spec);
+  console.log("[reimagine] v26 prompt:", prompt.slice(0, 300));
+  return await fal("fal-ai/flux/dev", {
+    prompt,
+    negative_prompt: SPEC_NEGATIVE,
+    image_size: { width: 1152, height: 1536 },
+    num_inference_steps: 34,
+    guidance_scale: 3.5,
+    output_format: "png",
+    enable_safety_checker: true,
+  });
+}
+
+/* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
+async function finishArtwork(art, t0) {
+  const elapsed = () => Date.now() - t0;
+
+  let cutout = await fal("fal-ai/birefnet", { image_url: art });
+  let qc = await inspect(cutout);
+  console.log(`[reimagine] cutout+qc: ${elapsed()}ms`);
+
+  let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
+  if (qc.cropped) {
+    console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+    try {
+      cutBuf = await stripLeftoverBackground(cutBuf);
+    } catch (e) {
+      console.warn("flood fill failed, keeping birefnet output:", e.message);
+    }
+  }
+
+  let canvas = await toPrintCanvas(cutBuf);
+  canvas = await fitUploadSize(canvas);
+  const imageUrl = await uploadCloudinary(canvas);
+  console.log(`[reimagine] done: ${elapsed()}ms`);
+
+  return {
+    imageUrl,
+    url: imageUrl,
+    width: CANVAS_W,
+    height: CANVAS_H,
+    dpi: DPI,
+    quality: {
+      edge: +qc.edgeRatio.toFixed(3),
+      pale: +qc.paleRatio.toFixed(3),
+      rim: +qc.rimRatio.toFixed(3),
+      hole: +qc.holeRatio.toFixed(3),
+    },
+  };
+}
+
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -881,6 +1077,26 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many requests", retryAfter });
   }
 
+  const body = req.body || {};
+  const action = String(body.action || "").toLowerCase();
+
+  /* ---- v26 step 2: draw from an edited spec. No reference image involved. ---- */
+  if (action === "generate") {
+    try {
+      const spec = normaliseSpec(body.spec);
+      if (!spec.genre && !spec.subject) {
+        return res.status(400).json({ error: "Missing spec" });
+      }
+      const t0 = Date.now();
+      const art = await generateFromSpec(spec);
+      const out = await finishArtwork(art, t0);
+      return res.status(200).json(Object.assign({ spec }, out));
+    } catch (err) {
+      console.error("[reimagine] generate failed:", err);
+      return res.status(502).json({ error: "Generate failed" });
+    }
+  }
+
   const { image } = req.body || {};
   if (!image || typeof image !== "string") {
     return res.status(400).json({ error: "Missing image" });
@@ -890,6 +1106,18 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Invalid image format" });
   }
   const [, mediaType, base64Data] = match;
+
+  /* ---- v26 step 1: read the reference, return an editable spec, generate nothing ---- */
+  if (action === "analyze") {
+    try {
+      const spec = await analyzeSpec(base64Data, mediaType);
+      console.log("[reimagine] spec:", JSON.stringify(spec).slice(0, 300));
+      return res.status(200).json({ spec });
+    } catch (err) {
+      console.error("[reimagine] analyze failed:", err);
+      return res.status(502).json({ error: "Analyze failed" });
+    }
+  }
 
   try {
     const t0 = Date.now();
