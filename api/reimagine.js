@@ -1,5 +1,6 @@
+import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v32
+// api/reimagine.js — "עיצוב מחדש" v33
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
