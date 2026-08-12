@@ -70,6 +70,17 @@ export default async function handler(req, res) {
       'lessons?is_published=eq.true&select=id,course_id,slug,title,summary,body,example,task,sort_order&order=sort_order.asc'
     );
 
+    // שאלות הבוחן — בלי correct_answer ובלי explanation.
+    // התשובות הנכונות לא יוצאות מהשרת לעולם; הבדיקה נעשית ב-progress.js.
+    let quiz = [];
+    try {
+      quiz = await sbGet(
+        'quiz_questions?select=id,lesson_id,question,kind,options,points,sort_order&order=sort_order.asc'
+      );
+    } catch (e) {
+      console.error('quiz load failed (continuing without quizzes):', e);
+    }
+
     const out = courses.map(function (c) {
       return {
         slug: c.slug,
@@ -87,7 +98,20 @@ export default async function handler(req, res) {
               summary: l.summary,
               body: l.body,
               example: l.example,
-              task: l.task
+              task: l.task,
+              quiz: quiz
+                .filter(function (q) {
+                  return q.lesson_id === l.id;
+                })
+                .map(function (q) {
+                  return {
+                    id: q.id,
+                    question: q.question,
+                    kind: q.kind,
+                    options: q.options || [],
+                    points: q.points
+                  };
+                })
             };
           })
       };
