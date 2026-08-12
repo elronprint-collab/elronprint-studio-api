@@ -1,5 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v26
+// api/reimagine.js — "עיצוב מחדש" v28
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -13,6 +13,23 @@ import { checkRateLimit } from "./_ratelimit.js";
 //                                            request. Then the existing birefnet + QC + canvas
 //                                            pipeline runs unchanged.
 // The legacy one-shot path (POST {image} with no action) is untouched and still works.
+//
+// v27 change: THE SPEC NOW COMES BACK ALREADY VARIED.
+// v26 described the reference faithfully, so pressing generate without editing anything reproduced
+// the reference. The form only protected a user who used it. v27 splits the spec in two:
+//   KEEP faithful  -> genre, palette, technique, typography, composition   (this is the "same vibe")
+//   VARY on purpose -> subject, elements, text                             (this is what makes it a copy)
+// So the default result is already a step away from the reference, and the user edits only if they
+// want something else. What was swapped is stated in "notes" so nothing happens behind their back.
+//
+// v28 change: THE SPEC FIELDS MAY NOW BE WRITTEN IN HEBREW.
+// flux reads English only, so a Hebrew value used to be ignored or drawn as nonsense. Before every
+// generation the spec is scanned for Hebrew letters; if any are found, Claude translates the whole
+// spec to English in one call (~1-2s) and the ENGLISH copy is what reaches the generator. The
+// translated spec is returned to the page so the user can see what was actually drawn.
+// The "text" field is treated differently on purpose: text there is meant to be DRAWN, and flux
+// cannot draw Hebrew letters legibly. Hebrew in that field is therefore dropped rather than mangled,
+// and the response carries a "notice" saying so.
 // v17 change: removed the esrgan upscale + third birefnet pass. That block started at
 // ~28s and never finished inside the 60s function limit, causing FUNCTION_INVOCATION_TIMEOUT.
 // Removing it also means the image the user receives is the one that actually passed QC.
@@ -890,32 +907,44 @@ async function uploadCloudinary(buffer) {
 const SPEC_SYSTEM_PROMPT = `You are a creative director for a print-on-demand t-shirt studio.
 
 You will be shown a reference design. It may be a standalone artwork file, or a photo of
-someone WEARING a printed garment. If it is a photo, describe ONLY the printed graphic and
+someone WEARING a printed garment. If it is a photo, read ONLY the printed graphic and
 ignore the wearer, the garment, the room and the photography completely.
 
-Your job is NOT to copy it. Your job is to write down what KIND of design it is, in fields
-that a person can edit before a new design is drawn from them.
+Your job is to design a NEW piece for the same shelf. Not a copy, not a variation of this
+execution — a different design that would sell to the same buyer for the same occasion.
+
+Split your answer in two, and this split is the whole point:
+
+KEEP FAITHFUL to the reference (this is what makes it feel like the same kind of product):
+  genre, palette, technique, typography, composition
+
+DELIBERATELY CHANGE (this is what stops it being a copy):
+  subject   -> a DIFFERENT main character or object, equally appealing for the same occasion
+  elements  -> mostly different supporting motifs; at most ONE may overlap with the reference
+  text      -> different wording with the same intent, if the reference has text at all
 
 Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
 
 {
   "genre":       "the category in 2-6 words, e.g. 'glam birthday celebration design'",
-  "subject":     "the single main focus, 2-8 words",
-  "elements":    ["4-8 supporting motifs, each 1-3 words"],
-  "palette":     "the colours in 3-10 words",
-  "technique":   "the rendering style in 3-10 words, e.g. 'glossy 3D rhinestone and metallic'",
-  "typography":  "how the text is styled in 3-12 words, or '' if the design has no text",
-  "text":        "the exact words that appear in the design, or '' if none",
-  "composition": "how it is arranged in 4-12 words",
-  "notes":       "one short sentence on what makes this genre sell"
+  "subject":     "your NEW main focus, 2-8 words",
+  "elements":    ["4-8 supporting motifs for your new design, each 1-3 words"],
+  "palette":     "the reference colours in 3-10 words",
+  "technique":   "the reference rendering style in 3-10 words",
+  "typography":  "the reference lettering style in 3-12 words, or '' if it has no text",
+  "text":        "your NEW wording, or '' if the reference has no text",
+  "composition": "the reference arrangement in 4-12 words",
+  "notes":       "one sentence naming what the reference had and what you swapped it for"
 }
 
 RULES
-- Describe the GENRE, never this specific execution. "ornate script over a jewelled block
-  word" is a genre. "the word Birthday in pink script above QUEEN in rhinestones" is a copy.
+- The new subject must be a real alternative, not a restyling. Ghost -> black cat, pumpkin,
+  owl. Crown -> tiara, butterfly, star. Never the same thing with a new adjective.
+- Describe genre and composition at GENRE level. "ornate script over a jewelled block word"
+  is a genre; "Birthday in pink script above QUEEN in rhinestones" is a copy.
 - Keep every value short enough to fit in a text input.
-- Write in English (the generator only reads English), except "text", which is verbatim.
-- Never mention the reference, the wearer, or that you were shown an image.`;
+- Write in English; the generator only reads English.
+- Never mention the reference image, the wearer, or that you were shown anything.`;
 
 async function analyzeSpec(base64Data, mediaType) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
@@ -933,7 +962,7 @@ async function analyzeSpec(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Return the JSON spec for this reference. JSON only." },
+          { type: "text", text: "Return the JSON spec. Remember: keep genre, palette, technique, typography and composition faithful, but give me a DIFFERENT subject, different elements and different text. JSON only." },
         ],
       }],
     }),
@@ -1014,6 +1043,98 @@ const SPEC_NEGATIVE =
   "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
   "hollow outline text, misspelled text, blurry, low resolution";
 
+const HEBREW_RE = /[\u0590-\u05FF]/;
+
+function specHasHebrew(spec) {
+  for (const k of SPEC_KEYS) {
+    const v = spec[k];
+    if (k === "elements") {
+      if ((v || []).some((x) => HEBREW_RE.test(x))) return true;
+    } else if (HEBREW_RE.test(v || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* One Claude call translates the whole spec at once. Cheaper and more consistent than
+   translating field by field, and it keeps the design vocabulary coherent across fields. */
+async function translateSpec(spec) {
+  const payload = {
+    genre: spec.genre,
+    subject: spec.subject,
+    elements: spec.elements,
+    palette: spec.palette,
+    technique: spec.technique,
+    typography: spec.typography,
+    composition: spec.composition,
+  };
+
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 600,
+      system:
+        "You translate t-shirt design specs into English for an image generator.\n" +
+        "Return ONLY the same JSON object with the same keys, every value translated to natural " +
+        "English design vocabulary. Keep values short. 'elements' stays an array. Values already in " +
+        "English pass through unchanged. No prose, no markdown fences.",
+      messages: [{ role: "user", content: JSON.stringify(payload) }],
+    }),
+  });
+
+  if (!r.ok) {
+    console.error("translate failed:", r.status, await r.text());
+    return spec; // never block a generation over translation
+  }
+
+  const data = await r.json();
+  let raw = (data?.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join(" ")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a === -1 || b === -1) return spec;
+
+  try {
+    const t = JSON.parse(raw.slice(a, b + 1));
+    return normaliseSpec(Object.assign({}, spec, t, { text: spec.text, notes: spec.notes }));
+  } catch (e) {
+    console.error("translate parse failed:", raw.slice(0, 200));
+    return spec;
+  }
+}
+
+/* Returns { spec, notice }. spec is guaranteed English-safe for the generator. */
+async function prepareSpec(spec) {
+  let notice = "";
+
+  // Hebrew in "text" would be DRAWN, and flux cannot draw Hebrew legibly. Drop it, don't mangle it.
+  if (HEBREW_RE.test(spec.text || "")) {
+    spec = Object.assign({}, spec, { text: "" });
+    notice =
+      "הטקסט בעברית לא נכלל בעיצוב — מנוע היצירה לא מצייר אותיות עבריות קריאות. " +
+      "העיצוב נוצר בלי טקסט, ואפשר להוסיף כיתוב בעברית בכלי עיצוב.";
+  }
+
+  if (specHasHebrew(spec)) {
+    console.log("[reimagine] hebrew detected - translating spec");
+    spec = await translateSpec(spec);
+  }
+
+  return { spec, notice };
+}
+
 async function generateFromSpec(spec) {
   const prompt = specToPrompt(spec);
   console.log("[reimagine] v26 prompt:", prompt.slice(0, 300));
@@ -1088,9 +1209,12 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Missing spec" });
       }
       const t0 = Date.now();
-      const art = await generateFromSpec(spec);
+      const prepared = await prepareSpec(spec);
+      const art = await generateFromSpec(prepared.spec);
       const out = await finishArtwork(art, t0);
-      return res.status(200).json(Object.assign({ spec }, out));
+      return res.status(200).json(
+        Object.assign({ spec: prepared.spec, notice: prepared.notice }, out)
+      );
     } catch (err) {
       console.error("[reimagine] generate failed:", err);
       return res.status(502).json({ error: "Generate failed" });
