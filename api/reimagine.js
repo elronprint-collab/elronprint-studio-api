@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v34
+// api/reimagine.js — "עיצוב מחדש" v35
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -39,6 +39,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // the richer one. The suffix is now chosen by the spec: a flat/vector/minimal technique gets
 // flat-art wording plus shading terms added to the negative prompt; everything else keeps the
 // detailed wording exactly as before, so rich designs are unaffected.
+//
+// v35 change: ONE-CLICK STYLE PRESETS.
+// He does not read English and, in his words, would not know what to type in Hebrew either — the
+// flat-style win only happened because I dictated the exact wording. So the style now arrives as a
+// short key (`spec.style`) chosen by a button on the page, and the SERVER owns the vocabulary.
+// The preset is applied at prompt-build time only. It NEVER overwrites the user's fields: subject,
+// elements and text are what stop the design being a copy, so a style button must not touch them,
+// and the form on screen keeps showing exactly what he asked for. Switching presets therefore
+// leaves no residue. `style: ""` or an unknown key = behave exactly like v34.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1133,6 +1142,9 @@ async function analyzeSpec(base64Data, mediaType) {
 }
 
 const SPEC_KEYS = ["genre", "subject", "elements", "palette", "technique", "typography", "text", "composition", "notes"];
+// `style` is a preset KEY chosen by a button, never free text — kept out of SPEC_KEYS so it is
+// never sent to the translator and never treated as Hebrew content.
+const STYLE_KEY_RE = /^[a-z]{2,12}$/;
 
 function normaliseSpec(input) {
   const src = input && typeof input === "object" ? input : {};
@@ -1148,17 +1160,77 @@ function normaliseSpec(input) {
       out[k] = String(v == null ? "" : v).trim().slice(0, 300);
     }
   }
+  const style = String(src.style == null ? "" : src.style).trim().toLowerCase();
+  out.style = STYLE_KEY_RE.test(style) ? style : "";
+
   return out;
 }
 
 /* The prompt is assembled from the spec ONLY. No reference image is passed to the generator,
    so the result is a new design in the same genre rather than a variation of the original. */
+/* ---- v35: style presets. The page sends a key; all wording lives here. ---- */
+const STYLE_PRESETS = {
+  flat: {
+    label: "שטוח ונקי",
+    render:
+      "clean flat vector illustration, single-tone solid fills, no tonal variation, " +
+      "even bold outlines, no shading, no gradients, no highlights, no texture, no depth",
+    negative:
+      ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
+      "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur",
+  },
+  rich: {
+    label: "עשיר ומוצלל",
+    render:
+      "polished illustrated artwork, rich colour, smooth shading and soft highlights, " +
+      "clean linework, high detail, crisp edges",
+    negative: "",
+  },
+  bling: {
+    label: "נצנוץ ואבנים",
+    render:
+      "glossy 3D rhinestone and metallic artwork, faceted gems, gold and chrome accents, " +
+      "sparkles and glitter, deep saturated colour, high detail, crisp edges",
+    negative: ", flat colour, matte, dull, washed out",
+  },
+  vintage: {
+    label: "וינטג' רטרו",
+    render:
+      "retro screen-print look, muted faded palette, limited colour separations, " +
+      "subtle halftone dots and light distress, bold simple shapes",
+    negative: ", neon, glossy, 3d render, photorealistic, smooth gradient",
+  },
+  line: {
+    label: "קו דק ומינימלי",
+    render:
+      "minimal single-weight line art, clean thin uniform strokes, mostly open space, " +
+      "very few filled areas, no shading, no gradients",
+    negative:
+      ", heavy fill, solid blocks of colour, shading, gradient, 3d render, texture, busy detail",
+  },
+  cute: {
+    label: "חמוד וילדותי",
+    render:
+      "kawaii cartoon style, rounded soft shapes, big expressive eyes, " +
+      "soft pastel palette, simple clean outlines, gentle flat shading",
+    negative: ", gritty, horror, realistic, harsh contrast, complex detail",
+  },
+};
+
+function presetFor(spec) {
+  const key = String((spec && spec.style) || "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(STYLE_PRESETS, key) ? STYLE_PRESETS[key] : null;
+}
+
 function specToPrompt(spec) {
   const parts = [];
   if (spec.genre) parts.push(spec.genre);
   if (spec.subject) parts.push(`main focus: ${spec.subject}`);
   if (spec.elements && spec.elements.length) parts.push(`featuring ${spec.elements.join(", ")}`);
-  if (spec.technique) parts.push(`rendered as ${spec.technique}`);
+  const preset = presetFor(spec);
+  // a chosen preset speaks for the rendering; the analysed technique would only contradict it
+  if (preset) parts.push(`rendered as ${preset.render}`);
+  else if (spec.technique) parts.push(`rendered as ${spec.technique}`);
   if (spec.palette) parts.push(`colour palette: ${spec.palette}`);
   if (spec.composition) parts.push(`composition: ${spec.composition}`);
   if (spec.text) {
@@ -1178,7 +1250,9 @@ function specToPrompt(spec) {
   return (
     parts.join(", ") +
     common +
-    (wantsFlat(spec)
+    (preset
+      ? ""                                   // the preset already stated the rendering
+      : wantsFlat(spec)
       ? ", clean flat vector illustration, solid uniform fills, even bold outlines, " +
         "no shading, no gradients, no highlights, no texture, no depth"
       : ", high detail, crisp edges")
@@ -1205,6 +1279,8 @@ const SPEC_NEGATIVE_FLAT =
   "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur";
 
 function negativeFor(spec) {
+  const preset = presetFor(spec);
+  if (preset) return SPEC_NEGATIVE_BASE + (preset.negative || "");
   return SPEC_NEGATIVE_BASE + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
 }
 
