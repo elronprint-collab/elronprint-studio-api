@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v35
+// api/reimagine.js — "עיצוב מחדש" v36
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -48,6 +48,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // elements and text are what stop the design being a copy, so a style button must not touch them,
 // and the form on screen keeps showing exactly what he asked for. Switching presets therefore
 // leaves no residue. `style: ""` or an unknown key = behave exactly like v34.
+//
+// v36 change: THE ARTWORK IS NEVER A GARMENT.
+// He fed in a video thumbnail of a woman wearing a printed tee, and the tool drew a T-SHIRT with
+// lettering on it instead of the lettering alone. The system prompt already says to ignore the
+// garment, but a prompt is advice, not a guarantee — when the reference is a photo rather than a
+// clean design file, the analysis can still come back describing the shirt. So the spec is now
+// SCRUBBED in code before the prompt is built: garment and mockup words are stripped from
+// subject/genre/composition/elements, and if that empties the subject entirely the request is
+// refused with a clear Hebrew message rather than silently drawing a shirt.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1085,6 +1094,10 @@ Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys
 }
 
 RULES
+- NEVER name the garment or the photo. The subject, elements and composition describe the PRINTED
+  GRAPHIC only. Words like t-shirt, shirt, hoodie, apparel, mockup, hanger, model, "woman wearing"
+  must never appear in any field. If the reference is a photo of someone wearing a print, describe
+  the print as if it were a standalone artwork file.
 - The new subject must be a real alternative, not a restyling. Ghost -> black cat, pumpkin,
   owl. Crown -> tiara, butterfly, star. Never the same thing with a new adjective.
 - Describe genre and composition at GENRE level. "ornate script over a jewelled block word"
@@ -1168,6 +1181,49 @@ function normaliseSpec(input) {
 
 /* The prompt is assembled from the spec ONLY. No reference image is passed to the generator,
    so the result is a new design in the same genre rather than a variation of the original. */
+/* ---- v36: garment guard ----
+   The output must be the PRINTED GRAPHIC, never the thing it is printed on. This runs in code,
+   after the analysis and after any translation, so it catches a bad spec no matter where it came
+   from — the model's description, the user's own typing, or a stale saved spec. */
+const GARMENT_RE = new RegExp(
+  "\\b(" +
+    "t-?shirts?|tee shirts?|tees?|shirts?|sweatshirts?|hoodies?|hoody|jumpers?|sweaters?|" +
+    "tank ?tops?|crewnecks?|apparel|garments?|clothing|jerseys?(?= mockup| template)?|" +
+    "mock-?ups?|templates?|hangers?|mannequins?|models? wearing|person wearing|woman wearing|man wearing|" +
+    "flat ?lay|product photo|fabric|folded" +
+  ")\\b",
+  "gi"
+);
+
+/* Removing the word alone leaves rubbish like "a white with bold lettering", which is worse than
+   the original because it still steers the picture. So we drop the whole CLAUSE that mentioned a
+   garment. If that empties the subject, the caller refuses the job instead of guessing. */
+function scrubGarment(v) {
+  return String(v || "")
+    .split(",")
+    .map(function (part) { return part.trim(); })
+    .filter(function (part) {
+      GARMENT_RE.lastIndex = 0;
+      return part && !GARMENT_RE.test(part);
+    })
+    .join(", ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/* Returns the spec with every garment reference removed. `elements` entries that were ONLY a
+   garment word disappear rather than becoming empty strings. */
+function stripGarments(spec) {
+  const out = Object.assign({}, spec);
+  out.genre = scrubGarment(spec.genre);
+  out.subject = scrubGarment(spec.subject);
+  out.composition = scrubGarment(spec.composition);
+  out.elements = (spec.elements || []).map(scrubGarment).filter(Boolean);
+  // technique/palette/typography describe HOW it is drawn — a garment word there is harmless,
+  // and scrubbing them risks destroying legitimate wording like "fabric texture" the user chose.
+  return out;
+}
+
 /* ---- v35: style presets. The page sends a key; all wording lives here. ---- */
 const STYLE_PRESETS = {
   flat: {
@@ -1376,6 +1432,13 @@ async function prepareSpec(spec) {
     spec = await translateSpec(spec);
   }
 
+  // the artwork is the print, never the thing it is printed on
+  const before = spec.subject;
+  spec = stripGarments(spec);
+  if (before !== spec.subject) {
+    console.log(`[reimagine] garment scrubbed from subject: "${before}" -> "${spec.subject}"`);
+  }
+
   return { spec, notice };
 }
 
@@ -1541,6 +1604,15 @@ export default async function handler(req, res) {
 
       const t0 = Date.now();
       const prepared = await prepareSpec(spec);
+
+      if (!prepared.spec.subject && !prepared.spec.genre) {
+        return res.status(400).json({
+          error:
+            "לא זוהה עיצוב בתמונה — נראה שהיא צילום של חולצה ולא העיצוב עצמו. " +
+            "נסו להעלות את הגרפיקה בלבד, או מלאו ידנית את הנושא המרכזי.",
+          needSubject: true,
+        });
+      }
       const art = await generateFromSpec(prepared.spec);
       const out = await finishArtwork(art, t0, isPreview);
 
