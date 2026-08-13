@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v33
+// api/reimagine.js — "עיצוב מחדש" v34
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -31,6 +31,14 @@ import { checkRateLimit } from "./_ratelimit.js";
 // The "text" field is treated differently on purpose: text there is meant to be DRAWN, and flux
 // cannot draw Hebrew letters legibly. Hebrew in that field is therefore dropped rather than mangled,
 // and the response carries a "notice" saying so.
+//
+// v34 change: THE FIXED SUFFIX NO LONGER FIGHTS A FLAT STYLE.
+// He asked for a flat vector look, wrote it in the technique field, and still got shaded, glossy,
+// high-detail artwork. Cause was mine: the suffix appended "high detail, crisp edges" to EVERY
+// prompt, so "flat, no shading" and "high detail" arrived in the same sentence and flux followed
+// the richer one. The suffix is now chosen by the spec: a flat/vector/minimal technique gets
+// flat-art wording plus shading terms added to the negative prompt; everything else keeps the
+// detailed wording exactly as before, so rich designs are unaffected.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1159,19 +1167,49 @@ function specToPrompt(spec) {
     parts.push(`lettering style: ${spec.typography}`);
   }
 
-  return (
-    parts.join(", ") +
+  const common =
     ", original t-shirt print artwork, one self-contained design, " +
     "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
     "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border, " +
-    "every shape and letter filled solid, high detail, crisp edges"
+    "every shape and letter filled solid";
+
+  // A flat brief must not be followed by "high detail" — that contradiction is what produced
+  // shaded, glossy results when the user explicitly asked for flat vector art.
+  return (
+    parts.join(", ") +
+    common +
+    (wantsFlat(spec)
+      ? ", clean flat vector illustration, solid uniform fills, even bold outlines, " +
+        "no shading, no gradients, no highlights, no texture, no depth"
+      : ", high detail, crisp edges")
   );
 }
 
-const SPEC_NEGATIVE =
+/* Detects a flat/vector brief anywhere the user could have expressed one. */
+const FLAT_RE =
+  /\b(flat|vector|minimal|minimalist|solid colou?rs?|no shading|no gradients?|2d|silhouette|line ?art|lineart|outline only|sticker|clip ?art|retro print|screen ?print)\b/i;
+
+function wantsFlat(spec) {
+  return FLAT_RE.test(
+    [spec.technique, spec.genre, spec.composition].filter(Boolean).join(" ")
+  );
+}
+
+const SPEC_NEGATIVE_BASE =
   "photograph of a person, model wearing a shirt, garment, mockup, hanger, watermark, signature, " +
   "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
   "hollow outline text, misspelled text, blurry, low resolution";
+
+const SPEC_NEGATIVE_FLAT =
+  ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
+  "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur";
+
+function negativeFor(spec) {
+  return SPEC_NEGATIVE_BASE + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
+}
+
+// kept so nothing else referencing the old name breaks
+const SPEC_NEGATIVE = SPEC_NEGATIVE_BASE;
 
 const HEBREW_RE = /[\u0590-\u05FF]/;
 
@@ -1270,7 +1308,7 @@ async function generateFromSpec(spec) {
   console.log("[reimagine] v26 prompt:", prompt.slice(0, 300));
   return await fal("fal-ai/flux/dev", {
     prompt,
-    negative_prompt: SPEC_NEGATIVE,
+    negative_prompt: negativeFor(spec),
     image_size: { width: 1152, height: 1536 },
     num_inference_steps: 34,
     guidance_scale: 3.5,
