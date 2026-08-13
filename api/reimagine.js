@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v36
+// api/reimagine.js — "עיצוב מחדש" v37
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -57,6 +57,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // SCRUBBED in code before the prompt is built: garment and mockup words are stripped from
 // subject/genre/composition/elements, and if that empties the subject entirely the request is
 // refused with a clear Hebrew message rather than silently drawing a shirt.
+//
+// v37 change: TWO GARMENT-COLOUR PRESETS, and the trick that makes white printing possible.
+// He wanted a button for "black print on a light shirt" and one for "white print on a dark shirt".
+// The second cannot be done by asking for white artwork: the pipeline draws on a mandatory white
+// background and then removes it, so white art is cut away with the background — that is exactly
+// the hollow-letter disaster of v23/v24. Instead `monolight` generates the design in BLACK like
+// any other, and the preset carries `invert: true`, which negates the RGB channels AFTER the
+// cut-out while leaving alpha untouched. The result is genuinely white artwork on transparency.
+// Inversion only makes sense on a monochrome design, so both presets force monochrome wording.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1264,6 +1273,26 @@ const STYLE_PRESETS = {
     negative:
       ", heavy fill, solid blocks of colour, shading, gradient, 3d render, texture, busy detail",
   },
+  monodark: {
+    label: "כיתוב שחור · לחולצה בהירה",
+    render:
+      "monochrome black artwork on white, solid black fills only, no grey tones, no shading, " +
+      "no gradients, clean even outlines, high contrast",
+    negative:
+      ", colour, coloured, grey, gray, halftone, gradient, shading, 3d render, white fill, " +
+      "pale tones, glossy",
+  },
+  monolight: {
+    label: "כיתוב לבן · לחולצה כהה",
+    // drawn in black, inverted to white after the cut-out (see `invert`)
+    render:
+      "monochrome black artwork on white, solid black fills only, no grey tones, no shading, " +
+      "no gradients, clean even outlines, bold shapes that stay readable when reversed",
+    negative:
+      ", colour, coloured, grey, gray, halftone, gradient, shading, 3d render, white fill, " +
+      "pale tones, glossy, thin hairline strokes",
+    invert: true,
+  },
   cute: {
     label: "חמוד וילדותי",
     render:
@@ -1512,8 +1541,15 @@ async function toPreviewCanvas(buf) {
     .toBuffer();
 }
 
+/* Negates RGB and leaves alpha alone, so black artwork on transparency becomes WHITE artwork on
+   transparency. Applied AFTER the cut-out — inverting first would turn the white background black
+   and the removal would have nothing to key on. */
+async function invertArtwork(buf) {
+  return await sharp(buf).ensureAlpha().negate({ alpha: false }).png().toBuffer();
+}
+
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
-async function finishArtwork(art, t0, preview) {
+async function finishArtwork(art, t0, preview, invert) {
   const elapsed = () => Date.now() - t0;
 
   let cutout = await fal("fal-ai/birefnet", { image_url: art });
@@ -1527,6 +1563,15 @@ async function finishArtwork(art, t0, preview) {
       cutBuf = await stripLeftoverBackground(cutBuf);
     } catch (e) {
       console.warn("flood fill failed, keeping birefnet output:", e.message);
+    }
+  }
+
+  if (invert) {
+    try {
+      cutBuf = await invertArtwork(cutBuf);
+      console.log("[reimagine] inverted to white artwork for dark garments");
+    } catch (e) {
+      console.error("invert failed, delivering the black version:", e);
     }
   }
 
@@ -1614,7 +1659,8 @@ export default async function handler(req, res) {
         });
       }
       const art = await generateFromSpec(prepared.spec);
-      const out = await finishArtwork(art, t0, isPreview);
+      const chosen = presetFor(prepared.spec);
+      const out = await finishArtwork(art, t0, isPreview, !!(chosen && chosen.invert));
 
       // charged only now, after a design actually exists
       let left = { freeLeft: quota.freeLeft, credits: quota.credits };
@@ -1639,6 +1685,7 @@ export default async function handler(req, res) {
             freeLeft: left.freeLeft,
             credits: left.credits,
             owner: !!owner,
+            forDark: !!(chosen && chosen.invert),
           },
           out
         )
