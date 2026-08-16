@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v41
+// api/reimagine.js — "עיצוב מחדש" v42
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -103,6 +103,13 @@ import { checkRateLimit } from "./_ratelimit.js";
 // — change ONLY the identity of the character (this woman -> another woman, this animal -> another
 // animal) and the wording. And: if the reference is realistic/human, the result must NOT be a
 // cartoon. So the keep/change line moves: elements and composition cross over to KEEP, the
+// v42 fixes my own wording in v40: I told the analyser to replace white with "a soft tint such as
+// cream, blush or pale grey" — but those ARE near-white and get cut away, so a white-on-lilac
+// reference came back as pale cream lettering eaten full of holes. The substitute must be a
+// MID-TONE or DEEP version of the hue, never a pale one. v24 had this right and I softened it.
+// For a genuinely white print on a dark garment the correct route is the `monolight` preset,
+// which draws in black and inverts after the cut-out — not asking for pale artwork.
+//
 // analysis now describes the EXECUTION rather than the genre, and technique must be reported at
 // its true realism level. Closer to the source means a thinner copyright margin — he was told.
 //
@@ -1150,9 +1157,11 @@ RULES
 - The design floats on nothing. Never describe a backdrop shape, panel, badge, sticker shape,
   rounded blob or circle behind the subject, even if the reference has one — describe only what
   is printed on top of it.
-- Nothing in the design may be WHITE or near-white. White is the background and is cut away, so a
-  white element would become a hole. Where the reference uses white, name a soft tint instead
-  (cream, blush, pale grey, ivory-tinted).
+- Nothing in the design may be WHITE, near-white, cream, ivory, beige or pale grey. White is the
+  background and is cut away, and those tints are close enough to be eaten too — the artwork comes
+  back full of holes. Where the reference uses white or a very light colour, name a MID-TONE or
+  DEEP version of that same hue instead (white -> charcoal or deep navy; pale pink -> rose;
+  pale mint -> forest green). Never "soft", "pale", "light" or "tinted".
 - NEVER name the garment or the photo. The subject, elements and composition describe the PRINTED
   GRAPHIC only. Words like t-shirt, shirt, hoodie, apparel, mockup, hanger, model, "woman wearing"
   must never appear in any field. If the reference is a photo of someone wearing a print, describe
@@ -1404,8 +1413,8 @@ function specToPrompt(spec) {
     ", the artwork floats freely on empty white, no coloured backdrop shape behind it, " +
     "no panel, no badge, no sticker shape, no rounded blob, no circle or oval behind the subject, " +
     // v24: white IS the background and gets cut away, which turns white areas into holes.
-    "nothing in the artwork is white or near-white — light areas use a soft tint such as cream, " +
-    "blush or pale grey so they survive background removal" +
+    "nothing in the artwork is white, near-white, cream, ivory, beige or pale grey — every colour " +
+    "is a mid-tone or deep shade with strong contrast against white, so nothing is cut away" +
     (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
 
   // A flat brief must not be followed by "high detail" — that contradiction is what produced
@@ -1454,7 +1463,8 @@ const SPEC_NEGATIVE_BASE =
   // v19-v21 backdrop shapes and v24 white artwork, restored into the active path
   "backdrop shape, background blob, rounded rectangle behind the subject, badge, sticker shape, " +
   "circle behind the subject, coloured panel, scene background, " +
-  "white fills, white shapes, white bellies, pure white areas inside the artwork";
+  "white fills, white shapes, white bellies, pure white areas inside the artwork, " +
+  "cream, ivory, beige, off-white, pale pastel fills, washed out, low contrast, faded lettering";
 
 const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
