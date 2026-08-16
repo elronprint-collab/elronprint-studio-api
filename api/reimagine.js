@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v39
+// api/reimagine.js — "עיצוב מחדש" v40
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -83,6 +83,18 @@ import { checkRateLimit } from "./_ratelimit.js";
 // prompt now says so explicitly and the negative blocks text/lettering/words/typography.
 // When the user DOES ask for text, nothing changes — the wording that makes lettering legible has
 // been in the prompt since v26 and must not be contradicted.
+//
+// v40 change: TWO HARD-WON RULES THAT THE v26 REWRITE LEFT BEHIND.
+// A bunny design came back with a big teal backdrop blob still attached AND transparent holes
+// where the white bellies should be. Both were solved YEARS of versions ago — but only inside the
+// LEGACY nano-banana prompt, which no longer runs. When v26 replaced the generator I rebuilt the
+// prompt from scratch and never carried these across:
+//   1. v19-v21: no backdrop SHAPE. "no frame/border" is not the same as "no coloured panel behind
+//      the subject" — a rounded blob is neither a frame nor a border, so nothing stopped it, and
+//      birefnet then treats the blob as the salient object and keeps it.
+//   2. v24: NOTHING IN THE ARTWORK MAY BE WHITE. White is the background here and gets cut away,
+//      which is why the bellies became holes. Light areas must be off-white//cream-tinted instead.
+// Both now live in the ACTIVE specToPrompt path and in the shared negative.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1120,6 +1132,12 @@ Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys
 }
 
 RULES
+- The design floats on nothing. Never describe a backdrop shape, panel, badge, sticker shape,
+  rounded blob or circle behind the subject, even if the reference has one — describe only what
+  is printed on top of it.
+- Nothing in the design may be WHITE or near-white. White is the background and is cut away, so a
+  white element would become a hole. Where the reference uses white, name a soft tint instead
+  (cream, blush, pale grey, ivory-tinted).
 - NEVER name the garment or the photo. The subject, elements and composition describe the PRINTED
   GRAPHIC only. Words like t-shirt, shirt, hoodie, apparel, mockup, hanger, model, "woman wearing"
   must never appear in any field. If the reference is a photo of someone wearing a print, describe
@@ -1362,6 +1380,13 @@ function specToPrompt(spec) {
     ", original t-shirt print artwork, one self-contained design, " +
     "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
     "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border" +
+    // v19-v21: a coloured backdrop SHAPE is not a frame or a border, so those words never blocked
+    // it — and birefnet then keeps the shape as the salient object instead of the artwork.
+    ", the artwork floats freely on empty white, no coloured backdrop shape behind it, " +
+    "no panel, no badge, no sticker shape, no rounded blob, no circle or oval behind the subject, " +
+    // v24: white IS the background and gets cut away, which turns white areas into holes.
+    "nothing in the artwork is white or near-white — light areas use a soft tint such as cream, " +
+    "blush or pale grey so they survive background removal" +
     (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
 
   // A flat brief must not be followed by "high detail" — that contradiction is what produced
@@ -1406,7 +1431,11 @@ function wantsFlat(spec) {
 const SPEC_NEGATIVE_BASE =
   "photograph of a person, model wearing a shirt, garment, mockup, hanger, watermark, signature, " +
   "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
-  "hollow outline text, misspelled text, blurry, low resolution";
+  "hollow outline text, misspelled text, blurry, low resolution, " +
+  // v19-v21 backdrop shapes and v24 white artwork, restored into the active path
+  "backdrop shape, background blob, rounded rectangle behind the subject, badge, sticker shape, " +
+  "circle behind the subject, coloured panel, scene background, " +
+  "white fills, white shapes, white bellies, pure white areas inside the artwork";
 
 const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
