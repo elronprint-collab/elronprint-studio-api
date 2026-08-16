@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v38
+// api/reimagine.js — "עיצוב מחדש" v39
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -75,6 +75,14 @@ import { checkRateLimit } from "./_ratelimit.js";
 // sentence and flux followed the flat one. That clause is now dropped for painterly briefs, and a
 // new `real` preset ("מציאותי ומאויר") states the rendering AND swaps the suffix wording.
 // Everything else keeps the old suffix verbatim, so no existing style shifts.
+//
+// v39 change: NO INVENTED LETTERING WHEN THE DESIGN IS NOT SUPPOSED TO HAVE ANY.
+// The first good painterly run came back with fake garbled words scrawled across the jacket, where
+// the reference had ornamental patches. flux fills decorative space with letter-shaped noise, and
+// garbled type on a printed shirt is worse than no type at all. So when `spec.text` is empty the
+// prompt now says so explicitly and the negative blocks text/lettering/words/typography.
+// When the user DOES ask for text, nothing changes — the wording that makes lettering legible has
+// been in the prompt since v26 and must not be contradicted.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1342,6 +1350,8 @@ function specToPrompt(spec) {
     parts.push(`with the text "${spec.text}"${spec.typography ? ` set as ${spec.typography}` : ""}, spelled exactly, clearly legible`);
   } else if (spec.typography) {
     parts.push(`lettering style: ${spec.typography}`);
+  } else {
+    parts.push("no text and no lettering anywhere in the artwork, decoration only");
   }
 
   // "every shape filled solid" is a definition of FLAT vector art. Keeping it on a painterly brief
@@ -1402,10 +1412,19 @@ const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
   "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur";
 
+/* Blocks flux from filling decorative space with letter-shaped noise. Only ever added when the
+   design is meant to be wordless — asking for text and banning it in one prompt would be the same
+   self-contradiction that caused v34 and v38. */
+const SPEC_NEGATIVE_NOTEXT =
+  ", text, lettering, letters, words, writing, typography, caption, slogan, logo, watermark, " +
+  "gibberish text, fake letters, garbled writing";
+
 function negativeFor(spec) {
   const preset = presetFor(spec);
-  if (preset) return SPEC_NEGATIVE_BASE + (preset.negative || "");
-  return SPEC_NEGATIVE_BASE + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
+  const wordless = !String(spec.text || "").trim();
+  const base = SPEC_NEGATIVE_BASE + (wordless ? SPEC_NEGATIVE_NOTEXT : "");
+  if (preset) return base + (preset.negative || "");
+  return base + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
 }
 
 // kept so nothing else referencing the old name breaks
