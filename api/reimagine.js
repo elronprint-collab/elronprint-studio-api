@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v40
+// api/reimagine.js — "עיצוב מחדש" v41
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -95,6 +95,16 @@ import { checkRateLimit } from "./_ratelimit.js";
 //   2. v24: NOTHING IN THE ARTWORK MAY BE WHITE. White is the background here and gets cut away,
 //      which is why the bellies became holes. Light areas must be off-white//cream-tinted instead.
 // Both now live in the ACTIVE specToPrompt path and in the shared negative.
+//
+// v41 change: HE REVERSED THE BRIEF — "SAME DESIGN, DIFFERENT CAST".
+// v27 was built on what he asked for on 11 Aug: change subject AND elements, describe everything
+// at GENRE level so the result is a different design for the same shelf. On 16 Aug he said the
+// opposite and was explicit: "אותו עיצוב בדיוק" — same composition, same elements, same rendering
+// — change ONLY the identity of the character (this woman -> another woman, this animal -> another
+// animal) and the wording. And: if the reference is realistic/human, the result must NOT be a
+// cartoon. So the keep/change line moves: elements and composition cross over to KEEP, the
+// analysis now describes the EXECUTION rather than the genre, and technique must be reported at
+// its true realism level. Closer to the source means a thinner copyright margin — he was told.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1104,31 +1114,36 @@ You will be shown a reference design. It may be a standalone artwork file, or a 
 someone WEARING a printed garment. If it is a photo, read ONLY the printed graphic and
 ignore the wearer, the garment, the room and the photography completely.
 
-Your job is to design a NEW piece for the same shelf. Not a copy, not a variation of this
-execution — a different design that would sell to the same buyer for the same occasion.
+Your job is to describe THE SAME DESIGN with a different cast. The layout, the supporting
+elements, the colours and the drawing style all stay as they are. Only WHO is in it and WHAT
+IT SAYS change.
 
 Split your answer in two, and this split is the whole point:
 
-KEEP FAITHFUL to the reference (this is what makes it feel like the same kind of product):
-  genre, palette, technique, typography, composition
+KEEP FAITHFUL — describe what is actually there, in detail:
+  genre, palette, technique, typography, composition, elements
 
-DELIBERATELY CHANGE (this is what stops it being a copy):
-  subject   -> a DIFFERENT main character or object, equally appealing for the same occasion
-  elements  -> mostly different supporting motifs; at most ONE may overlap with the reference
-  text      -> different wording with the same intent, if the reference has text at all
+CHANGE ONLY THESE TWO:
+  subject -> the SAME KIND of character, a different individual. A woman stays a woman with the
+             same age, build, pose and framing, but a different face and hair. An animal becomes
+             a DIFFERENT ANIMAL of similar size and appeal. Never change the category itself.
+  text    -> different wording with the same intent and roughly the same length
 
 Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
 
 {
   "genre":       "the category in 2-6 words, e.g. 'glam birthday celebration design'",
-  "subject":     "your NEW main focus, 2-8 words",
-  "elements":    ["4-8 supporting motifs for your new design, each 1-3 words"],
+  "subject":     "the SAME kind of character but a different individual, 3-12 words, including
+                  pose and framing so it matches the reference",
+  "elements":    ["the SAME supporting motifs the reference actually has, 4-8 items, 1-3 words each"],
   "palette":     "the reference colours in 3-10 words",
-  "technique":   "the reference rendering style in 3-10 words",
+  "technique":   "the reference rendering style in 4-14 words, stating its REALISM LEVEL plainly —
+                  photographic, semi-realistic painted, stylised illustration or flat vector",
   "typography":  "the reference lettering style in 3-12 words, or '' if it has no text",
   "text":        "your NEW wording, or '' if the reference has no text",
-  "composition": "the reference arrangement in 4-12 words",
-  "notes":       "one sentence naming what the reference had and what you swapped it for"
+  "composition": "the reference arrangement in detail, 6-16 words — where each thing sits and how
+                  big it is",
+  "notes":       "one sentence naming the original character and the one you put in its place"
 }
 
 RULES
@@ -1142,10 +1157,14 @@ RULES
   GRAPHIC only. Words like t-shirt, shirt, hoodie, apparel, mockup, hanger, model, "woman wearing"
   must never appear in any field. If the reference is a photo of someone wearing a print, describe
   the print as if it were a standalone artwork file.
-- The new subject must be a real alternative, not a restyling. Ghost -> black cat, pumpkin,
-  owl. Crown -> tiara, butterfly, star. Never the same thing with a new adjective.
-- Describe genre and composition at GENRE level. "ornate script over a jewelled block word"
-  is a genre; "Birthday in pink script above QUEEN in rhinestones" is a copy.
+- The subject swap stays inside its own category. Woman -> a different woman, not a cat.
+  Cat -> dog, fox, bear. Ghost -> owl, pumpkin. Never a human turned into an animal, and never
+  the same individual with a new adjective.
+- MATCH THE REALISM LEVEL EXACTLY. If the reference is a photograph or a realistic painting, say
+  so and never describe it as a cartoon, kawaii, chibi or vector. A realistic reference must
+  produce a realistic result; a cartoon reference must produce a cartoon.
+- Describe composition and elements as they REALLY ARE, in detail — this is the one thing the new
+  design must reproduce faithfully.
 - Keep every value short enough to fit in a text input.
 - Write in English; the generator only reads English.
 - Never mention the reference image, the wearer, or that you were shown anything.`;
@@ -1166,7 +1185,7 @@ async function analyzeSpec(base64Data, mediaType) {
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Return the JSON spec. Remember: keep genre, palette, technique, typography and composition faithful, but give me a DIFFERENT subject, different elements and different text. JSON only." },
+          { type: "text", text: "Return the JSON spec. Keep the composition, elements, palette, typography and technique FAITHFUL to what you see — same design. Change ONLY the individual character (same category, different individual) and the wording. Match the realism level exactly. JSON only." },
         ],
       }],
     }),
