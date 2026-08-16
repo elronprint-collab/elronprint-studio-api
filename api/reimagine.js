@@ -109,6 +109,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // no-backdrop rule now explicitly OVERRIDES the keep-faithful rule, and the composition field
 // itself says to describe the arrangement of the artwork only, never the shape behind it.
 //
+// v44 change: THE SERVER DRAWS THE LETTERING, NOT FLUX.
+// flux cannot spell. It produced "STELLAR PRES" and "Scxperrints" on a two-word brief, and it gets
+// worse with longer words and script faces. No prompt fixes that — the prompt has demanded exact
+// spelling since v26. So when the spec has text, the artwork is generated WORDLESS (reusing v39's
+// no-text path) and the lettering is composited afterwards from an SVG, which is always spelled
+// correctly. Trade-off he was told about: the caption sits UNDER the artwork rather than woven
+// into it. Fails soft — if the text layer comes back blank (missing fonts on the host) the design
+// is still delivered, wordless, with a notice rather than an error.
+//
 // analysis now describes the EXECUTION rather than the genre, and technique must be reported at
 // its true realism level. Closer to the source means a thinner copyright margin — he was told.
 //
@@ -1588,6 +1597,15 @@ async function prepareSpec(spec) {
   return { spec, notice };
 }
 
+/* Dark by default: white lettering would be cut away with the background (see v24/v42). */
+function chosenTextColour(spec) {
+  const p = String(spec.palette || "").toLowerCase();
+  if (/\bnavy|deep blue\b/.test(p)) return "#152A4A";
+  if (/\bmaroon|burgundy|deep red\b/.test(p)) return "#5A1220";
+  if (/\bforest|deep green\b/.test(p)) return "#12402A";
+  return "#111111";
+}
+
 async function generateFromSpec(spec) {
   const prompt = specToPrompt(spec);
   console.log("[reimagine] v26 prompt:", prompt.slice(0, 300));
@@ -1665,8 +1683,113 @@ async function invertArtwork(buf) {
   return await sharp(buf).ensureAlpha().negate({ alpha: false }).png().toBuffer();
 }
 
+/* ---- v44: server-rendered lettering ----
+   Drawn as an SVG and rasterised by sharp, so the spelling is exactly what the user asked for. */
+
+function escapeXml(v) {
+  return String(v || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+/* Very rough advance width per character at font-size 1, used to pick a size that fits. */
+function fitFontSize(line, boxW) {
+  const per = 0.62;                       // conservative for a bold condensed face
+  return Math.floor(boxW / Math.max(1, line.length * per));
+}
+
+function textSvg(lines, boxW, boxH, colour) {
+  const gap = 1.12;
+  let size = Math.min(
+    Math.floor(boxH / (lines.length * gap)),
+    ...lines.map((l) => fitFontSize(l, boxW))
+  );
+  size = Math.max(40, size);
+
+  const total = lines.length * size * gap;
+  let y = Math.round((boxH - total) / 2 + size * 0.82);
+
+  const body = lines.map((l) => {
+    const t =
+      `<text x="${Math.round(boxW / 2)}" y="${y}" text-anchor="middle" ` +
+      `font-family="DejaVu Sans, Liberation Sans, Arial, Helvetica, sans-serif" ` +
+      `font-weight="bold" font-size="${size}" fill="${colour}" ` +
+      `letter-spacing="${Math.round(size * 0.02)}">${escapeXml(l)}</text>`;
+    y += Math.round(size * gap);
+    return t;
+  }).join("");
+
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
+  );
+}
+
+/* Returns a transparent PNG of the lettering, or null if nothing rendered (no usable font). */
+async function renderTextLayer(text, boxW, boxH, colour) {
+  const lines = String(text || "")
+    .split(/\s*\n\s*|\s{2,}/)
+    .flatMap((l) => (l.length > 18 ? l.split(/\s+/) : [l]))
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  if (!lines.length) return null;
+
+  try {
+    const png = await sharp(textSvg(lines, boxW, boxH, colour || "#111111"))
+      .png()
+      .toBuffer();
+    // fontconfig can silently render nothing — verify some pixels are actually opaque
+    const stats = await sharp(png).stats();
+    const alpha = stats.channels[3];
+    if (!alpha || alpha.max < 200) {
+      console.error("[reimagine] text layer came back blank - no usable font");
+      return null;
+    }
+    return png;
+  } catch (e) {
+    console.error("[reimagine] text layer failed:", e.message);
+    return null;
+  }
+}
+
+/* Places the wordless artwork in the upper area and the lettering beneath it. */
+async function composeWithText(artBuf, text, colour) {
+  const TEXT_H = Math.round(CANVAS_H * 0.22);
+  const ART_H = CANVAS_H - TEXT_H;
+
+  const layer = await renderTextLayer(text, Math.round(CANVAS_W * SAFE), TEXT_H, colour);
+  if (!layer) return null;                       // caller falls back to the wordless design
+
+  const art = await sharp(artBuf)
+    .ensureAlpha()
+    .trim({ threshold: 12 })
+    .resize(Math.round(CANVAS_W * SAFE), Math.round(ART_H * 0.94), {
+      fit: "inside",
+      kernel: "lanczos3",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png()
+    .toBuffer();
+
+  const am = await sharp(art).metadata();
+
+  return await sharp({
+    create: {
+      width: CANVAS_W, height: CANVAS_H, channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([
+      { input: art, left: Math.round((CANVAS_W - am.width) / 2), top: Math.round((ART_H - am.height) / 2) },
+      { input: layer, left: Math.round((CANVAS_W - Math.round(CANVAS_W * SAFE)) / 2), top: ART_H },
+    ])
+    .png({ compressionLevel: 6 })
+    .withMetadata({ density: DPI })
+    .toBuffer();
+}
+
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
-async function finishArtwork(art, t0, preview, invert) {
+async function finishArtwork(art, t0, preview, invert, serverText) {
   const elapsed = () => Date.now() - t0;
 
   let cutout = await fal("fal-ai/birefnet", { image_url: art });
@@ -1692,7 +1815,14 @@ async function finishArtwork(art, t0, preview, invert) {
     }
   }
 
-  let canvas = preview ? await toPreviewCanvas(cutBuf) : await toPrintCanvas(cutBuf);
+  let canvas = null;
+  let textDrawn = false;
+  if (serverText && !preview) {
+    canvas = await composeWithText(cutBuf, serverText.text, serverText.colour);
+    textDrawn = !!canvas;
+    if (!canvas) console.error("[reimagine] falling back to wordless artwork");
+  }
+  if (!canvas) canvas = preview ? await toPreviewCanvas(cutBuf) : await toPrintCanvas(cutBuf);
   if (!preview) canvas = await fitUploadSize(canvas);
   const imageUrl = await uploadCloudinary(canvas);
   console.log(`[reimagine] done${preview ? " (preview)" : ""}: ${elapsed()}ms`);
@@ -1701,6 +1831,7 @@ async function finishArtwork(art, t0, preview, invert) {
     imageUrl,
     url: imageUrl,
     preview: !!preview,
+    textDrawn,
     width: preview ? PREVIEW_W : CANVAS_W,
     height: preview ? PREVIEW_H : CANVAS_H,
     dpi: preview ? 72 : DPI,
@@ -1767,6 +1898,13 @@ export default async function handler(req, res) {
       const t0 = Date.now();
       const prepared = await prepareSpec(spec);
 
+      // flux cannot spell, so it never draws the words: the artwork is generated WORDLESS and the
+      // lettering is composited afterwards. prepared.spec is what reaches the generator.
+      const wanted = prepared.spec.text
+        ? { text: prepared.spec.text, colour: chosenTextColour(prepared.spec) }
+        : null;
+      if (wanted) prepared.spec = Object.assign({}, prepared.spec, { text: "" });
+
       if (!prepared.spec.subject && !prepared.spec.genre) {
         return res.status(400).json({
           error:
@@ -1777,7 +1915,9 @@ export default async function handler(req, res) {
       }
       const art = await generateFromSpec(prepared.spec);
       const chosen = presetFor(prepared.spec);
-      const out = await finishArtwork(art, t0, isPreview, !!(chosen && chosen.invert));
+      const out = await finishArtwork(
+        art, t0, isPreview, !!(chosen && chosen.invert), wanted
+      );
 
       // charged only now, after a design actually exists
       let left = { freeLeft: quota.freeLeft, credits: quota.credits };
