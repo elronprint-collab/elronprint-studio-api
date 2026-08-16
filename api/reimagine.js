@@ -1300,3 +1300,780 @@ function scrubGarment(v) {
     .replace(/\s{2,}/g, " ")
     .trim();
 }
+
+/* Returns the spec with every garment reference removed. `elements` entries that were ONLY a
+   garment word disappear rather than becoming empty strings. */
+function stripGarments(spec) {
+  const out = Object.assign({}, spec);
+  out.genre = scrubGarment(spec.genre);
+  out.subject = scrubGarment(spec.subject);
+  out.composition = scrubGarment(spec.composition);
+  out.elements = (spec.elements || []).map(scrubGarment).filter(Boolean);
+  // technique/palette/typography describe HOW it is drawn — a garment word there is harmless,
+  // and scrubbing them risks destroying legitimate wording like "fabric texture" the user chose.
+  return out;
+}
+
+/* ---- v35: style presets. The page sends a key; all wording lives here. ---- */
+const STYLE_PRESETS = {
+  flat: {
+    label: "שטוח ונקי",
+    render:
+      "clean flat vector illustration, single-tone solid fills, no tonal variation, " +
+      "even bold outlines, no shading, no gradients, no highlights, no texture, no depth",
+    negative:
+      ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
+      "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur",
+  },
+  rich: {
+    label: "עשיר ומוצלל",
+    render:
+      "polished illustrated artwork, rich colour, smooth shading and soft highlights, " +
+      "clean linework, high detail, crisp edges",
+    negative: "",
+  },
+  bling: {
+    label: "נצנוץ ואבנים",
+    render:
+      "glossy 3D rhinestone and metallic artwork, faceted gems, gold and chrome accents, " +
+      "sparkles and glitter, deep saturated colour, high detail, crisp edges",
+    negative: ", flat colour, matte, dull, washed out",
+  },
+  vintage: {
+    label: "וינטג' רטרו",
+    render:
+      "retro screen-print look, muted faded palette, limited colour separations, " +
+      "subtle halftone dots and light distress, bold simple shapes",
+    negative: ", neon, glossy, 3d render, photorealistic, smooth gradient",
+  },
+  line: {
+    label: "קו דק ומינימלי",
+    render:
+      "minimal single-weight line art, clean thin uniform strokes, mostly open space, " +
+      "very few filled areas, no shading, no gradients",
+    negative:
+      ", heavy fill, solid blocks of colour, shading, gradient, 3d render, texture, busy detail",
+  },
+  real: {
+    label: "מציאותי ומאויר",
+    render:
+      "semi-realistic digital painting, detailed realistic facial features and proportions, " +
+      "smooth airbrushed skin with soft tonal shading, rich colour blending, fine ink linework, " +
+      "expressive but natural eyes",
+    negative:
+      ", chibi, big oversized eyes, kawaii, cartoon mascot, flat vector, sticker art, " +
+      "simplified doll face, childish proportions, uniform flat fill",
+    painterly: true,
+  },
+  monodark: {
+    label: "כיתוב שחור · לחולצה בהירה",
+    render:
+      "monochrome black artwork on white, solid black fills only, no grey tones, no shading, " +
+      "no gradients, clean even outlines, high contrast",
+    negative:
+      ", colour, coloured, grey, gray, halftone, gradient, shading, 3d render, white fill, " +
+      "pale tones, glossy",
+  },
+  monolight: {
+    label: "כיתוב לבן · לחולצה כהה",
+    // drawn in black, inverted to white after the cut-out (see `invert`)
+    render:
+      "monochrome black artwork on white, solid black fills only, no grey tones, no shading, " +
+      "no gradients, clean even outlines, bold shapes that stay readable when reversed",
+    negative:
+      ", colour, coloured, grey, gray, halftone, gradient, shading, 3d render, white fill, " +
+      "pale tones, glossy, thin hairline strokes",
+    invert: true,
+  },
+  cute: {
+    label: "חמוד וילדותי",
+    render:
+      "kawaii cartoon style, rounded soft shapes, big expressive eyes, " +
+      "soft pastel palette, simple clean outlines, gentle flat shading",
+    negative: ", gritty, horror, realistic, harsh contrast, complex detail",
+  },
+};
+
+function presetFor(spec) {
+  const key = String((spec && spec.style) || "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(STYLE_PRESETS, key) ? STYLE_PRESETS[key] : null;
+}
+
+function specToPrompt(spec) {
+  const parts = [];
+  if (spec.genre) parts.push(spec.genre);
+  if (spec.subject) parts.push(`main focus: ${spec.subject}`);
+  if (spec.elements && spec.elements.length) parts.push(`featuring ${spec.elements.join(", ")}`);
+  const preset = presetFor(spec);
+  // a chosen preset speaks for the rendering; the analysed technique would only contradict it
+  if (preset) parts.push(`rendered as ${preset.render}`);
+  else if (spec.technique) parts.push(`rendered as ${spec.technique}`);
+  if (spec.palette) parts.push(`colour palette: ${spec.palette}`);
+  if (spec.composition) parts.push(`composition: ${spec.composition}`);
+  if (spec.text) {
+    parts.push(`with the text "${spec.text}"${spec.typography ? ` set as ${spec.typography}` : ""}, spelled exactly, clearly legible`);
+  } else if (spec.typography) {
+    parts.push(`lettering style: ${spec.typography}`);
+  } else {
+    parts.push("no text and no lettering anywhere in the artwork, decoration only");
+  }
+
+  // "every shape filled solid" is a definition of FLAT vector art. Keeping it on a painterly brief
+  // contradicts the brief in the same sentence, which is what forced cartoon output. Painterly work
+  // still needs the no-hollow-lettering guarantee, so that half is kept and the fill clause dropped.
+  const painterly = wantsPainterly(spec);
+  const common =
+    ", original t-shirt print artwork, one self-contained design, " +
+    "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
+    "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border" +
+    // v19-v21: a coloured backdrop SHAPE is not a frame or a border, so those words never blocked
+    // it — and birefnet then keeps the shape as the salient object instead of the artwork.
+    ", the artwork floats freely on empty white, no coloured backdrop shape behind it, " +
+    "no panel, no badge, no sticker shape, no rounded blob, no circle or oval behind the subject, " +
+    // v24: white IS the background and gets cut away, which turns white areas into holes.
+    "nothing in the artwork is white or near-white — light areas use a soft tint such as cream, " +
+    "blush or pale grey so they survive background removal" +
+    (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
+
+  // A flat brief must not be followed by "high detail" — that contradiction is what produced
+  // shaded, glossy results when the user explicitly asked for flat vector art.
+  return (
+    parts.join(", ") +
+    common +
+    (preset
+      ? ""                                   // the preset already stated the rendering
+      : painterly
+      ? ", rich detail, painterly finish"
+      : wantsFlat(spec)
+      ? ", clean flat vector illustration, solid uniform fills, even bold outlines, " +
+        "no shading, no gradients, no highlights, no texture, no depth"
+      : ", high detail, crisp edges")
+  );
+}
+
+/* Detects a flat/vector brief anywhere the user could have expressed one. */
+const FLAT_RE =
+  /\b(flat|vector|minimal|minimalist|solid colou?rs?|no shading|no gradients?|2d|silhouette|line ?art|lineart|outline only|sticker|clip ?art|retro print|screen ?print)\b/i;
+
+/* A painterly brief: either the `real` preset, or wording the user typed themselves. */
+const PAINTERLY_RE =
+  /\b(semi-?realistic|realistic|photo-?realistic|painterly|digital painting|airbrush(ed)?|render(ed|ing)?|portrait|lifelike|shaded|soft shading|tonal|blend(ed|ing)?)\b/i;
+
+function wantsPainterly(spec) {
+  const p = presetFor(spec);
+  if (p) return !!p.painterly;
+  if (wantsFlat(spec)) return false;          // an explicit flat brief always wins
+  return PAINTERLY_RE.test(
+    [spec.technique, spec.genre, spec.composition].filter(Boolean).join(" ")
+  );
+}
+
+function wantsFlat(spec) {
+  return FLAT_RE.test(
+    [spec.technique, spec.genre, spec.composition].filter(Boolean).join(" ")
+  );
+}
+
+const SPEC_NEGATIVE_BASE =
+  "photograph of a person, model wearing a shirt, garment, mockup, hanger, watermark, signature, " +
+  "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
+  "hollow outline text, misspelled text, blurry, low resolution, " +
+  // v19-v21 backdrop shapes and v24 white artwork, restored into the active path
+  "backdrop shape, background blob, rounded rectangle behind the subject, badge, sticker shape, " +
+  "circle behind the subject, coloured panel, scene background, " +
+  "white fills, white shapes, white bellies, pure white areas inside the artwork";
+
+const SPEC_NEGATIVE_FLAT =
+  ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
+  "drop shadow, ambient occlusion, painterly, airbrush, volumetric, depth, realistic fur";
+
+/* Blocks flux from filling decorative space with letter-shaped noise. Only ever added when the
+   design is meant to be wordless — asking for text and banning it in one prompt would be the same
+   self-contradiction that caused v34 and v38. */
+const SPEC_NEGATIVE_NOTEXT =
+  ", text, lettering, letters, words, writing, typography, caption, slogan, logo, watermark, " +
+  "gibberish text, fake letters, garbled writing";
+
+function negativeFor(spec) {
+  const preset = presetFor(spec);
+  const wordless = !String(spec.text || "").trim();
+  const base = SPEC_NEGATIVE_BASE + (wordless ? SPEC_NEGATIVE_NOTEXT : "");
+  if (preset) return base + (preset.negative || "");
+  return base + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
+}
+
+// kept so nothing else referencing the old name breaks
+const SPEC_NEGATIVE = SPEC_NEGATIVE_BASE;
+
+const HEBREW_RE = /[\u0590-\u05FF]/;
+
+function specHasHebrew(spec) {
+  for (const k of SPEC_KEYS) {
+    const v = spec[k];
+    if (k === "elements") {
+      if ((v || []).some((x) => HEBREW_RE.test(x))) return true;
+    } else if (HEBREW_RE.test(v || "")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* One Claude call translates the whole spec at once. Cheaper and more consistent than
+   translating field by field, and it keeps the design vocabulary coherent across fields. */
+async function translateSpec(spec) {
+  const payload = {
+    genre: spec.genre,
+    subject: spec.subject,
+    elements: spec.elements,
+    palette: spec.palette,
+    technique: spec.technique,
+    typography: spec.typography,
+    composition: spec.composition,
+  };
+
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 600,
+      system:
+        "You translate t-shirt design specs into English for an image generator.\n" +
+        "Return ONLY the same JSON object with the same keys, every value translated to natural " +
+        "English design vocabulary. Keep values short. 'elements' stays an array. Values already in " +
+        "English pass through unchanged. No prose, no markdown fences.",
+      messages: [{ role: "user", content: JSON.stringify(payload) }],
+    }),
+  });
+
+  if (!r.ok) {
+    console.error("translate failed:", r.status, await r.text());
+    return spec; // never block a generation over translation
+  }
+
+  const data = await r.json();
+  let raw = (data?.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join(" ")
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+  if (a === -1 || b === -1) return spec;
+
+  try {
+    const t = JSON.parse(raw.slice(a, b + 1));
+    return normaliseSpec(Object.assign({}, spec, t, { text: spec.text, notes: spec.notes }));
+  } catch (e) {
+    console.error("translate parse failed:", raw.slice(0, 200));
+    return spec;
+  }
+}
+
+/* Returns { spec, notice }. spec is guaranteed English-safe for the generator. */
+async function prepareSpec(spec) {
+  let notice = "";
+
+  // Hebrew in "text" would be DRAWN, and flux cannot draw Hebrew legibly. Drop it, don't mangle it.
+  if (HEBREW_RE.test(spec.text || "")) {
+    spec = Object.assign({}, spec, { text: "" });
+    notice =
+      "הטקסט בעברית לא נכלל בעיצוב — מנוע היצירה לא מצייר אותיות עבריות קריאות. " +
+      "העיצוב נוצר בלי טקסט, ואפשר להוסיף כיתוב בעברית בכלי עיצוב.";
+  }
+
+  if (specHasHebrew(spec)) {
+    console.log("[reimagine] hebrew detected - translating spec");
+    spec = await translateSpec(spec);
+  }
+
+  // the artwork is the print, never the thing it is printed on
+  const before = spec.subject;
+  spec = stripGarments(spec);
+  if (before !== spec.subject) {
+    console.log(`[reimagine] garment scrubbed from subject: "${before}" -> "${spec.subject}"`);
+  }
+
+  return { spec, notice };
+}
+
+/* flux draws short Latin lettering beautifully and weaves it into the design. It only fails on
+   Hebrew (cannot draw it at all) and on long strings (misspells). Hand those two cases to the
+   server and leave the rest alone — a plain caption underneath is worse than good integrated type. */
+const SERVER_TEXT_MAX = 14;
+
+function needsServerText(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (HEBREW_RE.test(t)) return true;              // flux cannot draw Hebrew at all
+  return t.replace(/\s+/g, "").length > SERVER_TEXT_MAX;
+}
+
+/* Dark by default: white lettering would be cut away with the background (see v24/v42). */
+function chosenTextColour(spec) {
+  const p = String(spec.palette || "").toLowerCase();
+  if (/\bnavy|deep blue\b/.test(p)) return "#152A4A";
+  if (/\bmaroon|burgundy|deep red\b/.test(p)) return "#5A1220";
+  if (/\bforest|deep green\b/.test(p)) return "#12402A";
+  return "#111111";
+}
+
+async function generateFromSpec(spec) {
+  const prompt = specToPrompt(spec);
+  console.log("[reimagine] v26 prompt:", prompt.slice(0, 300));
+  return await fal("fal-ai/flux/dev", {
+    prompt,
+    negative_prompt: negativeFor(spec),
+    image_size: { width: 1152, height: 1536 },
+    num_inference_steps: 34,
+    guidance_scale: 3.5,
+    output_format: "png",
+    enable_safety_checker: true,
+  });
+}
+
+const PREVIEW_W = 1200, PREVIEW_H = 1440;
+const WATERMARK_TEXT = "ElronPrint";
+
+/* Tiled diagonal watermark. Drawn as one SVG the size of the preview so it cannot be cropped off,
+   and kept semi-transparent so the design stays readable — the point is to block printing, not
+   to ruin the picture. */
+function watermarkSvg(w, h) {
+  const step = 260;
+  let marks = "";
+  for (let y = -h; y < h * 2; y += step) {
+    for (let x = -w; x < w * 2; x += step * 1.6) {
+      marks +=
+        `<text x="${x}" y="${y}" font-family="Arial, Helvetica, sans-serif" font-size="34" ` +
+        `font-weight="700" fill="#000000" fill-opacity="0.20" ` +
+        `transform="rotate(-30 ${x} ${y})">${WATERMARK_TEXT}</text>`;
+    }
+  }
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${marks}</svg>`
+  );
+}
+
+async function toPreviewCanvas(buf) {
+  buf = await cleanEdges(buf);
+
+  const inner = await sharp(buf)
+    .ensureAlpha()
+    .trim({ threshold: 12 })
+    .resize(Math.round(PREVIEW_W * SAFE), Math.round(PREVIEW_H * SAFE), {
+      fit: "inside",
+      kernel: "lanczos3",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png({ compressionLevel: 6 })
+    .toBuffer();
+
+  const m = await sharp(inner).metadata();
+
+  return sharp({
+    create: {
+      width: PREVIEW_W, height: PREVIEW_H, channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([
+      {
+        input: inner,
+        left: Math.round((PREVIEW_W - m.width) / 2),
+        top: Math.round((PREVIEW_H - m.height) / 2),
+      },
+      { input: watermarkSvg(PREVIEW_W, PREVIEW_H), left: 0, top: 0 },
+    ])
+    .png({ compressionLevel: 6 })
+    .toBuffer();
+}
+
+/* Negates RGB and leaves alpha alone, so black artwork on transparency becomes WHITE artwork on
+   transparency. Applied AFTER the cut-out — inverting first would turn the white background black
+   and the removal would have nothing to key on. */
+async function invertArtwork(buf) {
+  return await sharp(buf).ensureAlpha().negate({ alpha: false }).png().toBuffer();
+}
+
+/* ---- v44: server-rendered lettering ----
+   Drawn as an SVG and rasterised by sharp, so the spelling is exactly what the user asked for. */
+
+function escapeXml(v) {
+  return String(v || "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+/* Very rough advance width per character at font-size 1, used to pick a size that fits. */
+function fitFontSize(line, boxW) {
+  const per = 0.62;                       // conservative for a bold condensed face
+  return Math.floor(boxW / Math.max(1, line.length * per));
+}
+
+function textSvg(lines, boxW, boxH, colour) {
+  const gap = 1.12;
+  let size = Math.min(
+    Math.floor(boxH / (lines.length * gap)),
+    ...lines.map((l) => fitFontSize(l, boxW))
+  );
+  size = Math.max(40, size);
+
+  const total = lines.length * size * gap;
+  let y = Math.round((boxH - total) / 2 + size * 0.82);
+
+  const body = lines.map((l) => {
+    const t =
+      `<text x="${Math.round(boxW / 2)}" y="${y}" text-anchor="middle" ` +
+      `font-family="DejaVu Sans, Liberation Sans, Arial, Helvetica, sans-serif" ` +
+      `font-weight="bold" font-size="${size}" fill="${colour}" ` +
+      `letter-spacing="${Math.round(size * 0.02)}">${escapeXml(l)}</text>`;
+    y += Math.round(size * gap);
+    return t;
+  }).join("");
+
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
+  );
+}
+
+/* Returns a transparent PNG of the lettering, or null if nothing rendered (no usable font). */
+async function renderTextLayer(text, boxW, boxH, colour) {
+  const lines = String(text || "")
+    .split(/\s*\n\s*|\s{2,}/)
+    .flatMap((l) => (l.length > 18 ? l.split(/\s+/) : [l]))
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+  if (!lines.length) return null;
+
+  try {
+    const png = await sharp(textSvg(lines, boxW, boxH, colour || "#111111"))
+      .png()
+      .toBuffer();
+    // fontconfig can silently render nothing — verify some pixels are actually opaque
+    const stats = await sharp(png).stats();
+    const alpha = stats.channels[3];
+    if (!alpha || alpha.max < 200) {
+      console.error("[reimagine] text layer came back blank - no usable font");
+      return null;
+    }
+    return png;
+  } catch (e) {
+    console.error("[reimagine] text layer failed:", e.message);
+    return null;
+  }
+}
+
+/* Places the wordless artwork in the upper area and the lettering beneath it. */
+async function composeWithText(artBuf, text, colour) {
+  const TEXT_H = Math.round(CANVAS_H * 0.22);
+  const ART_H = CANVAS_H - TEXT_H;
+
+  const layer = await renderTextLayer(text, Math.round(CANVAS_W * SAFE), TEXT_H, colour);
+  if (!layer) return null;                       // caller falls back to the wordless design
+
+  const art = await sharp(artBuf)
+    .ensureAlpha()
+    .trim({ threshold: 12 })
+    .resize(Math.round(CANVAS_W * SAFE), Math.round(ART_H * 0.94), {
+      fit: "inside",
+      kernel: "lanczos3",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png()
+    .toBuffer();
+
+  const am = await sharp(art).metadata();
+
+  return await sharp({
+    create: {
+      width: CANVAS_W, height: CANVAS_H, channels: 4,
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    },
+  })
+    .composite([
+      { input: art, left: Math.round((CANVAS_W - am.width) / 2), top: Math.round((ART_H - am.height) / 2) },
+      { input: layer, left: Math.round((CANVAS_W - Math.round(CANVAS_W * SAFE)) / 2), top: ART_H },
+    ])
+    .png({ compressionLevel: 6 })
+    .withMetadata({ density: DPI })
+    .toBuffer();
+}
+
+/* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
+async function finishArtwork(art, t0, preview, invert, serverText) {
+  const elapsed = () => Date.now() - t0;
+
+  let cutout = await fal("fal-ai/birefnet", { image_url: art });
+  let qc = await inspect(cutout);
+  console.log(`[reimagine] cutout+qc: ${elapsed()}ms`);
+
+  let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
+  if (qc.cropped) {
+    console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+    try {
+      cutBuf = await stripLeftoverBackground(cutBuf);
+    } catch (e) {
+      console.warn("flood fill failed, keeping birefnet output:", e.message);
+    }
+  }
+
+  if (invert) {
+    try {
+      cutBuf = await invertArtwork(cutBuf);
+      console.log("[reimagine] inverted to white artwork for dark garments");
+    } catch (e) {
+      console.error("invert failed, delivering the black version:", e);
+    }
+  }
+
+  let canvas = null;
+  let textDrawn = false;
+  if (serverText && !preview) {
+    canvas = await composeWithText(cutBuf, serverText.text, serverText.colour);
+    textDrawn = !!canvas;
+    if (!canvas) console.error("[reimagine] falling back to wordless artwork");
+  }
+  if (!canvas) canvas = preview ? await toPreviewCanvas(cutBuf) : await toPrintCanvas(cutBuf);
+  if (!preview) canvas = await fitUploadSize(canvas);
+  const imageUrl = await uploadCloudinary(canvas);
+  console.log(`[reimagine] done${preview ? " (preview)" : ""}: ${elapsed()}ms`);
+
+  return {
+    imageUrl,
+    url: imageUrl,
+    preview: !!preview,
+    textDrawn,
+    width: preview ? PREVIEW_W : CANVAS_W,
+    height: preview ? PREVIEW_H : CANVAS_H,
+    dpi: preview ? 72 : DPI,
+    quality: {
+      edge: +qc.edgeRatio.toFixed(3),
+      pale: +qc.paleRatio.toFixed(3),
+      rim: +qc.rimRatio.toFixed(3),
+      hole: +qc.holeRatio.toFixed(3),
+    },
+  };
+}
+
+export default async function handler(req, res) {
+  cors(req, res);
+  if (req.method === "OPTIONS") return res.status(204).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+  const retryAfter = checkRateLimit(req);
+  if (retryAfter !== null) {
+    res.setHeader("Retry-After", String(retryAfter));
+    return res.status(429).json({ error: "Too many requests", retryAfter });
+  }
+
+  const body = req.body || {};
+  const action = String(body.action || "").toLowerCase();
+
+  /* ---- v26 step 2: draw from an edited spec. No reference image involved. ---- */
+  if (action === "generate") {
+    try {
+      const spec = normaliseSpec(body.spec);
+      if (!spec.genre && !spec.subject) {
+        return res.status(400).json({ error: "Missing spec" });
+      }
+
+      // ---- account gate ----
+      const student = await studentFromToken(
+        body.token || req.headers["x-epai-token"] || req.query.token
+      );
+      if (!student) {
+        return res.status(401).json({
+          error: "צריך להתחבר כדי ליצור עיצוב.",
+          needLogin: true,
+        });
+      }
+
+      const owner = isOwner(student.email);
+
+      const quota = owner
+        ? { freeLeft: 0, credits: 0, canRun: true }   // owner: no quota, and freeLeft 0 => full file
+        : await quotaFor(student);
+
+      if (!quota.canRun) {
+        return res.status(402).json({
+          error: "נגמרו העיצובים החינמיים. אפשר לרכוש חבילת קרדיטים ולהמשיך.",
+          needCredits: true,
+          freeLeft: 0,
+          credits: 0,
+        });
+      }
+
+      // WATERMARK_FREE is off, so the free design is a real print file like any paid one
+      const isPreview = WATERMARK_FREE && !owner && quota.freeLeft > 0;
+
+      const t0 = Date.now();
+      const prepared = await prepareSpec(spec);
+
+      // flux cannot spell, so it never draws the words: the artwork is generated WORDLESS and the
+      // lettering is composited afterwards. prepared.spec is what reaches the generator.
+      const wanted = needsServerText(prepared.spec.text)
+        ? { text: prepared.spec.text, colour: chosenTextColour(prepared.spec) }
+        : null;
+      if (wanted) prepared.spec = Object.assign({}, prepared.spec, { text: "" });
+
+      if (!prepared.spec.subject && !prepared.spec.genre) {
+        return res.status(400).json({
+          error:
+            "לא זוהה עיצוב בתמונה — נראה שהיא צילום של חולצה ולא העיצוב עצמו. " +
+            "נסו להעלות את הגרפיקה בלבד, או מלאו ידנית את הנושא המרכזי.",
+          needSubject: true,
+        });
+      }
+      const art = await generateFromSpec(prepared.spec);
+      const chosen = presetFor(prepared.spec);
+      const out = await finishArtwork(
+        art, t0, isPreview, !!(chosen && chosen.invert), wanted
+      );
+
+      // charged only now, after a design actually exists
+      let left = { freeLeft: quota.freeLeft, credits: quota.credits };
+      if (owner) {
+        // logged for history, but nothing is deducted
+        await sbPost("design_runs", { student_id: student.id, charged: false }, "return=minimal")
+          .catch((e) => console.error("[reimagine] owner run log failed:", e));
+        left = { freeLeft: null, credits: null, owner: true };
+      } else {
+        try {
+          left = await chargeRun(student, quota);
+        } catch (e) {
+          console.error("[reimagine] charge failed (design was delivered):", e);
+        }
+      }
+
+      return res.status(200).json(
+        Object.assign(
+          {
+            spec: prepared.spec,
+            notice: prepared.notice,
+            freeLeft: left.freeLeft,
+            credits: left.credits,
+            owner: !!owner,
+            forDark: !!(chosen && chosen.invert),
+          },
+          out
+        )
+      );
+    } catch (err) {
+      console.error("[reimagine] generate failed:", err);
+      return res.status(502).json({ error: "Generate failed" });
+    }
+  }
+
+  const { image } = req.body || {};
+  if (!image || typeof image !== "string") {
+    return res.status(400).json({ error: "Missing image" });
+  }
+  const match = image.match(/^data:(image\/\w+);base64,(.+)$/);
+  if (!match) {
+    return res.status(400).json({ error: "Invalid image format" });
+  }
+  const [, mediaType, base64Data] = match;
+
+  /* ---- v26 step 1: read the reference, return an editable spec, generate nothing ---- */
+  if (action === "analyze") {
+    try {
+      const spec = await analyzeSpec(base64Data, mediaType);
+      console.log("[reimagine] spec:", JSON.stringify(spec).slice(0, 300));
+      return res.status(200).json({ spec });
+    } catch (err) {
+      console.error("[reimagine] analyze failed:", err);
+      return res.status(502).json({ error: "Analyze failed" });
+    }
+  }
+
+  try {
+    const t0 = Date.now();
+    const elapsed = () => Date.now() - t0;
+    const step = (name) => console.log(`[reimagine] ${name}: ${elapsed()}ms`);
+
+    const { style, prompt, box } = await analyzeAndReimagine(base64Data, mediaType);
+    step("analyze");
+
+    let reference = image;
+    try {
+      reference = await cropToGraphic(image, box);
+    } catch (e) {
+      console.warn("[reimagine] crop failed, using full reference:", e.message);
+    }
+
+    let art = await generate(prompt, style, reference);
+    let cutout = await fal("fal-ai/birefnet", { image_url: art });
+    step("attempt1");
+
+    let qc = await inspect(cutout);
+    const bad = (q) => q.cropped || q.tooPale || q.outlined || q.hollow;
+    const score = (q) => (q.cropped ? 1 : 0) + (q.tooPale ? 1 : 0) + (q.outlined ? 1 : 0) + (q.hollow ? 2 : 0);
+
+    if (bad(qc) && elapsed() < 30000) {
+      console.log("[reimagine] QC failed - regenerating with corrections");
+      try {
+        const art2 = await generate(prompt + retryHint(qc), style, reference);
+        const cut2 = await fal("fal-ai/birefnet", { image_url: art2 });
+        const qc2 = await inspect(cut2);
+        step("attempt2");
+
+        if (score(qc2) < score(qc)) {
+          art = art2; cutout = cut2; qc = qc2;
+          console.log("[reimagine] retry accepted");
+        } else {
+          console.log("[reimagine] retry rejected - keeping first attempt");
+        }
+      } catch (e) {
+        console.warn("retry failed:", e.message);
+      }
+    } else if (bad(qc)) {
+      console.warn("[reimagine] QC failed but no time budget for a retry");
+    }
+
+    // birefnet kept the whole frame - recover the background ourselves
+    let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
+    if (qc.cropped) {
+      console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+      try {
+        cutBuf = await stripLeftoverBackground(cutBuf);
+        step("floodfill");
+      } catch (e) {
+        console.warn("flood fill failed, keeping birefnet output:", e.message);
+      }
+    }
+
+    let canvas = await toPrintCanvas(cutBuf);
+    console.log(`[reimagine] png size: ${(canvas.length / 1048576).toFixed(1)}MB`);
+    canvas = await fitUploadSize(canvas);
+    step("canvas");
+
+    const imageUrl = await uploadCloudinary(canvas);
+    step("upload");
+
+    return res.status(200).json({
+      imageUrl,
+      url: imageUrl,
+      width: CANVAS_W,
+      height: CANVAS_H,
+      dpi: DPI,
+      style,
+      quality: {
+        edge: +qc.edgeRatio.toFixed(3),
+        pale: +qc.paleRatio.toFixed(3),
+        rim: +qc.rimRatio.toFixed(3),
+        hole: +qc.holeRatio.toFixed(3),
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(502).json({ error: "Reimagine failed" });
+  }
+}
