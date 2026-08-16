@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v37
+// api/reimagine.js — "עיצוב מחדש" v38
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -66,6 +66,15 @@ import { checkRateLimit } from "./_ratelimit.js";
 // any other, and the preset carries `invert: true`, which negates the RGB channels AFTER the
 // cut-out while leaving alpha untouched. The result is genuinely white artwork on transparency.
 // Inversion only makes sense on a monochrome design, so both presets force monochrome wording.
+//
+// v38 change: THE FIXED SUFFIX WAS ALSO BLOCKING PAINTERLY WORK.
+// He dictated "semi-realistic digital painting, smooth airbrushed skin, detailed realistic facial
+// features" into the spec and STILL got a big-eyed cartoon. Cause is the same class of bug as v34,
+// in a different place: the shared suffix ends with "every shape and letter filled solid" — a
+// definition of flat vector art — so a painterly brief and a flat instruction arrived in one
+// sentence and flux followed the flat one. That clause is now dropped for painterly briefs, and a
+// new `real` preset ("מציאותי ומאויר") states the rendering AND swaps the suffix wording.
+// Everything else keeps the old suffix verbatim, so no existing style shifts.
 //
 // v29 change: THE TOOL IS NO LONGER OPEN TO THE WORLD.
 // Every run costs real money (Claude + flux + birefnet), and until now anyone could loop the
@@ -1273,6 +1282,17 @@ const STYLE_PRESETS = {
     negative:
       ", heavy fill, solid blocks of colour, shading, gradient, 3d render, texture, busy detail",
   },
+  real: {
+    label: "מציאותי ומאויר",
+    render:
+      "semi-realistic digital painting, detailed realistic facial features and proportions, " +
+      "smooth airbrushed skin with soft tonal shading, rich colour blending, fine ink linework, " +
+      "expressive but natural eyes",
+    negative:
+      ", chibi, big oversized eyes, kawaii, cartoon mascot, flat vector, sticker art, " +
+      "simplified doll face, childish proportions, uniform flat fill",
+    painterly: true,
+  },
   monodark: {
     label: "כיתוב שחור · לחולצה בהירה",
     render:
@@ -1324,11 +1344,15 @@ function specToPrompt(spec) {
     parts.push(`lettering style: ${spec.typography}`);
   }
 
+  // "every shape filled solid" is a definition of FLAT vector art. Keeping it on a painterly brief
+  // contradicts the brief in the same sentence, which is what forced cartoon output. Painterly work
+  // still needs the no-hollow-lettering guarantee, so that half is kept and the fill clause dropped.
+  const painterly = wantsPainterly(spec);
   const common =
     ", original t-shirt print artwork, one self-contained design, " +
     "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
-    "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border, " +
-    "every shape and letter filled solid";
+    "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border" +
+    (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
 
   // A flat brief must not be followed by "high detail" — that contradiction is what produced
   // shaded, glossy results when the user explicitly asked for flat vector art.
@@ -1337,6 +1361,8 @@ function specToPrompt(spec) {
     common +
     (preset
       ? ""                                   // the preset already stated the rendering
+      : painterly
+      ? ", rich detail, painterly finish"
       : wantsFlat(spec)
       ? ", clean flat vector illustration, solid uniform fills, even bold outlines, " +
         "no shading, no gradients, no highlights, no texture, no depth"
@@ -1347,6 +1373,19 @@ function specToPrompt(spec) {
 /* Detects a flat/vector brief anywhere the user could have expressed one. */
 const FLAT_RE =
   /\b(flat|vector|minimal|minimalist|solid colou?rs?|no shading|no gradients?|2d|silhouette|line ?art|lineart|outline only|sticker|clip ?art|retro print|screen ?print)\b/i;
+
+/* A painterly brief: either the `real` preset, or wording the user typed themselves. */
+const PAINTERLY_RE =
+  /\b(semi-?realistic|realistic|photo-?realistic|painterly|digital painting|airbrush(ed)?|render(ed|ing)?|portrait|lifelike|shaded|soft shading|tonal|blend(ed|ing)?)\b/i;
+
+function wantsPainterly(spec) {
+  const p = presetFor(spec);
+  if (p) return !!p.painterly;
+  if (wantsFlat(spec)) return false;          // an explicit flat brief always wins
+  return PAINTERLY_RE.test(
+    [spec.technique, spec.genre, spec.composition].filter(Boolean).join(" ")
+  );
+}
 
 function wantsFlat(spec) {
   return FLAT_RE.test(
