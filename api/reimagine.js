@@ -1,6 +1,17 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v48
+// api/reimagine.js — "עיצוב מחדש" v49
+// v49 change: two faults, both read off real output rather than guessed.
+// 1. THE LETTERING SWALLOWED THE SUBJECT. His composition read "…the big cat strides horizontally
+//    across the lower two-thirds, OVERLAPPING BEHIND THE LETTERING…". flux obeyed "behind the
+//    lettering" and dropped "lower two-thirds", so the leopard came back as a strip of spotted back
+//    peeking out from under the word. On a print file the subject has to stay readable, so occlusion
+//    wording is rewritten to placement wording ("below the lettering") and the prompt says outright
+//    that the subject is never hidden.
+// 2. A LIMITED PALETTE NEVER BOUND THE SUBJECT. Four runs in a row — moose, orange cat, golden puppy,
+//    leopard — the lettering and line work obeyed the stated palette while the ANIMAL came back in
+//    naturalistic full colour. When the palette is single-colour or two-colour, the prompt now says the
+//    subject is printed in those inks too, and the negative rejects naturalistic colouring.
 // v48 change: three faults found across a six-pair review batch. All three are mine.
 // 1. THE WORDING WAS BEING ASKED FOR TWICE. v47 scrubs lettering out of composition only when the
 //    SERVER draws the words. On the flux path nothing was scrubbed, so composition named the words AND
@@ -1495,6 +1506,16 @@ function specToPrompt(spec) {
     // to be a MID-TONE or DEEP shade, which is what v24 said before v40 softened it.
     // v48: said out loud because flux was echoing the wording into every spot the spec mentioned
     (spec.text ? "the wording appears exactly ONCE in the whole design, never repeated elsewhere, " : "") +
+    // v49: the leopard came back as a sliver hiding under its own caption
+    (spec.text
+      ? "the subject is drawn COMPLETE and fully visible, never hidden or cropped by the lettering — " +
+        "the words and the subject occupy separate bands of the design, "
+      : "") +
+    // v49: four runs where the lettering obeyed the palette and the animal did not
+    (paletteIsLimited(spec.palette)
+      ? "EVERY element including the animal or main subject is printed in those inks only, flat and " +
+        "stylised, never naturalistic colouring, "
+      : "") +
     "nothing in the artwork is white or near-white — every colour is a mid-tone or deep shade with " +
     "strong contrast against white, no cream, no ivory, no beige, no pastel fills" +
     (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
@@ -1553,7 +1574,15 @@ const SPEC_NEGATIVE_BASE =
   // v42, restored: the near-whites that survive the word "white" and still vanish in the cut-out
   "cream, ivory, beige, off-white, pale pastel fills, washed out, low contrast, faded lettering, " +
   // v48: flux printed "WILD" twice and "FISH / CAT" three times when the words reached it from two fields
-  "repeated text, duplicate lettering, the same word printed twice, echoed wording, extra captions";
+  "repeated text, duplicate lettering, the same word printed twice, echoed wording, extra captions, " +
+  // v49
+  "subject hidden behind the text, subject obscured by lettering, only part of the animal visible";
+
+// v49: separate from SPEC_NEGATIVE_FLAT below, which is about RENDERING. This one is about staying
+// inside the named inks — four runs had the lettering obey the palette while the animal ignored it.
+const SPEC_NEGATIVE_PALETTE =
+  ", naturalistic animal colouring, photo-realistic fur, full-colour rendering, " +
+  "extra colours outside the stated palette";
 
 const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
@@ -1569,7 +1598,9 @@ const SPEC_NEGATIVE_NOTEXT =
 function negativeFor(spec) {
   const preset = presetFor(spec);
   const wordless = !String(spec.text || "").trim();
-  const base = SPEC_NEGATIVE_BASE + (wordless ? SPEC_NEGATIVE_NOTEXT : "");
+  const base = SPEC_NEGATIVE_BASE +
+    (wordless ? SPEC_NEGATIVE_NOTEXT : "") +
+    (paletteIsLimited(spec && spec.palette) ? SPEC_NEGATIVE_PALETTE : "");
   if (preset) return base + (preset.negative || "");
   return base + (wantsFlat(spec) ? SPEC_NEGATIVE_FLAT : "");
 }
@@ -1889,6 +1920,29 @@ function dedupeWording(spec) {
     out.elements = out.elements.map(scrub).filter(Boolean);
   }
   return out;
+}
+
+/* v49: "overlapping behind the lettering" reads to flux as "hide it", and it hides it. The reference
+   had the animal BELOW the word, so the placement is kept and only the occlusion is rewritten. */
+const OCCLUSION_RE =
+  /\b(?:overlapping\s+)?(?:tucked\s+|partially\s+|mostly\s+|fully\s+)?(?:behind|underneath|beneath|hidden\s+behind|obscured\s+by|covered\s+by|overlapped\s+by)\s+the\s+(?:lettering|letters|text|type|typography|words?|title|headline|caption)\b/gi;
+
+function unhideSubject(spec) {
+  const before = String(spec.composition || "");
+  const after = before.replace(OCCLUSION_RE, "below the lettering");
+  if (after === before) return spec;
+  console.log(`[reimagine] occlusion rewritten: "${before}" -> "${after}"`);
+  return Object.assign({}, spec, { composition: after });
+}
+
+/* v49: a palette this tight is a print instruction, not a mood. The subject has to obey it too. */
+function paletteIsLimited(palette) {
+  const p = String(palette || "").toLowerCase();
+  if (!p) return false;
+  if (/\b(single[- ]colou?r|one[- ]colou?r|monochrom\w*|two[- ]colou?r|duotone|1[- ]colou?r)\b/.test(p)) return true;
+  // otherwise count the colour words actually named
+  const named = p.split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+  return named.length > 0 && named.length <= 2;
 }
 
 function stripLettering(spec) {
@@ -2254,8 +2308,9 @@ export default async function handler(req, res) {
           Object.assign({}, prepared.spec, { text: "", typography: "" })
         );
       } else if (prepared.spec.text) {
-        // flux is drawing the words, so make sure no OTHER field asks for them a second time
-        prepared.spec = dedupeWording(prepared.spec);
+        // flux is drawing the words, so make sure no OTHER field asks for them a second time,
+        // and that it does not bury the subject underneath them (v49)
+        prepared.spec = unhideSubject(dedupeWording(prepared.spec));
       }
 
       /* v48: if the subject scrubbed away to nothing, the reference was pure typography — the design
