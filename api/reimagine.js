@@ -1,6 +1,23 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v47
+// api/reimagine.js — "עיצוב מחדש" v48
+// v48 change: three faults found across a six-pair review batch. All three are mine.
+// 1. THE WORDING WAS BEING ASKED FOR TWICE. v47 scrubs lettering out of composition only when the
+//    SERVER draws the words. On the flux path nothing was scrubbed, so composition named the words AND
+//    their placement while the text field named them again — flux got the same string from two
+//    directions and drew it in every place mentioned. Seen twice: "WILD" printed above AND below the
+//    leopard, and "FISH / CAT" printed three times (plus a garbled "CFLAT"). dedupeWording() now strips
+//    the WORDS out of composition and elements while KEEPING the placement, so the wording is requested
+//    exactly once. The prompt says so explicitly and the negative bans repeated lettering.
+// 2. `subject` WAS NEVER SCRUBBED — the fifth spot in this family (v34, v38, v39, v46, v47). On a
+//    text-only reference the analyser writes subject = "bold white lettering …", so flux was still
+//    ordered to draw letters after text and typography had been blanked. That produced the black blob
+//    with "SACED THNALT PiCAL" on it. subject is scrubbed now, and when it scrubs away to nothing the
+//    design IS its typography: flux is SKIPPED ENTIRELY and the caption is drawn on its own.
+// 3. A BLANK ARTWORK WAS DELIVERED SILENTLY. One run came back as an empty transparent canvas carrying
+//    only the caption, with nothing in the log to say why. inspect() now reports inkRatio and an `empty`
+//    flag, and finishArtwork refuses to ship an empty print file — it fails with a message he can read
+//    instead of a blank PNG.
 // v47 change: TWO THINGS v46 GOT WRONG, both proved from the Vercel log and his screenshots.
 // 1. THE FONT WAS NEVER IN THE BUNDLE. Log: "bundled font failed to load: Cannot find module
 //    'dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf'". The dependency installs fine, but Vercel's file
@@ -688,14 +705,18 @@ async function inspect(url) {
   const edgeRatio = edgeTotal ? edgeHits / edgeTotal : 0;
   const paleRatio = solid ? pale / solid : 0;
   const rimRatio = boundary ? whiteRim / boundary : 0;
+  // v48: how much of the frame actually carries artwork. One run shipped a completely empty canvas
+  // with only the caption on it and nothing in the log explained why, so this is measured and named.
+  const inkRatio = inkCount / (w * h);
   const report = {
-    edgeRatio, paleRatio, rimRatio, holeRatio,
+    edgeRatio, paleRatio, rimRatio, holeRatio, inkRatio,
     cropped: edgeRatio > EDGE_LIMIT,
     tooPale: paleRatio > PALE_LIMIT,
     outlined: rimRatio > RIM_LIMIT,
     hollow: inkCount > 0.01 * w * h && holeRatio > HOLE_LIMIT,
+    empty: inkRatio < EMPTY_LIMIT,
   };
-  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} rim=${rimRatio.toFixed(3)} hole=${holeRatio.toFixed(3)} cropped=${report.cropped} tooPale=${report.tooPale} outlined=${report.outlined} hollow=${report.hollow}`);
+  console.log(`[reimagine] QC edge=${edgeRatio.toFixed(3)} pale=${paleRatio.toFixed(3)} rim=${rimRatio.toFixed(3)} hole=${holeRatio.toFixed(3)} ink=${inkRatio.toFixed(4)} cropped=${report.cropped} tooPale=${report.tooPale} outlined=${report.outlined} hollow=${report.hollow} empty=${report.empty}`);
   return report;
 }
 
@@ -1472,6 +1493,8 @@ function specToPrompt(spec) {
     // v24: white IS the background and gets cut away, which turns white areas into holes.
     // v42, restored: cream and pale grey ARE near-white and get cut away too. The substitute has
     // to be a MID-TONE or DEEP shade, which is what v24 said before v40 softened it.
+    // v48: said out loud because flux was echoing the wording into every spot the spec mentioned
+    (spec.text ? "the wording appears exactly ONCE in the whole design, never repeated elsewhere, " : "") +
     "nothing in the artwork is white or near-white — every colour is a mid-tone or deep shade with " +
     "strong contrast against white, no cream, no ivory, no beige, no pastel fills" +
     (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
@@ -1515,6 +1538,10 @@ function wantsFlat(spec) {
   );
 }
 
+// v48: below this share of inked pixels there is no design on the canvas, only stray specks.
+// A real print sits far above it; the empty run that triggered this scored essentially zero.
+const EMPTY_LIMIT = 0.004;
+
 const SPEC_NEGATIVE_BASE =
   "photograph of a person, model wearing a shirt, garment, mockup, hanger, watermark, signature, " +
   "cropped, cut off, full-bleed panel, coloured background, cream paper, texture, frame, border, " +
@@ -1524,7 +1551,9 @@ const SPEC_NEGATIVE_BASE =
   "circle behind the subject, coloured panel, scene background, " +
   "white fills, white shapes, white bellies, pure white areas inside the artwork, " +
   // v42, restored: the near-whites that survive the word "white" and still vanish in the cut-out
-  "cream, ivory, beige, off-white, pale pastel fills, washed out, low contrast, faded lettering";
+  "cream, ivory, beige, off-white, pale pastel fills, washed out, low contrast, faded lettering, " +
+  // v48: flux printed "WILD" twice and "FISH / CAT" three times when the words reached it from two fields
+  "repeated text, duplicate lettering, the same word printed twice, echoed wording, extra captions";
 
 const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
@@ -1832,8 +1861,46 @@ function scrubLetteringText(v) {
     .trim();
 }
 
+/* v48: the wording also reaches flux through composition and elements when FLUX is the one drawing it.
+   Nothing is removed about WHERE the lettering goes — only the words themselves, so the design still
+   places its caption correctly but is asked for it exactly once. */
+function dedupeWording(spec) {
+  const words = String(spec.text || "")
+    .split(/[^\p{L}\p{N}']+/u)
+    .filter((w) => w.length >= 3);
+  if (!words.length) return spec;
+
+  const out = Object.assign({}, spec);
+  const scrub = (v) => {
+    let s = String(v || "").replace(QUOTED_RE, " ");
+    for (const w of words) {
+      s = s.replace(new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), " ");
+    }
+    return s.replace(/\s*,\s*,/g, ",").replace(/\s{2,}/g, " ").replace(/^[\s,]+|[\s,]+$/g, "");
+  };
+
+  const composition = scrub(out.composition);
+  if (composition !== String(out.composition || "").trim()) {
+    console.log(`[reimagine] wording removed from composition: "${out.composition}" -> "${composition}"`);
+  }
+  out.composition = composition || "single subject centred with wide empty margins on all sides";
+
+  if (Array.isArray(out.elements)) {
+    out.elements = out.elements.map(scrub).filter(Boolean);
+  }
+  return out;
+}
+
 function stripLettering(spec) {
   const out = Object.assign({}, spec);
+
+  // v48: subject too. On a text-only reference the analyser writes subject = "bold white lettering",
+  // which kept ordering flux to draw letters after text and typography were already blank.
+  const subject = scrubLetteringText(out.subject);
+  if (subject !== String(out.subject || "").trim()) {
+    console.log(`[reimagine] lettering scrubbed from subject: "${out.subject}" -> "${subject}"`);
+  }
+  out.subject = subject;
 
   const composition = scrubLetteringText(out.composition);
   if (composition !== String(out.composition || "").trim()) {
@@ -2016,12 +2083,62 @@ async function composeWithText(artBuf, text, colour) {
 }
 
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
+/* v48: a pure-typography design. No generator call, no cut-out — the lettering fills the canvas. */
+async function finishTextOnly(serverText, t0, preview) {
+  const W = preview ? PREVIEW_W : CANVAS_W;
+  const H = preview ? PREVIEW_H : CANVAS_H;
+
+  const layer = await renderTextLayer(
+    serverText.text, Math.round(W * SAFE), Math.round(H * 0.55), serverText.colour
+  );
+  if (!layer) throw new Error("לא הצלחנו לצייר את הכיתוב. נסו שוב או קצרו את הטקסט.");
+
+  let canvas = await sharp({
+    create: { width: W, height: H, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } },
+  })
+    .composite([
+      {
+        input: layer,
+        left: Math.round((W - Math.round(W * SAFE)) / 2),
+        top: Math.round((H - Math.round(H * 0.55)) / 2),
+      },
+    ])
+    .png({ compressionLevel: 6 })
+    .withMetadata({ density: preview ? 72 : DPI })
+    .toBuffer();
+
+  if (!preview) canvas = await fitUploadSize(canvas);
+  const imageUrl = await uploadCloudinary(canvas);
+  console.log(`[reimagine] done (text only): ${Date.now() - t0}ms`);
+
+  return {
+    imageUrl,
+    url: imageUrl,
+    preview: !!preview,
+    textDrawn: true,
+    width: W,
+    height: H,
+    dpi: preview ? 72 : DPI,
+    quality: { edge: 0, pale: 0, rim: 0, hole: 0 },
+  };
+}
+
 async function finishArtwork(art, t0, preview, invert, serverText) {
   const elapsed = () => Date.now() - t0;
 
   let cutout = await fal("fal-ai/birefnet", { image_url: art });
   let qc = await inspect(cutout);
   console.log(`[reimagine] cutout+qc: ${elapsed()}ms`);
+
+  /* v48: refuse to ship a blank print file. One run delivered an empty canvas with only the caption
+     on it and nothing said why — an error he can read beats a PNG with nothing in it. */
+  if (qc.empty) {
+    console.error(`[reimagine] artwork came back EMPTY (ink=${qc.inkRatio.toFixed(4)}) - refusing to deliver`);
+    throw new Error(
+      "היצירה חזרה ריקה — ייתכן שהנושא נחסם או שהאיור היה בהיר מדי והוסר עם הרקע. " +
+      "נסו שוב, או תארו את הנושא המרכזי בצבעים כהים יותר."
+    );
+  }
 
   let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
   if (qc.cropped) {
@@ -2135,6 +2252,38 @@ export default async function handler(req, res) {
       if (wanted) {
         prepared.spec = stripLettering(
           Object.assign({}, prepared.spec, { text: "", typography: "" })
+        );
+      } else if (prepared.spec.text) {
+        // flux is drawing the words, so make sure no OTHER field asks for them a second time
+        prepared.spec = dedupeWording(prepared.spec);
+      }
+
+      /* v48: if the subject scrubbed away to nothing, the reference was pure typography — the design
+         IS the wording. There is no artwork to regenerate, and asking flux for one is what produced
+         the black blob covered in gibberish. Skip the generator and deliver the lettering alone. */
+      const textOnly = !!wanted && !prepared.spec.subject;
+      if (textOnly) {
+        console.log("[reimagine] text-only reference: skipping the generator, lettering only");
+        const out = await finishTextOnly(wanted, t0, isPreview);
+        const left = owner
+          ? { freeLeft: null, credits: null, owner: true }
+          : await chargeRun(student, quota).catch((e) => {
+              console.error("[reimagine] charge failed (design was delivered):", e);
+              return { freeLeft: quota.freeLeft, credits: quota.credits };
+            });
+        return res.status(200).json(
+          Object.assign(
+            {
+              spec: prepared.spec,
+              notice: prepared.notice,
+              freeLeft: left.freeLeft,
+              credits: left.credits,
+              owner: !!owner,
+              forDark: false,
+              textOnly: true,
+            },
+            out
+          )
         );
       }
 
