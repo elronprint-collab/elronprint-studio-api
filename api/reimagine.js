@@ -1,6 +1,22 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v41
+// api/reimagine.js — "עיצוב מחדש" v46
+// v46 change: THREE FIXES, all of them mine, none of them the model's.
+// 1. TYPOGRAPHY SURVIVED THE SERVER-TEXT SWITCH. v45 blanks spec.text when it hands the wording to
+//    the server, but left spec.typography alone — so specToPrompt still pushed "lettering style: ..."
+//    into the prompt while negativeFor banned all text in the same call. flux followed the positive
+//    and invented gibberish ("A MOOSE DESTROY YOU", "BION SIG SLIST OF LWIES!"). Same family as
+//    v34/v38/v39: two of my own rules fighting. typography is now blanked alongside text.
+// 2. v42 WAS NEVER IN THIS FILE. The colour fix (white/pale -> MID-TONE or DEEP, never cream) existed
+//    only in ANALYSIS_SYSTEM_PROMPT, the dead legacy nano-banana prompt. v43 was built on the v41 base
+//    and lost it. Restored into the ACTIVE analyser rule, the ACTIVE suffix and the ACTIVE negative.
+// 3. THE FONT NOW TRAVELS WITH THE CODE. v44 asked librsvg for "DejaVu Sans, Liberation Sans, Arial"
+//    BY NAME. Vercel guarantees none of them, and a missing font renders tofu rather than nothing, so
+//    the blank-layer check never fired and the caption came out as faint illegible marks. The words
+//    are now converted to glyph OUTLINES with opentype.js before sharp sees them — no fontconfig, no
+//    font-family lookup, identical on every host. Also fixes silent truncation: the old line splitter
+//    turned a long caption into single words and then kept only the first three.
+// REQUIRES package.json: "opentype.js" and "dejavu-fonts-ttf".
 // v26 change: TWO-STEP CONTROLLED MODE, and a different generator.
 // The whole file up to v25 was built around FIDELITY to the reference — nano-banana/edit was
 // told "same palette, no new colours, keep the main figure". That is an EDIT model: its job is
@@ -217,6 +233,9 @@ import { checkRateLimit } from "./_ratelimit.js";
 // or implausibly small.
 
 import sharp from "sharp";
+import fs from "fs";
+import { createRequire } from "module";
+import opentype from "opentype.js";
 
 export const config = { maxDuration: 60 };
 
@@ -1178,8 +1197,11 @@ RULES
   exactly, but a background shape is the one thing that is always dropped, no matter how central
   it looks. A badge design becomes the lettering and motifs alone, floating on nothing.
 - Nothing in the design may be WHITE or near-white. White is the background and is cut away, so a
-  white element would become a hole. Where the reference uses white, name a soft tint instead
-  (cream, blush, pale grey, ivory-tinted).
+  white element would become a hole. This also rules out cream, ivory, beige, off-white and pale
+  grey — they are near-white and are cut away too. Where the reference uses white or a very light
+  colour, name a MID-TONE or DEEP version of the SAME hue: white -> deep charcoal or deep navy,
+  pale pink -> rose, pale mint -> forest green, pale yellow -> mustard. Never use the words soft,
+  pale, light or tinted to describe a colour.
 - NEVER name the garment or the photo. The subject, elements and composition describe the PRINTED
   GRAPHIC only. Words like t-shirt, shirt, hoodie, apparel, mockup, hanger, model, "woman wearing"
   must never appear in any field. If the reference is a photo of someone wearing a print, describe
@@ -1431,8 +1453,10 @@ function specToPrompt(spec) {
     ", the artwork floats freely on empty white, no coloured backdrop shape behind it, " +
     "no panel, no badge, no sticker shape, no rounded blob, no circle or oval behind the subject, " +
     // v24: white IS the background and gets cut away, which turns white areas into holes.
-    "nothing in the artwork is white or near-white — light areas use a soft tint such as cream, " +
-    "blush or pale grey so they survive background removal" +
+    // v42, restored: cream and pale grey ARE near-white and get cut away too. The substitute has
+    // to be a MID-TONE or DEEP shade, which is what v24 said before v40 softened it.
+    "nothing in the artwork is white or near-white — every colour is a mid-tone or deep shade with " +
+    "strong contrast against white, no cream, no ivory, no beige, no pastel fills" +
     (painterly ? ", lettering filled solid, never hollow" : ", every shape and letter filled solid");
 
   // A flat brief must not be followed by "high detail" — that contradiction is what produced
@@ -1481,7 +1505,9 @@ const SPEC_NEGATIVE_BASE =
   // v19-v21 backdrop shapes and v24 white artwork, restored into the active path
   "backdrop shape, background blob, rounded rectangle behind the subject, badge, sticker shape, " +
   "circle behind the subject, coloured panel, scene background, " +
-  "white fills, white shapes, white bellies, pure white areas inside the artwork";
+  "white fills, white shapes, white bellies, pure white areas inside the artwork, " +
+  // v42, restored: the near-whites that survive the word "white" and still vanish in the cut-out
+  "cream, ivory, beige, off-white, pale pastel fills, washed out, low contrast, faded lettering";
 
 const SPEC_NEGATIVE_FLAT =
   ", 3d render, soft shading, cel shading, gradient, gradients, glossy, specular highlight, " +
@@ -1711,57 +1737,149 @@ function escapeXml(v) {
     .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
-/* Very rough advance width per character at font-size 1, used to pick a size that fits. */
-function fitFontSize(line, boxW) {
-  const per = 0.62;                       // conservative for a bold condensed face
-  return Math.floor(boxW / Math.max(1, line.length * per));
+/* ---- v46: the lettering is drawn from REAL GLYPH OUTLINES ----
+   v44 named fonts in the SVG ("DejaVu Sans, Liberation Sans, Arial") and trusted the host to have
+   one of them. Vercel does not guarantee any, and a missing font renders tofu rather than nothing,
+   so the blank-layer guard never fired and the caption arrived as faint illegible marks. The font
+   now ships in node_modules and opentype.js turns the words into <path> data before sharp is
+   involved, so no font lookup happens at all. DejaVu Sans Bold is the one bundled because it also
+   covers Hebrew, which is half the reason this path exists. */
+
+const FONT_FILE = "dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf";
+let _font = null;
+let _fontTried = false;
+
+function loadFont() {
+  if (_fontTried) return _font;
+  _fontTried = true;
+  try {
+    const req = createRequire(import.meta.url);
+    const buf = fs.readFileSync(req.resolve(FONT_FILE));
+    _font = opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  } catch (e) {
+    console.error("[reimagine] bundled font failed to load:", e.message);
+    _font = null;
+  }
+  return _font;
 }
 
-function textSvg(lines, boxW, boxH, colour) {
-  const gap = 1.12;
-  let size = Math.min(
-    Math.floor(boxH / (lines.length * gap)),
-    ...lines.map((l) => fitFontSize(l, boxW))
-  );
-  size = Math.max(40, size);
+/* opentype's own text pipeline throws on DejaVu's GSUB tables, so glyphs are placed by hand.
+   Hebrew needs no contextual shaping — final forms are separate codepoints — so reversing the
+   character order is enough to lay a Hebrew line out right-to-left. */
+function glyphsFor(font, text) {
+  const chars = Array.from(String(text));
+  if (HEBREW_RE.test(text)) chars.reverse();
+  return chars.map((c) => font.charToGlyph(c));
+}
 
-  const total = lines.length * size * gap;
-  let y = Math.round((boxH - total) / 2 + size * 0.82);
+function runWidth(font, glyphs, size, tracking) {
+  let w = 0;
+  for (let i = 0; i < glyphs.length; i++) {
+    w += (glyphs[i].advanceWidth / font.unitsPerEm) * size;
+    if (i < glyphs.length - 1) {
+      w += ((font.getKerningValue(glyphs[i], glyphs[i + 1]) || 0) / font.unitsPerEm) * size + tracking;
+    }
+  }
+  return w;
+}
 
-  const body = lines.map((l) => {
-    const t =
-      `<text x="${Math.round(boxW / 2)}" y="${y}" text-anchor="middle" ` +
-      `font-family="DejaVu Sans, Liberation Sans, Arial, Helvetica, sans-serif" ` +
-      `font-weight="bold" font-size="${size}" fill="${colour}" ` +
-      `letter-spacing="${Math.round(size * 0.02)}">${escapeXml(l)}</text>`;
-    y += Math.round(size * gap);
-    return t;
-  }).join("");
+function runPath(font, glyphs, x, y, size, tracking) {
+  let cx = x;
+  let d = "";
+  for (let i = 0; i < glyphs.length; i++) {
+    d += glyphs[i].getPath(cx, y, size).toPathData(2);
+    cx += (glyphs[i].advanceWidth / font.unitsPerEm) * size;
+    if (i < glyphs.length - 1) {
+      cx += ((font.getKerningValue(glyphs[i], glyphs[i + 1]) || 0) / font.unitsPerEm) * size + tracking;
+    }
+  }
+  return d;
+}
+
+const TEXT_LINE_H = 1.22;      // line box as a multiple of the font size
+const TEXT_TRACK = 0.02;       // letter-spacing as a fraction of the font size
+const TEXT_MAX_LINES = 3;
+const TEXT_MIN_SIZE = 24;
+
+/* Splits into n lines by character count with the word order preserved. The v44 version split any
+   line over 18 characters into its individual words and then kept the first three, which silently
+   threw away the rest of the caption. */
+function splitInto(words, n) {
+  if (n <= 1) return [words.join(" ")];
+  const target = words.join(" ").length / n;
+  const lines = [];
+  let cur = [];
+  for (const w of words) {
+    if (cur.length && lines.length < n - 1 && cur.concat(w).join(" ").length > target) {
+      lines.push(cur.join(" "));
+      cur = [w];
+    } else {
+      cur.push(w);
+    }
+  }
+  if (cur.length) lines.push(cur.join(" "));
+  return lines;
+}
+
+/* Tries 1, 2 and 3 lines and keeps whichever fits the box at the largest size. Because the glyphs
+   are measured for real, the answer is exact rather than the guessed 0.62-per-character of v44. */
+function layoutText(font, text, boxW, boxH) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return null;
+
+  let best = null;
+  for (let n = 1; n <= Math.min(TEXT_MAX_LINES, words.length); n++) {
+    const lines = splitInto(words, n);
+    let byWidth = Infinity;
+    for (const l of lines) {
+      const unit = runWidth(font, glyphsFor(font, l), 1, TEXT_TRACK);
+      byWidth = Math.min(byWidth, boxW / Math.max(unit, 0.001));
+    }
+    const byHeight = boxH / (lines.length * TEXT_LINE_H);
+    const size = Math.floor(Math.min(byWidth, byHeight));
+    if (!best || size > best.size) best = { lines, size };
+  }
+  return best && best.size >= TEXT_MIN_SIZE ? best : null;
+}
+
+function textSvg(font, layout, boxW, boxH, colour) {
+  const { lines, size } = layout;
+  const lineBox = size * TEXT_LINE_H;
+  const top = (boxH - lines.length * lineBox) / 2;
+  const ascent = (font.ascender / font.unitsPerEm) * size;
+
+  let body = "";
+  lines.forEach((l, i) => {
+    const gs = glyphsFor(font, l);
+    const w = runWidth(font, gs, size, size * TEXT_TRACK);
+    const x = (boxW - w) / 2;
+    const y = top + i * lineBox + ascent;
+    body += `<path d="${runPath(font, gs, x, y, size, size * TEXT_TRACK)}" fill="${colour}"/>`;
+  });
 
   return Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
   );
 }
 
-/* Returns a transparent PNG of the lettering, or null if nothing rendered (no usable font). */
+/* Returns a transparent PNG of the lettering, or null if it could not be drawn. Null is a supported
+   answer, not an error: the caller then delivers the ordinary wordless print file. */
 async function renderTextLayer(text, boxW, boxH, colour) {
-  const lines = String(text || "")
-    .split(/\s*\n\s*|\s{2,}/)
-    .flatMap((l) => (l.length > 18 ? l.split(/\s+/) : [l]))
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 3);
-  if (!lines.length) return null;
+  const font = loadFont();
+  if (!font) return null;
+
+  const layout = layoutText(font, text, boxW, boxH);
+  if (!layout) return null;
 
   try {
-    const png = await sharp(textSvg(lines, boxW, boxH, colour || "#111111"))
+    const png = await sharp(textSvg(font, layout, boxW, boxH, colour || "#111111"))
       .png()
       .toBuffer();
-    // fontconfig can silently render nothing — verify some pixels are actually opaque
+    // kept as a belt-and-braces check even though the outlines no longer depend on a font lookup
     const stats = await sharp(png).stats();
     const alpha = stats.channels[3];
     if (!alpha || alpha.max < 200) {
-      console.error("[reimagine] text layer came back blank - no usable font");
+      console.error("[reimagine] text layer came back blank");
       return null;
     }
     return png;
@@ -1922,7 +2040,11 @@ export default async function handler(req, res) {
       const wanted = needsServerText(prepared.spec.text)
         ? { text: prepared.spec.text, colour: chosenTextColour(prepared.spec) }
         : null;
-      if (wanted) prepared.spec = Object.assign({}, prepared.spec, { text: "" });
+      // typography must go with it. Leaving it behind put "lettering style: bold script" in the
+      // prompt while the wordless negative banned every letter — and flux obeys the positive.
+      if (wanted) {
+        prepared.spec = Object.assign({}, prepared.spec, { text: "", typography: "" });
+      }
 
       if (!prepared.spec.subject && !prepared.spec.genre) {
         return res.status(400).json({
