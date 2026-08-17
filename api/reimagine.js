@@ -1,6 +1,16 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v49
+// api/reimagine.js — "עיצוב מחדש" v50
+// v50 change: the STYLE problem, finally traced to its source rather than guessed at.
+// Two moose runs came back as glossy shaded cartoons from a reference that is a FLAT screen print with
+// no shading at all. The generator was not the culprit — the ANALYSER was. It wrote technique =
+// "moderate realism level, hand-drawn aesthetic", "realism" matched PAINTERLY_RE, FLAT_RE never fired,
+// and flux was duly asked for a rendered picture. The tell is the WILD run: identical "realism" wording,
+// but its palette was single-colour so the v49 flat rule overrode it and the vintage look survived.
+// So: the analyser is told that garment PRINTS are flat by default and must not be called realistic
+// unless the reference is genuinely a photograph or a painting; FLAT_RE now also recognises the words
+// real print briefs actually use; and the caption colour stops overriding an explicitly stated
+// lettering colour (the moose caption came out forest green when the palette said dark charcoal).
 // v49 change: two faults, both read off real output rather than guessed.
 // 1. THE LETTERING SWALLOWED THE SUBJECT. His composition read "…the big cat strides horizontally
 //    across the lower two-thirds, OVERLAPPING BEHIND THE LETTERING…". flux obeyed "behind the
@@ -1227,7 +1237,11 @@ Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys
                   never include the disc, badge, circle or panel they sit on"],
   "palette":     "the reference colours in 3-10 words",
   "technique":   "the reference rendering style in 4-14 words, stating its REALISM LEVEL plainly —
-                  photographic, semi-realistic painted, stylised illustration or flat vector",
+                  photographic, semi-realistic painted, stylised illustration or flat vector.
+                  Garment prints are FLAT unless proven otherwise: if the reference has solid areas of
+                  ink, visible outlines, limited colours or a screen-print/woodcut/distressed look, say
+                  'flat spot-colour print, no shading' and do NOT use the words realism, realistic,
+                  rendered, shaded or painted. Reserve those for a genuine photograph or painting",
   "typography":  "the reference lettering style in 3-12 words, or '' if it has no text",
   "text":        "your NEW wording, or '' if the reference has no text",
   "composition": "how the ARTWORK ITSELF is arranged, 6-16 words — where each thing sits and how big
@@ -1538,7 +1552,7 @@ function specToPrompt(spec) {
 
 /* Detects a flat/vector brief anywhere the user could have expressed one. */
 const FLAT_RE =
-  /\b(flat|vector|minimal|minimalist|solid colou?rs?|no shading|no gradients?|2d|silhouette|line ?art|lineart|outline only|sticker|clip ?art|retro print|screen ?print)\b/i;
+  /\b(flat|vector|minimal|minimalist|solid colou?rs?|no shading|no gradients?|2d|silhouette|line ?art|lineart|outline only|sticker|clip ?art|retro print|screen ?print|spot[- ]colou?r|block print|woodcut|linocut|hand[- ]drawn|distressed print|graphic simplification)\b/i;
 
 /* A painterly brief: either the `real` preset, or wording the user typed themselves. */
 const PAINTERLY_RE =
@@ -1722,6 +1736,17 @@ function needsServerText(text) {
 /* Dark by default: white lettering would be cut away with the background (see v24/v42). */
 function chosenTextColour(spec) {
   const p = String(spec.palette || "").toLowerCase();
+  /* v50: the moose palette said "dark charcoal outlines and lettering" and the caption still came out
+     forest green, because the scan below matched a colour named for something else in the same string.
+     An explicitly stated lettering colour wins. */
+  const named = p.match(/\b([a-z ]{3,24}?)\s+(?:outlines? and )?lettering\b/);
+  if (named) {
+    const c = named[1].trim();
+    if (/charcoal|black/.test(c)) return "#111111";
+    if (/navy|deep blue/.test(c)) return "#152A4A";
+    if (/maroon|burgundy|deep red/.test(c)) return "#5A1220";
+    if (/forest|deep green/.test(c)) return "#12402A";
+  }
   if (/\bnavy|deep blue\b/.test(p)) return "#152A4A";
   if (/\bmaroon|burgundy|deep red\b/.test(p)) return "#5A1220";
   if (/\bforest|deep green\b/.test(p)) return "#12402A";
