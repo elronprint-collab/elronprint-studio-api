@@ -1,6 +1,19 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v46
+// api/reimagine.js — "עיצוב מחדש" v47
+// v47 change: TWO THINGS v46 GOT WRONG, both proved from the Vercel log and his screenshots.
+// 1. THE FONT WAS NEVER IN THE BUNDLE. Log: "bundled font failed to load: Cannot find module
+//    'dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf'". The dependency installs fine, but Vercel's file
+//    tracer prunes anything it cannot see being used, and it does not follow require.resolve() when
+//    the path is held in a variable. So the .ttf was dropped from /var/task and every caption fell
+//    back to the wordless canvas. Fixed on BOTH sides: vercel.json now force-includes the file
+//    (includeFiles), and loadFont() tries several real paths and logs each one it tried.
+// 2. THE COMPOSITION FIELD STILL CARRIED THE WORDING. v46 blanked text and typography, but the
+//    analyser had written "large cursive 'A Moose Destroys You' filling the lower third" into
+//    COMPOSITION, and specToPrompt passes composition through verbatim — so the prompt still asked
+//    for lettering while the negative banned it, and flux drew "WORST CASE SCORARIO" anyway. That is
+//    the fourth spot in this family (v34, v38, v39, v46). stripLettering() now scrubs composition and
+//    elements whenever the server owns the words, and the analyser is told not to quote the wording.
 // v46 change: THREE FIXES, all of them mine, none of them the model's.
 // 1. TYPOGRAPHY SURVIVED THE SERVER-TEXT SWITCH. v45 blanks spec.text when it hands the wording to
 //    the server, but left spec.typography alone — so specToPrompt still pushed "lettering style: ..."
@@ -234,6 +247,8 @@ import { checkRateLimit } from "./_ratelimit.js";
 
 import sharp from "sharp";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import opentype from "opentype.js";
 
@@ -1185,7 +1200,9 @@ Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys
   "text":        "your NEW wording, or '' if the reference has no text",
   "composition": "how the ARTWORK ITSELF is arranged, 6-16 words — where each thing sits and how big
                   it is. Never the shape behind it: if the reference sits on a disc, badge, panel or
-                  blob, describe only what is printed ON it and drop the shape entirely",
+                  blob, describe only what is printed ON it and drop the shape entirely. Never quote
+                  or repeat the wording of the text here — say where the lettering sits, never what
+                  it says; the words belong in the text field and nowhere else",
   "notes":       "one sentence naming the original character and the one you put in its place"
 }
 
@@ -1745,22 +1762,95 @@ function escapeXml(v) {
    involved, so no font lookup happens at all. DejaVu Sans Bold is the one bundled because it also
    covers Hebrew, which is half the reason this path exists. */
 
-const FONT_FILE = "dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf";
+const FONT_REL = "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf";
 let _font = null;
 let _fontTried = false;
+
+/* v47: module resolution is NOT enough on Vercel. The tracer only bundles files it can see being
+   used, it does not follow require.resolve() through a variable, and the .ttf was pruned — the log
+   said "Cannot find module". vercel.json force-includes it now, and this walks real paths so a
+   change in how the lambda is laid out cannot silently kill the captions again. */
+function fontCandidates() {
+  const out = [];
+  try {
+    out.push(createRequire(import.meta.url).resolve("dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf"));
+  } catch (e) {
+    // not resolvable from the bundle - the explicit paths below are the ones that matter
+  }
+  out.push(path.join(process.cwd(), FONT_REL));      // /var/task on Vercel
+  out.push(path.join("/var/task", FONT_REL));
+  try {
+    out.push(fileURLToPath(new URL("../" + FONT_REL, import.meta.url)));
+  } catch (e) {
+    // import.meta.url is always a file URL here, but never let path building throw
+  }
+  return out.filter((p, i) => p && out.indexOf(p) === i);
+}
 
 function loadFont() {
   if (_fontTried) return _font;
   _fontTried = true;
-  try {
-    const req = createRequire(import.meta.url);
-    const buf = fs.readFileSync(req.resolve(FONT_FILE));
-    _font = opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-  } catch (e) {
-    console.error("[reimagine] bundled font failed to load:", e.message);
-    _font = null;
+
+  const tried = [];
+  for (const p of fontCandidates()) {
+    tried.push(p);
+    try {
+      if (!fs.existsSync(p)) continue;
+      const buf = fs.readFileSync(p);
+      _font = opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      console.log("[reimagine] font loaded from", p);
+      return _font;
+    } catch (e) {
+      console.error("[reimagine] font at", p, "failed:", e.message);
+    }
   }
+
+  console.error("[reimagine] no usable font. tried:", tried.join(" | "));
+  _font = null;
   return _font;
+}
+
+/* v47: when the SERVER draws the words, nothing else in the spec may ask for lettering. Blanking
+   text and typography was not enough — the analyser writes things like "large cursive 'A Moose
+   Destroys You' filling the lower third" into COMPOSITION, and that reaches flux verbatim. Scrubbed
+   clause by clause, the same way stripGarments works: deleting single words leaves a fragment that
+   still steers the picture. */
+const LETTERING_RE = new RegExp(
+  "\\b(text|lettering|letters|lettered|word|words|wordmark|writing|written|typography|" +
+  "typographic|typeface|font|script|cursive|calligraphy|calligraphic|handwritten|headline|title|" +
+  "subtitle|tagline|slogan|caption|quote|uppercase|lowercase|serif|sans-serif|arched|arcing|arc)\\b",
+  "i"
+);
+const QUOTED_RE = /['"\u2018\u2019\u201C\u201D][^'"\u2018\u2019\u201C\u201D]{2,}['"\u2018\u2019\u201C\u201D]/g;
+
+function scrubLetteringText(v) {
+  return String(v || "")
+    .replace(QUOTED_RE, " ")
+    .split(/\s*[,;]\s*/)
+    .filter((clause) => clause.trim() && !LETTERING_RE.test(clause))
+    .join(", ")
+    .trim();
+}
+
+function stripLettering(spec) {
+  const out = Object.assign({}, spec);
+
+  const composition = scrubLetteringText(out.composition);
+  if (composition !== String(out.composition || "").trim()) {
+    console.log(`[reimagine] lettering scrubbed from composition: "${out.composition}" -> "${composition}"`);
+  }
+  // never hand flux an empty composition - it would lose the framing rules with it
+  out.composition = composition || "single subject centred with wide empty margins on all sides";
+
+  if (Array.isArray(out.elements)) {
+    const kept = out.elements.filter((el) => !LETTERING_RE.test(String(el)) && !QUOTED_RE.test(String(el)));
+    if (kept.length !== out.elements.length) {
+      console.log("[reimagine] lettering elements dropped:", out.elements.length - kept.length);
+    }
+    out.elements = kept;
+  }
+
+  return out;
 }
 
 /* opentype's own text pipeline throws on DejaVu's GSUB tables, so glyphs are placed by hand.
@@ -2043,7 +2133,9 @@ export default async function handler(req, res) {
       // typography must go with it. Leaving it behind put "lettering style: bold script" in the
       // prompt while the wordless negative banned every letter — and flux obeys the positive.
       if (wanted) {
-        prepared.spec = Object.assign({}, prepared.spec, { text: "", typography: "" });
+        prepared.spec = stripLettering(
+          Object.assign({}, prepared.spec, { text: "", typography: "" })
+        );
       }
 
       if (!prepared.spec.subject && !prepared.spec.genre) {
