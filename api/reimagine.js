@@ -1,6 +1,19 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v50
+// api/reimagine.js — "עיצוב מחדש" v51
+// v51 change: THE GENERATOR NOW SEES THE REFERENCE. This is an architecture change, not a patch.
+// Until now one model looked at his design and wrote eight sentences, and a second model painted from
+// scratch having never seen it. Every bug in this file's history is a failure of that handoff: a word
+// written twice so it was drawn twice, "realism" written about a flat print, trees written and never
+// drawn, a sun disc nobody asked for. So when a reference image is available the artwork is now made by
+// nano-banana/edit — the model SEES the design and is asked to change only the cast and the wording,
+// which keeps style, composition and elements by construction instead of by description.
+// flux stays as the fallback for when no reference is available, and every downstream guard (cut-out,
+// QC, empty check, server lettering, print canvas) is untouched and still runs.
+// ⚠️ THE REFERENCE HAS TO REACH STEP 3. Step 2 posts only the spec, so v51 accepts it from three places,
+// in order: body.image / body.ref (if the theme sends it), spec.ref (round-tripped from the analyse
+// response), or nothing — in which case it logs "no reference available" and falls back to flux. If that
+// line shows up in the log, the theme needs to echo `ref` back and that is a one-line change.
 // v50 change: the STYLE problem, finally traced to its source rather than guessed at.
 // Two moose runs came back as glossy shaded cartoons from a reference that is a FLAT screen print with
 // no shading at all. The generator was not the culprit — the ANALYSER was. It wrote technique =
@@ -650,6 +663,53 @@ async function generate(prompt, style, dataUri) {
     output_format: "png",
     enable_safety_checker: true,
   });
+}
+
+/* v51: the reference-editing path. The instruction is deliberately SHORT — everything the old prompt
+   had to spell out (style, palette, composition, elements) is already visible in the image, and naming
+   it again is what kept producing contradictions. Only the two things that must CHANGE are named. */
+function editInstruction(spec) {
+  const parts = [];
+  parts.push(
+    "This is an existing t-shirt design. Redraw it as a NEW design that keeps the same drawing style, " +
+    "the same colours, the same layout and the same surrounding elements, changing only what I name below."
+  );
+  if (spec.subject) {
+    parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
+  }
+  if (spec.text) {
+    parts.push(`Replace ALL wording with exactly: "${spec.text}" — same lettering style and same placement, spelled exactly, appearing once.`);
+  } else {
+    parts.push("Remove all wording. No text, no letters anywhere in the artwork.");
+  }
+  parts.push(
+    "If the reference is a photo of someone wearing the shirt, use ONLY the printed graphic and ignore " +
+    "the wearer, the garment and the background completely. Output the artwork alone on a flat pure " +
+    "white #FFFFFF background, complete, with wide empty margins on all four sides and nothing touching " +
+    "an edge. No panel, no badge, no disc, no frame behind it. Nothing in the artwork may be white or " +
+    "near-white — white is cut away, so use a mid-tone or deep shade instead."
+  );
+  return parts.join(" ");
+}
+
+async function editFromSpec(spec, reference) {
+  const prompt = editInstruction(spec);
+  console.log("[reimagine] editing the reference:", prompt.slice(0, 220));
+  return await fal("fal-ai/nano-banana/edit", {
+    prompt,
+    image_urls: [reference],
+    num_images: 1,
+    output_format: "png",
+  });
+}
+
+/* Where the reference can come from, best first. */
+function referenceFrom(body, spec) {
+  const ok = (v) => typeof v === "string" && /^(https?:|data:image\/)/.test(v) && v.length > 32;
+  if (ok(body && body.image)) return body.image;
+  if (ok(body && body.ref)) return body.ref;
+  if (ok(spec && spec[REF_KEY])) return spec[REF_KEY];
+  return null;
 }
 
 /* ---------------- quality control ---------------- */
@@ -1330,6 +1390,9 @@ async function analyzeSpec(base64Data, mediaType) {
 }
 
 const SPEC_KEYS = ["genre", "subject", "elements", "palette", "technique", "typography", "text", "composition", "notes"];
+// v51: the URL of the uploaded reference, added by the analyse step and round-tripped by the client so
+// the generator can SEE the design. Not user content, never translated, never shown as a field.
+const REF_KEY = "ref";
 // `style` is a preset KEY chosen by a button, never free text — kept out of SPEC_KEYS so it is
 // never sent to the translator and never treated as Hebrew content.
 const STYLE_KEY_RE = /^[a-z]{2,12}$/;
@@ -2375,7 +2438,20 @@ export default async function handler(req, res) {
           needSubject: true,
         });
       }
-      const art = await generateFromSpec(prepared.spec);
+      /* v51: edit the real design when we have it, and only paint from scratch when we do not. */
+      // NB: read the RAW spec — normaliseSpec whitelists SPEC_KEYS and would strip `ref` before this.
+      const reference = referenceFrom(body, body.spec);
+      let art;
+      if (reference) {
+        try {
+          art = await editFromSpec(prepared.spec, reference);
+        } catch (e) {
+          console.error("[reimagine] edit path failed, falling back to flux:", e.message);
+        }
+      } else {
+        console.warn("[reimagine] no reference available - falling back to flux (theme must echo `ref`)");
+      }
+      if (!art) art = await generateFromSpec(prepared.spec);
       const chosen = presetFor(prepared.spec);
       const out = await finishArtwork(
         art, t0, isPreview, !!(chosen && chosen.invert), wanted
@@ -2430,7 +2506,16 @@ export default async function handler(req, res) {
     try {
       const spec = await analyzeSpec(base64Data, mediaType);
       console.log("[reimagine] spec:", JSON.stringify(spec).slice(0, 300));
-      return res.status(200).json({ spec });
+      /* v51: park the reference so step 3 can EDIT it instead of painting blind. Failing to upload is
+         not fatal — the run simply falls back to the old draw-from-description path. */
+      let ref = null;
+      try {
+        ref = await uploadCloudinary(Buffer.from(base64Data, "base64"));
+        console.log("[reimagine] reference parked:", ref);
+      } catch (e) {
+        console.error("[reimagine] could not park the reference:", e.message);
+      }
+      return res.status(200).json({ spec: Object.assign({}, spec, ref ? { [REF_KEY]: ref } : {}), ref });
     } catch (err) {
       console.error("[reimagine] analyze failed:", err);
       return res.status(502).json({ error: "Analyze failed" });
