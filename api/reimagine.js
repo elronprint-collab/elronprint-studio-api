@@ -1,6 +1,18 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v55
+// api/reimagine.js — "עיצוב מחדש" v56
+// v56 change: THE CAPTION BUG, FOUND AND FIXED AT ITS ROOT. It was never the line layout.
+// opentype.js rounds path coordinates with string arithmetic:
+//     roundDecimal(f, p) => +(Math.round(f + "e+" + p) + "e-" + p)
+// so any coordinate whose String() is exponential — anything under 1e-6, which is what a
+// floating-point "zero" looks like — becomes "3.55e-15e+2", and Math.round of that is NaN. librsvg
+// then silently abandons the REST of that <path>, so the words after it disappear at raster time.
+// That is why only LONG captions broke: a long line is nearly as wide as its box, centring puts its x
+// at almost exactly 0, and the near-zero coordinates that follow are the ones that serialise in
+// exponential form. Short captions never come near it, which is why this looked like a length problem
+// for four versions. Measured on the bear caption: 287598 ink px before, 577822 after — the second
+// line was simply not being drawn. Glyph outlines are now serialised by pathDataOf()/num() here,
+// using toFixed, and renderTextLayer refuses to ship a caption whose path data is not finite.
 // v55 change: THE WEARER IS CROPPED OUT ON THE EDIT PATH TOO.
 // cropToGraphic has been in this file since v25, but it only ever ran in the LEGACY one-shot path —
 // the box came from analyzeAndReimagine, and the two-step spec analyser never produced one. So every
@@ -2306,11 +2318,48 @@ function runWidth(font, glyphs, size, tracking) {
   return w;
 }
 
+/* ---- v56: WE SERIALISE THE GLYPH OUTLINES OURSELVES ----
+   opentype.js's toPathData(places) rounds with this helper:
+       roundDecimal(f, p) => +(Math.round(f + "e+" + p) + "e-" + p)
+   It is string arithmetic, so it depends on how JavaScript prints the number. Any coordinate whose
+   String() is exponential — that is, any |v| below 1e-6, which is what a floating-point "zero" looks
+   like — becomes "3.55e-15e+2", and Math.round of that is NaN. ONE NaN coordinate makes librsvg
+   silently abandon the rest of that <path>, so everything after it vanishes at raster time.
+   That is the whole caption bug, and it explains why only LONG captions broke: a long line is nearly
+   as wide as the box, so centring puts its x at almost exactly 0, and the near-zero coordinates that
+   follow are the ones that serialise in exponential form. Short captions never get near it.
+   num() uses toFixed, which never produces exponential notation at these magnitudes. */
+function num(v) {
+  if (!Number.isFinite(v)) return "0";
+  // toFixed switches to exponential notation past 1e21, which is the very thing we are avoiding.
+  // Nothing on a 4500x5400 canvas can legitimately be that large, so clamp rather than emit it.
+  if (v > 1e6) v = 1e6;
+  else if (v < -1e6) v = -1e6;
+  let s = v.toFixed(2);
+  if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s === "-0" ? "0" : s;
+}
+
+function pathDataOf(p) {
+  let d = "";
+  for (const c of p.commands) {
+    switch (c.type) {
+      case "M": d += `M${num(c.x)} ${num(c.y)}`; break;
+      case "L": d += `L${num(c.x)} ${num(c.y)}`; break;
+      case "C": d += `C${num(c.x1)} ${num(c.y1)} ${num(c.x2)} ${num(c.y2)} ${num(c.x)} ${num(c.y)}`; break;
+      case "Q": d += `Q${num(c.x1)} ${num(c.y1)} ${num(c.x)} ${num(c.y)}`; break;
+      case "Z": d += "Z"; break;
+      default: break;
+    }
+  }
+  return d;
+}
+
 function runPath(font, glyphs, x, y, size, tracking) {
   let cx = x;
   let d = "";
   for (let i = 0; i < glyphs.length; i++) {
-    d += glyphs[i].getPath(cx, y, size).toPathData(2);
+    d += pathDataOf(glyphs[i].getPath(cx, y, size));
     cx += (glyphs[i].advanceWidth / font.unitsPerEm) * size;
     if (i < glyphs.length - 1) {
       cx += ((font.getKerningValue(glyphs[i], glyphs[i + 1]) || 0) / font.unitsPerEm) * size + tracking;
@@ -2395,9 +2444,15 @@ async function renderTextLayer(text, boxW, boxH, colour) {
   if (!layout) return null;
 
   try {
-    const png = await sharp(textSvg(font, layout, boxW, boxH, colour || "#111111"))
-      .png()
-      .toBuffer();
+    const svg = textSvg(font, layout, boxW, boxH, colour || "#111111");
+    /* v56 belt and braces: a single non-finite coordinate makes librsvg abandon the rest of a
+       <path>, and the result is a caption missing half its words — which ships silently and looks
+       like a design decision. If one ever appears again, drop the caption and say so in the log. */
+    if (/NaN|Infinity/.test(svg.toString())) {
+      console.error("[reimagine] caption path data is not finite - refusing to draw a partial caption");
+      return null;
+    }
+    const png = await sharp(svg).png().toBuffer();
     // kept as a belt-and-braces check even though the outlines no longer depend on a font lookup
     const stats = await sharp(png).stats();
     const alpha = stats.channels[3];
