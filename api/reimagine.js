@@ -1,6 +1,16 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v53
+// api/reimagine.js — "עיצוב מחדש" v54
+// v54 change: WHO DRAWS THE WORDS IS NOW DECIDED PER DESIGN, NOT GLOBALLY.
+// v53 handed ALL lettering to the model whenever a reference existed. Six reviewed pairs say that is
+// too wide: it works only for large, heavy, few-word display type ("NURSE CREW" copied perfectly),
+// and fails everywhere else — flowing script came back as hollow whiskered outlines, a long bold-sans
+// slogan came back thin and grey with the spaces swallowed, and small cover type came back as
+// gibberish carrying an invented real book title. So editCanKeepLettering() gates it: short + Latin +
+// not a fragile typeface. Outside that window the edit path behaves exactly as v52 did.
+// NOT ADDRESSED HERE, and the bigger problem: the tool faithfully preserves OTHER PEOPLE'S property —
+// Nike, adidas and Puma wordmarks, an artist's signature, a real book title and author. He chose to fix
+// the text first; the brand gate is the agreed next job.
 // v53 change: ON THE EDIT PATH, THE DESIGN'S OWN LETTERING IS KEPT INSTEAD OF A CAPTION BOLTED UNDER IT.
 // This is the first change made AFTER the edit path was confirmed running (log: "editing the reference:").
 // Everything from v44 to v52 assumed a generator that cannot spell, so the server drew the words in plain
@@ -346,11 +356,35 @@ const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.97, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
-/* v53: THE ONE SWITCH FOR THIS EXPERIMENT.
-   true  = on the edit path the model keeps the reference's own lettering and swaps the words.
-   false = v52 behaviour exactly: lettering scrubbed, server draws a caption under the artwork.
-   Flip this to false to revert without touching any other line in the file. */
-const EDIT_KEEPS_LETTERING = true;
+/* v53: THE MASTER SWITCH. false = v52 behaviour always (server draws every caption). */
+const EDIT_LETTERING_ENABLED = true;
+
+/* v54: WHEN the model is allowed to keep the lettering, decided per design rather than globally.
+   Read off six reviewed source→result pairs, not guessed:
+     ✅ "NURSE CREW"  — big chunky hand-drawn display capitals, 9 letters → copied perfectly
+     ❌ "Make It Yours" — flowing script → hollow outline letters with ragged, whiskered edges
+     ❌ "No, I Don't Have a Coupon" — bold sans but LONG → thin grey letters, spaces swallowed
+     ❌ a book cover inside the artwork — small type → gibberish, and a real title/author invented
+   The pattern is not script-vs-print and it is not text-only-vs-illustrated. It is that the model
+   copies letterforms it can see the SHAPE of: large, heavy, few. Everything else it re-invents.
+   So the model gets the lettering only inside that window; outside it the server draws the words,
+   which at least spells them correctly and fills them solid. */
+const EDIT_TEXT_MAX = 14;              // non-space characters, same threshold the server uses
+const FRAGILE_TYPE_RE = new RegExp(
+  "\\b(script|cursive|calligraph\\w*|handwritten|hand-lettered|brush|signature|flowing|swash|" +
+  "monoline|thin|light|delicate|fine[- ]?line|small)\\b",
+  "i"
+);
+
+function editCanKeepLettering(spec) {
+  if (!EDIT_LETTERING_ENABLED) return false;
+  const t = String(spec.text || "").trim();
+  if (!t) return true;                                   // nothing to draw either way
+  if (HEBREW_RE.test(t)) return false;                   // the model cannot draw Hebrew at all
+  if (t.replace(/\s+/g, "").length > EDIT_TEXT_MAX) return false;
+  if (FRAGILE_TYPE_RE.test(String(spec.typography || ""))) return false;
+  return true;
+}
 
 const EDGE_LIMIT = 0.015;
 const PALE_LIMIT = 0.12;
@@ -2507,8 +2541,16 @@ export default async function handler(req, res) {
         fluxPrepared = true;
       };
 
-      // the revert switch: with it off, the edit path is fed exactly what v52 fed it
-      if (reference && !EDIT_KEEPS_LETTERING) prepareFluxOnce();
+      /* v54: decide per design who draws the words. Outside the window the edit path is fed
+         exactly what v52 fed it — lettering scrubbed out, server caption composited afterwards. */
+      if (reference) {
+        const keep = editCanKeepLettering(prepared.spec);
+        console.log(
+          `[reimagine] lettering: ${keep ? "MODEL keeps the design's own type" : "SERVER draws it"}` +
+          ` (text=${(prepared.spec.text || "").length} chars, typography="${prepared.spec.typography || ""}")`
+        );
+        if (!keep) prepareFluxOnce();
+      }
 
       if (reference) {
         try {
