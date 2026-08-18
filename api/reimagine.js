@@ -1,6 +1,16 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v54
+// api/reimagine.js — "עיצוב מחדש" v55
+// v55 change: THE WEARER IS CROPPED OUT ON THE EDIT PATH TOO.
+// cropToGraphic has been in this file since v25, but it only ever ran in the LEGACY one-shot path —
+// the box came from analyzeAndReimagine, and the two-step spec analyser never produced one. So every
+// edit-path run was handed the entire product photo, and an EDIT model faithfully redraws what it is
+// shown: four reviewed results came back as a photo of a person with a torn-out background instead of
+// a print file. The box cannot ride along inside the spec (the theme rebuilds the spec from its form
+// inputs at step 3, which is the same reason `ref` never round-tripped), so it is fetched at generate
+// time by one small vision call. Costs ~1-2s and a few tokens, runs only for a freshly uploaded data
+// URI, and EVERY failure path — bad JSON, a 500, a network error, an implausible box — falls back to
+// the full reference, so a run can never be worse off than before.
 // v54 change: WHO DRAWS THE WORDS IS NOW DECIDED PER DESIGN, NOT GLOBALLY.
 // v53 handed ALL lettering to the model whenever a reference existed. Six reviewed pairs say that is
 // too wide: it works only for large, heavy, few-word display type ("NURSE CREW" copied perfectly),
@@ -803,6 +813,97 @@ function referenceFrom(body, spec) {
   if (ok(body && body.ref)) return body.ref;
   if (ok(spec && spec[REF_KEY])) return spec[REF_KEY];
   return null;
+}
+
+/* v55: THE WEARER HAS TO PHYSICALLY LEAVE THE INPUT ON THE EDIT PATH TOO.
+   cropToGraphic has existed since v25 but ran ONLY in the legacy one-shot path, because the box came
+   from analyzeAndReimagine and the two-step spec analyser never returned one. So on the edit path the
+   model was handed the whole product photo — model, hands, bracelets, jeans, shoes — and being an EDIT
+   model it faithfully redrew all of it. Four reviewed runs came back as a photo of a person with a
+   torn-out background instead of a print file.
+   The box cannot travel through the spec: the theme rebuilds the spec from its form inputs at step 3,
+   so any extra key is dropped (that is the same reason `ref` never round-tripped). So it is fetched
+   here, with one small vision call. ~1-2s and a few tokens per run, only when the reference is a fresh
+   upload, and every failure falls back to using the full image exactly as before. */
+const GRAPHIC_BOX_SYSTEM = `You locate the printed graphic inside a t-shirt image.
+
+The image is either a standalone artwork file, or a photo/mockup of someone WEARING a printed garment.
+
+If a garment or a wearer is present, answer with the bounding box of the PRINTED GRAPHIC ONLY — the
+artwork on the fabric. Not the shirt, not the person, not their hands, hair, jewellery or jeans, not
+the room. Draw the box tightly around the artwork, including all of its lettering.
+
+If the image is already just the artwork with no garment and no wearer, answer: full
+
+Answer with ONE line and nothing else, in one of these two forms:
+GRAPHIC: x0,y0,x1,y1
+GRAPHIC: full
+
+where each value is a whole number 0-100, a percentage of the image width or height; x0,y0 is the
+top-left corner and x1,y1 the bottom-right.`;
+
+async function graphicBox(dataUri) {
+  const m = String(dataUri || "").match(/^data:(image\/\w+);base64,(.+)$/);
+  if (!m) return null;
+  const [, mediaType, base64Data] = m;
+
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 32,
+      system: GRAPHIC_BOX_SYSTEM,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
+          { type: "text", text: "Where is the printed graphic? One line only." },
+        ],
+      }],
+    }),
+  });
+  if (!r.ok) {
+    console.error("[reimagine] graphic box call failed:", r.status);
+    return null;
+  }
+  const data = await r.json();
+  const raw = (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+
+  if (/GRAPHIC:\s*full/i.test(raw)) {
+    console.log("[reimagine] graphic box: full image (no garment detected)");
+    return null;
+  }
+  const nums = raw.match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+  if (!nums) {
+    console.warn("[reimagine] graphic box: unreadable answer, using the full reference:", raw.slice(0, 80));
+    return null;
+  }
+  const [x0, y0, x1, y1] = nums.slice(1, 5).map(Number);
+  if (!(x1 > x0 && y1 > y0 && x1 <= 100 && y1 <= 100)) {
+    console.warn(`[reimagine] graphic box: implausible (${x0},${y0},${x1},${y1}), using the full reference`);
+    return null;
+  }
+  console.log(`[reimagine] graphic box: ${x0},${y0},${x1},${y1}`);
+  return { x0, y0, x1, y1 };
+}
+
+/* Crops the reference down to the printed graphic when there is a wearer to remove. Never throws:
+   on any failure the original reference is returned and behaviour is exactly as before. */
+async function cropReferenceToGraphic(reference) {
+  if (!/^data:image\//.test(String(reference || ""))) return reference;   // already a parked URL
+  try {
+    const box = await graphicBox(reference);
+    if (!box) return reference;
+    return await cropToGraphic(reference, box);
+  } catch (e) {
+    console.warn("[reimagine] graphic crop failed, using the full reference:", e.message);
+    return reference;
+  }
 }
 
 /* ---------------- quality control ---------------- */
@@ -2550,6 +2651,9 @@ export default async function handler(req, res) {
           ` (text=${(prepared.spec.text || "").length} chars, typography="${prepared.spec.typography || ""}")`
         );
         if (!keep) prepareFluxOnce();
+
+        // v55: strip the wearer BEFORE the edit model sees anything. Words never won this argument.
+        reference = await cropReferenceToGraphic(reference);
       }
 
       if (reference) {
