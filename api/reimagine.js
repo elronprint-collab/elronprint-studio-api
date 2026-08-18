@@ -1,6 +1,27 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v52
+// api/reimagine.js — "עיצוב מחדש" v53
+// v53 change: ON THE EDIT PATH, THE DESIGN'S OWN LETTERING IS KEPT INSTEAD OF A CAPTION BOLTED UNDER IT.
+// This is the first change made AFTER the edit path was confirmed running (log: "editing the reference:").
+// Everything from v44 to v52 assumed a generator that cannot spell, so the server drew the words in plain
+// DejaVu Sans UNDER the artwork. On most reference shirts THE LETTERING IS THE DESIGN — arched script over
+// the animal, small caps across it, a curved line below — so scrubbing it out and printing a flat caption
+// underneath caps the quality of every result no matter how good the drawing is.
+// An EDIT model is not generating letters from nothing: it is copying shapes it can see. That may be
+// enough to keep the reference's own typography and swap only which letters are shown. So when a reference
+// is available:
+//   - spec.text and spec.typography are NOT blanked, and stripLettering is NOT applied
+//   - the edit instruction asks for the existing lettering to be kept exactly and the words swapped
+//   - no server caption is composited (`wanted` stays null), so the artwork fills the whole canvas
+// The flux path is byte-for-byte v52: no reference means no reliable letterforms to copy, so the server
+// still owns the words there. That preparation now lives in prepareForFlux() and is applied lazily, so a
+// FAILED edit still falls back to the old, safe behaviour.
+// ⚠️ THIS IS AN EXPERIMENT WITH FOUR POSSIBLE OUTCOMES, and only the first is a win: correct words in the
+// reference's own lettering / right style but MISSPELLED / gibberish letterforms / the reference's ORIGINAL
+// words left untouched. Outcomes 2-4 all mean reverting. To revert without touching anything else, set
+// EDIT_KEEPS_LETTERING to false — that restores v52 behaviour exactly.
+// Hebrew is unaffected: prepareSpec already drops Hebrew from the text field before any of this runs.
+//
 // v52 change: THE REFERENCE NOW REACHES STEP 3 WITHOUT TOUCHING THE THEME.
 // The Vercel log settled it: "no reference available - falling back to flux (theme must echo `ref`)".
 // The analyse step was parking the reference correctly, but step 3 posts only the spec, so the edit path
@@ -11,6 +32,11 @@ import { checkRateLimit } from "./_ratelimit.js";
 // before the SQL is run, it simply keeps falling back to flux until then.
 //
 //   alter table students add column if not exists last_ref text;
+//
+// POSTSCRIPT: the server-side recall never fired, because the theme sends no token on the ANALYSE call, so
+// studentFromToken returned null and the write was skipped. What actually closed it was one line in
+// sections/epd-design-remix.liquid — the step-3 payload now carries `image: uploadedDataUrl`. The recall
+// code is kept as a harmless second route.
 //
 // v51 change: THE GENERATOR NOW SEES THE REFERENCE. This is an architecture change, not a patch.
 // Until now one model looked at his design and wrote eight sentences, and a second model painted from
@@ -319,6 +345,12 @@ export const config = { maxDuration: 60 };
 const CANVAS_W = 4500, CANVAS_H = 5400, SAFE = 0.97, DPI = 300;
 const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
+
+/* v53: THE ONE SWITCH FOR THIS EXPERIMENT.
+   true  = on the edit path the model keeps the reference's own lettering and swaps the words.
+   false = v52 behaviour exactly: lettering scrubbed, server draws a caption under the artwork.
+   Flip this to false to revert without touching any other line in the file. */
+const EDIT_KEEPS_LETTERING = true;
 
 const EDGE_LIMIT = 0.015;
 const PALE_LIMIT = 0.12;
@@ -678,7 +710,12 @@ async function generate(prompt, style, dataUri) {
 
 /* v51: the reference-editing path. The instruction is deliberately SHORT — everything the old prompt
    had to spell out (style, palette, composition, elements) is already visible in the image, and naming
-   it again is what kept producing contradictions. Only the two things that must CHANGE are named. */
+   it again is what kept producing contradictions. Only the two things that must CHANGE are named.
+
+   v53: the wording clause is rewritten. It used to be one line among several; it is now the most
+   specific instruction in the prompt, because keeping the reference's own lettering is the whole
+   point of this version. The model is copying letterforms it can see, not inventing them, so it is
+   told to treat the typography as something to PRESERVE and only the letters as something to change. */
 function editInstruction(spec) {
   const parts = [];
   parts.push(
@@ -689,7 +726,15 @@ function editInstruction(spec) {
     parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
   }
   if (spec.text) {
-    parts.push(`Replace ALL wording with exactly: "${spec.text}" — same lettering style and same placement, spelled exactly, appearing once.`);
+    parts.push(
+      `THE LETTERING: keep every piece of lettering exactly where it is and exactly as it is drawn — ` +
+      `the same typeface, the same weight, the same curve or arc, the same size, the same colour and the ` +
+      `same position in the layout. Do NOT remove the lettering and do NOT move it. Change only WHICH ` +
+      `LETTERS are shown: the words now read exactly "${spec.text}", spelled letter for letter as written ` +
+      `here. If the design has several separate lines of lettering, distribute these words across them in ` +
+      `the same order, keeping each line's own style. Every letter is fully formed, closed and legible — ` +
+      `no invented letters, no half-formed shapes, no leftover words from the original design.`
+    );
   } else {
     parts.push("Remove all wording. No text, no letters anywhere in the artwork.");
   }
@@ -705,7 +750,10 @@ function editInstruction(spec) {
 
 async function editFromSpec(spec, reference) {
   const prompt = editInstruction(spec);
-  console.log("[reimagine] editing the reference:", prompt.slice(0, 220));
+  console.log(
+    `[reimagine] editing the reference (lettering drawn by the model: ${spec.text ? "yes" : "no text"}):`,
+    prompt.slice(0, 220)
+  );
   return await fal("fal-ai/nano-banana/edit", {
     prompt,
     image_urls: [reference],
@@ -1772,7 +1820,8 @@ async function translateSpec(spec) {
 async function prepareSpec(spec) {
   let notice = "";
 
-  // Hebrew in "text" would be DRAWN, and flux cannot draw Hebrew legibly. Drop it, don't mangle it.
+  // Hebrew in "text" would be DRAWN, and neither generator can draw Hebrew legibly. Drop it, don't
+  // mangle it. This runs BEFORE the edit/flux split, so the edit path never sees Hebrew either.
   if (HEBREW_RE.test(spec.text || "")) {
     spec = Object.assign({}, spec, { text: "" });
     notice =
@@ -1805,6 +1854,33 @@ function needsServerText(text) {
   if (!t) return false;
   if (HEBREW_RE.test(t)) return true;              // flux cannot draw Hebrew at all
   return t.replace(/\s+/g, "").length > SERVER_TEXT_MAX;
+}
+
+/* v53: everything the FLUX path needs done to the spec before it is drawn, in one place.
+   This is exactly the v52 preparation, lifted out of the handler unchanged so it can be applied
+   LAZILY — the edit path skips it entirely, and a failed edit still gets it on the way to flux.
+   Returns { spec, wanted }, where `wanted` non-null means the server draws the caption. */
+function prepareForFlux(spec) {
+  const wanted = needsServerText(spec.text)
+    ? { text: spec.text, colour: chosenTextColour(spec) }
+    : null;
+
+  if (wanted) {
+    // typography must go with it. Leaving it behind put "lettering style: bold script" in the
+    // prompt while the wordless negative banned every letter — and flux obeys the positive.
+    return {
+      spec: stripLettering(Object.assign({}, spec, { text: "", typography: "" })),
+      wanted,
+    };
+  }
+
+  if (spec.text) {
+    // flux is drawing the words, so make sure no OTHER field asks for them a second time,
+    // and that it does not bury the subject underneath them (v49)
+    return { spec: unhideSubject(dedupeWording(spec)), wanted: null };
+  }
+
+  return { spec, wanted: null };
 }
 
 /* Dark by default: white lettering would be cut away with the background (see v24/v42). */
@@ -1973,7 +2049,9 @@ function loadFont() {
    text and typography was not enough — the analyser writes things like "large cursive 'A Moose
    Destroys You' filling the lower third" into COMPOSITION, and that reaches flux verbatim. Scrubbed
    clause by clause, the same way stripGarments works: deleting single words leaves a fragment that
-   still steers the picture. */
+   still steers the picture.
+   v53 note: this now runs ONLY on the flux path. On the edit path the lettering in the reference is
+   the thing we are trying to keep, so scrubbing it would defeat the whole version. */
 const LETTERING_RE = new RegExp(
   "\\b(text|lettering|letters|lettered|word|words|wordmark|writing|written|typography|" +
   "typographic|typeface|font|script|cursive|calligraphy|calligraphic|handwritten|headline|title|" +
@@ -2355,7 +2433,7 @@ export default async function handler(req, res) {
   const body = req.body || {};
   const action = String(body.action || "").toLowerCase();
 
-  /* ---- v26 step 2: draw from an edited spec. No reference image involved. ---- */
+  /* ---- v26 step 2: draw from an edited spec ---- */
   if (action === "generate") {
     try {
       const spec = normaliseSpec(body.spec);
@@ -2395,65 +2473,13 @@ export default async function handler(req, res) {
       const t0 = Date.now();
       const prepared = await prepareSpec(spec);
 
-      // flux cannot spell, so it never draws the words: the artwork is generated WORDLESS and the
-      // lettering is composited afterwards. prepared.spec is what reaches the generator.
-      const wanted = needsServerText(prepared.spec.text)
-        ? { text: prepared.spec.text, colour: chosenTextColour(prepared.spec) }
-        : null;
-      // typography must go with it. Leaving it behind put "lettering style: bold script" in the
-      // prompt while the wordless negative banned every letter — and flux obeys the positive.
-      if (wanted) {
-        prepared.spec = stripLettering(
-          Object.assign({}, prepared.spec, { text: "", typography: "" })
-        );
-      } else if (prepared.spec.text) {
-        // flux is drawing the words, so make sure no OTHER field asks for them a second time,
-        // and that it does not bury the subject underneath them (v49)
-        prepared.spec = unhideSubject(dedupeWording(prepared.spec));
-      }
-
-      /* v48: if the subject scrubbed away to nothing, the reference was pure typography — the design
-         IS the wording. There is no artwork to regenerate, and asking flux for one is what produced
-         the black blob covered in gibberish. Skip the generator and deliver the lettering alone. */
-      const textOnly = !!wanted && !prepared.spec.subject;
-      if (textOnly) {
-        console.log("[reimagine] text-only reference: skipping the generator, lettering only");
-        const out = await finishTextOnly(wanted, t0, isPreview);
-        const left = owner
-          ? { freeLeft: null, credits: null, owner: true }
-          : await chargeRun(student, quota).catch((e) => {
-              console.error("[reimagine] charge failed (design was delivered):", e);
-              return { freeLeft: quota.freeLeft, credits: quota.credits };
-            });
-        return res.status(200).json(
-          Object.assign(
-            {
-              spec: prepared.spec,
-              notice: prepared.notice,
-              freeLeft: left.freeLeft,
-              credits: left.credits,
-              owner: !!owner,
-              forDark: false,
-              textOnly: true,
-            },
-            out
-          )
-        );
-      }
-
-      if (!prepared.spec.subject && !prepared.spec.genre) {
-        return res.status(400).json({
-          error:
-            "לא זוהה עיצוב בתמונה — נראה שהיא צילום של חולצה ולא העיצוב עצמו. " +
-            "נסו להעלות את הגרפיקה בלבד, או מלאו ידנית את הנושא המרכזי.",
-          needSubject: true,
-        });
-      }
-      /* v51: edit the real design when we have it, and only paint from scratch when we do not. */
-      // NB: read the RAW spec — normaliseSpec whitelists SPEC_KEYS and would strip `ref` before this.
+      /* v53: the reference is resolved BEFORE anything is decided about the wording, because the
+         reference is what decides WHO draws the words. With one, the model keeps the design's own
+         lettering; without one, the server still draws a caption as it has since v44.
+         NB: read the RAW spec — normaliseSpec whitelists SPEC_KEYS and would strip `ref` first. */
       let reference = referenceFrom(body, body.spec);
-      /* v52: nothing in the request? ask the account. Wrapped tightly: if the column does not exist yet
-         this throws, and we simply carry on down the old path. */
+      /* v52: nothing in the request? ask the account. Wrapped tightly: if the column does not exist
+         yet this throws, and we simply carry on down the old path. */
       if (!reference) {
         try {
           const rows = await sbGet(
@@ -2467,18 +2493,78 @@ export default async function handler(req, res) {
           console.error("[reimagine] could not recall the reference (run the SQL?):", e.message);
         }
       }
-      let art;
+
+      let art = null;
+      let wanted = null;                 // non-null => the SERVER draws the caption (flux path only)
+      let specUsed = prepared.spec;
+      let fluxPrepared = false;
+
+      const prepareFluxOnce = () => {
+        if (fluxPrepared) return;
+        const fx = prepareForFlux(specUsed);
+        specUsed = fx.spec;
+        wanted = fx.wanted;
+        fluxPrepared = true;
+      };
+
+      // the revert switch: with it off, the edit path is fed exactly what v52 fed it
+      if (reference && !EDIT_KEEPS_LETTERING) prepareFluxOnce();
+
       if (reference) {
         try {
-          art = await editFromSpec(prepared.spec, reference);
+          art = await editFromSpec(specUsed, reference);
         } catch (e) {
           console.error("[reimagine] edit path failed, falling back to flux:", e.message);
         }
       } else {
-        console.warn("[reimagine] no reference available - falling back to flux (theme must echo `ref`)");
+        console.warn("[reimagine] no reference available - falling back to flux");
       }
-      if (!art) art = await generateFromSpec(prepared.spec);
-      const chosen = presetFor(prepared.spec);
+
+      if (!art) {
+        /* ---- flux path: the v52 preparation, applied here and nowhere else ---- */
+        prepareFluxOnce();
+
+        /* v48: if the subject scrubbed away to nothing, the reference was pure typography — the
+           design IS the wording. There is no artwork to regenerate, and asking flux for one is what
+           produced the black blob covered in gibberish. Skip the generator, deliver the lettering. */
+        if (wanted && !specUsed.subject) {
+          console.log("[reimagine] text-only reference: skipping the generator, lettering only");
+          const out = await finishTextOnly(wanted, t0, isPreview);
+          const left = owner
+            ? { freeLeft: null, credits: null, owner: true }
+            : await chargeRun(student, quota).catch((e) => {
+                console.error("[reimagine] charge failed (design was delivered):", e);
+                return { freeLeft: quota.freeLeft, credits: quota.credits };
+              });
+          return res.status(200).json(
+            Object.assign(
+              {
+                spec: specUsed,
+                notice: prepared.notice,
+                freeLeft: left.freeLeft,
+                credits: left.credits,
+                owner: !!owner,
+                forDark: false,
+                textOnly: true,
+              },
+              out
+            )
+          );
+        }
+
+        if (!specUsed.subject && !specUsed.genre) {
+          return res.status(400).json({
+            error:
+              "לא זוהה עיצוב בתמונה — נראה שהיא צילום של חולצה ולא העיצוב עצמו. " +
+              "נסו להעלות את הגרפיקה בלבד, או מלאו ידנית את הנושא המרכזי.",
+            needSubject: true,
+          });
+        }
+
+        art = await generateFromSpec(specUsed);
+      }
+
+      const chosen = presetFor(specUsed);
       const out = await finishArtwork(
         art, t0, isPreview, !!(chosen && chosen.invert), wanted
       );
@@ -2501,7 +2587,7 @@ export default async function handler(req, res) {
       return res.status(200).json(
         Object.assign(
           {
-            spec: prepared.spec,
+            spec: specUsed,
             notice: prepared.notice,
             freeLeft: left.freeLeft,
             credits: left.credits,
@@ -2541,9 +2627,10 @@ export default async function handler(req, res) {
       } catch (e) {
         console.error("[reimagine] could not park the reference:", e.message);
       }
-      /* v52: remember it against the account too, so step 3 can find it even though the theme posts
-         only the spec. Best-effort on purpose — a missing column or a failed write must never break
-         the analyse step, it just means this run paints from description as before. */
+      /* v52: remember it against the account too, as a second route in case the theme stops sending
+         the image. Best-effort on purpose — a missing column or a failed write must never break the
+         analyse step. NOTE: the theme sends no token on THIS call, so studentFromToken usually
+         returns null here and the write is skipped. That is expected, not a fault. */
       if (ref) {
         try {
           const who = await studentFromToken(
