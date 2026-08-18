@@ -1,6 +1,17 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v51
+// api/reimagine.js — "עיצוב מחדש" v52
+// v52 change: THE REFERENCE NOW REACHES STEP 3 WITHOUT TOUCHING THE THEME.
+// The Vercel log settled it: "no reference available - falling back to flux (theme must echo `ref`)".
+// The analyse step was parking the reference correctly, but step 3 posts only the spec, so the edit path
+// added in v51 had never actually run once. Rather than make him edit a Shopify section, the reference is
+// now remembered SERVER-SIDE against his account: analyse writes students.last_ref, generate reads it back.
+// Requires ONE line of SQL, once (see below). Until that column exists every read and write of it fails
+// harmlessly inside its own try/catch and behaviour is exactly as before — so this file is safe to deploy
+// before the SQL is run, it simply keeps falling back to flux until then.
+//
+//   alter table students add column if not exists last_ref text;
+//
 // v51 change: THE GENERATOR NOW SEES THE REFERENCE. This is an architecture change, not a patch.
 // Until now one model looked at his design and wrote eight sentences, and a second model painted from
 // scratch having never seen it. Every bug in this file's history is a failure of that handoff: a word
@@ -2440,7 +2451,22 @@ export default async function handler(req, res) {
       }
       /* v51: edit the real design when we have it, and only paint from scratch when we do not. */
       // NB: read the RAW spec — normaliseSpec whitelists SPEC_KEYS and would strip `ref` before this.
-      const reference = referenceFrom(body, body.spec);
+      let reference = referenceFrom(body, body.spec);
+      /* v52: nothing in the request? ask the account. Wrapped tightly: if the column does not exist yet
+         this throws, and we simply carry on down the old path. */
+      if (!reference) {
+        try {
+          const rows = await sbGet(
+            "students?id=eq." + encodeURIComponent(student.id) + "&select=last_ref&limit=1"
+          );
+          if (rows && rows[0] && rows[0].last_ref) {
+            reference = rows[0].last_ref;
+            console.log("[reimagine] reference recalled from the account");
+          }
+        } catch (e) {
+          console.error("[reimagine] could not recall the reference (run the SQL?):", e.message);
+        }
+      }
       let art;
       if (reference) {
         try {
@@ -2514,6 +2540,22 @@ export default async function handler(req, res) {
         console.log("[reimagine] reference parked:", ref);
       } catch (e) {
         console.error("[reimagine] could not park the reference:", e.message);
+      }
+      /* v52: remember it against the account too, so step 3 can find it even though the theme posts
+         only the spec. Best-effort on purpose — a missing column or a failed write must never break
+         the analyse step, it just means this run paints from description as before. */
+      if (ref) {
+        try {
+          const who = await studentFromToken(
+            body.token || req.headers["x-epai-token"] || req.query.token
+          );
+          if (who) {
+            await sbPatch("students?id=eq." + encodeURIComponent(who.id), { last_ref: ref });
+            console.log("[reimagine] reference remembered for the account");
+          }
+        } catch (e) {
+          console.error("[reimagine] could not remember the reference (run the SQL?):", e.message);
+        }
       }
       return res.status(200).json({ spec: Object.assign({}, spec, ref ? { [REF_KEY]: ref } : {}), ref });
     } catch (err) {
