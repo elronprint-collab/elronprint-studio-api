@@ -1,5 +1,29 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v63
+// v63 change: THE OLD WORDS WERE NEVER NAMED TO THE MODEL. Read off a real log, not guessed.
+// Three refusals in a row on the "But First Coffee" reference. The 23:54 log settles what happened:
+//     artwork gate: reused=true protected="" lettering="" defects=""
+//     one hardened retry - artwork came back as a copy
+//     retry no better - keeping the first attempt
+//     REFUSED - output is a copy: original wording reused
+// `lettering=""` means the NEW wording was present and spelled correctly. `reused=true` means the OLD
+// wording was on the canvas as well. So the design carried BOTH — and that is not a spelling problem
+// or a style problem, it is the SAME additive behaviour already seen when the reference's coffee cup
+// survived beside its replacement: an edit model ADDS rather than SUBSTITUTES.
+// And here is what every version from v51 to v62 missed: the prompt has never told the model WHAT the
+// old words are. v62 says "NONE of the reference's original words may appear" — an abstract ban on a
+// string the model was never handed. The server has known that string all along: GATE 1 reads it into
+// `refWording` before a credit is spent, and it was used ONLY to judge the result afterwards, never to
+// prevent it. v58 proved the principle in the other direction — naming the pine trees got them drawn.
+// So:
+//   1. `refWording` is now passed into editInstruction and the old words are QUOTED in the prompt, next
+//      to the new ones, as the thing being replaced.
+//   2. The hardened retry quotes them too, instead of saying "any of the original wording".
+//   3. One more clause against the additive habit: the number of separate lettering elements stays the
+//      same as the reference — the letters inside them change, no new block of lettering is added.
+// Nothing else moves. The v61 palette/technique lock and forceSolidInk are untouched, and so is the
+// gate: if this fails, the run is still refused rather than delivered.
 // api/reimagine.js — "עיצוב מחדש" v62
 // v62 change: v61's LAYOUT LOCK PUSHED THE RESULT INTO THE COPYRIGHT GATE. My regression, found in two
 // runs on the same reference within minutes of shipping it.
@@ -892,7 +916,7 @@ async function generate(prompt, style, dataUri) {
    specific instruction in the prompt, because keeping the reference's own lettering is the whole
    point of this version. The model is copying letterforms it can see, not inventing them, so it is
    told to treat the typography as something to PRESERVE and only the letters as something to change. */
-function editInstruction(spec) {
+function editInstruction(spec, refWording) {
   const parts = [];
   parts.push(
     "This is an existing t-shirt design. Redraw it as a NEW design that keeps the same drawing style, " +
@@ -957,8 +981,19 @@ function editInstruction(spec) {
       `no invented letters, no half-formed shapes. ` +
       /* v62: the counterweight. Everything around this clause asks the model to preserve, so the one
          thing that must NOT be preserved has to be said as forcefully as the rest. */
-      `NONE of the reference's original words may appear anywhere in the new design — not in full, not ` +
-      `in part, not faintly, not in a second smaller line. The typeface is copied; the words are not. ` +
+      /* v63: the ban is only enforceable if the model is told WHAT to leave out. GATE 1 already read
+         the reference's wording into refWording; until now it was used to judge the result and never
+         to prevent it. */
+      (refWording
+        ? `The reference currently reads ${JSON.stringify(refWording)}. THOSE WORDS ARE BEING REPLACED: ` +
+          `they must not appear anywhere in the new design — not in full, not in part, not faintly, not ` +
+          `in a smaller second line. Wherever they appear in the reference, the new words stand instead. `
+        : `None of the reference's original words may appear anywhere in the new design. `) +
+      `The typeface is copied; the words are not. ` +
+      /* v63: the additive habit again — the log shows the OLD and the NEW wording both on the canvas,
+         the same fault as the reference's cup surviving beside its replacement. */
+      `The new design has exactly as many separate pieces of lettering as the reference has, in the ` +
+      `same places: you are changing the letters inside them, never adding another block of lettering. ` +
       /* v61: the reviewed pair came back with script thinner than the reference and a serif eroded
          with white speckle through the strokes. Weight and fill are part of the typeface, so they are
          named as explicitly as the typeface itself. */
@@ -986,13 +1021,19 @@ function editInstruction(spec) {
   return parts.join(" ");
 }
 
-async function editFromSpec(spec, reference, harden, defectNote, letteringNote) {
-  let prompt = editInstruction(spec);
+async function editFromSpec(spec, reference, harden, defectNote, letteringNote, refWording) {
+  let prompt = editInstruction(spec, refWording);
   if (harden) {
     prompt +=
       " IMPORTANT: the previous attempt reproduced the original design almost unchanged. This is a NEW " +
-      "design, not a copy. Do not reproduce ANY of the original wording, and do not draw any logo, " +
-      "brand name, signature or watermark. The main character must visibly differ from the original.";
+      "design, not a copy. " +
+      /* v63: name them. "any of the original wording" was abstract and two hardened retries failed. */
+      (refWording
+        ? `The words ${JSON.stringify(refWording)} appeared in the previous attempt. Remove them ` +
+          `completely — every one of those words, everywhere on the canvas. `
+        : "Do not reproduce ANY of the original wording. ") +
+      "Do not draw any logo, brand name, signature or watermark. The main character must visibly " +
+      "differ from the original.";
   }
   if (letteringNote) {
     prompt +=
@@ -3349,7 +3390,7 @@ export default async function handler(req, res) {
 
       if (reference) {
         try {
-          art = await editFromSpec(specUsed, reference);
+          art = await editFromSpec(specUsed, reference, false, "", "", refWording);
         } catch (e) {
           console.error("[reimagine] edit path failed, falling back to flux:", e.message);
         }
@@ -3381,7 +3422,7 @@ export default async function handler(req, res) {
             );
             try {
               const art2 = await editFromSpec(
-                specUsed, reference, isCopy(verdict), verdict.defects, verdict.lettering
+                specUsed, reference, isCopy(verdict), verdict.defects, verdict.lettering, refWording
               );
               const v2 = await inspectArtwork(art2, refWording, askedWording);
               if (worth(v2) < worth(verdict)) { art = art2; verdict = v2; console.log("[reimagine] retry accepted"); }
