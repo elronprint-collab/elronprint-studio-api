@@ -1,7 +1,23 @@
 import crypto from "crypto";
 import sharp from "sharp";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/extract.js — "חילוץ עיצוב" v1
+// api/extract.js — "חילוץ עיצוב" v2
+//
+// v2 change: THE BOX WAS SWALLOWING THE WEARER. First real run returned a "print file" containing a
+// pink crop top, two arms, a midriff and a pair of denim shorts — everything except a clean graphic.
+// Two causes, both in the locating step:
+//  1. The stock photo carried a shop watermark ("MN FASHION ERA") laid across the model’s body and
+//     jeans. It is part of the PHOTO, not the shirt, but it reads as lettering, so the box stretched
+//     down to include it. The instruction now says overlay text and watermarks are never part of the
+//     printed design, and explains the tell: printed ink follows the folds of the fabric, overlay text
+//     sits flat across whatever is behind it.
+//  2. Nothing checked the answer. A printed design is a small part of a photo of a person, so a box
+//     covering most of the frame is wrong by definition. tooBig() measures it, and an oversized answer
+//     earns one retry with the instruction hardened. If the retry is no better the run still finishes,
+//     with a Hebrew notice suggesting he crop the photo around the design and upload again — a bad file
+//     he was warned about beats a bad file presented as finished.
+// Background removal could not have saved this: once the crop contains the model, birefnet keeps her,
+// because she IS the salient object. The crop is the only place this can be fixed.
 //
 // A DIFFERENT TOOL FROM reimagine.js, AND DELIBERATELY SO. reimagine GENERATES: it reads a design,
 // swaps the cast and the wording, and paints something new. That means an image model decides the
@@ -117,9 +133,25 @@ Answer two questions.
 
 1. GRAPHICS — the printed artwork areas.
    For (b): give a bounding box for EACH separate printed graphic — a front print, a back print, a
-   sleeve print, or two shirts shown side by side. Draw each box tightly around the artwork itself,
-   including all of its lettering, and NOT around the shirt, the person, their hands, hair or jeans,
-   or the room. List at most 3, largest first.
+   sleeve print, or two shirts shown side by side. List at most 3, largest first.
+
+   Draw each box tightly around the INK ON THE FABRIC and nothing else. Start from the topmost mark of
+   the design and stop at the bottommost mark. The box must NOT include:
+     - skin, hands, arms, neck or face
+     - denim, trousers, shorts, a belt or a waistband
+     - bare shirt fabric well beyond the design
+     - the background, the floor or the room
+
+   IGNORE OVERLAY TEXT THAT IS NOT PRINTED ON THE GARMENT. Stock photos and shop listings very often
+   carry a watermark, a shop name or a caption laid over the picture — across the model's body, the
+   trousers or the background. It is part of the PHOTO, not part of the shirt. Never extend a box to
+   reach it, and never treat it as a graphic of its own. Printed ink follows the folds and creases of
+   the fabric; overlay text sits flat and crosses whatever is behind it.
+
+   A box that covers most of the picture is wrong by definition — a printed design occupies a small
+   part of a photo of a person. If yours is that big, you have included the wearer: shrink it to the
+   ink alone.
+
    For (a), when the image is already just the artwork: answer with the single word full
    If there is no printed artwork at all: answer with the single word none
 
@@ -154,7 +186,21 @@ function parseBox(v) {
 
 const NONE_RE = /^\s*(none|no|n\/a|-)\s*$/i;
 
-async function findGraphics(base64Data, mediaType) {
+/* A printed design is a small part of a photo of a person. When the returned box covers most of the
+   frame it has taken in the model, the denim and the background — which is exactly what produced a
+   "print file" of a pink crop top, two arms and a pair of shorts. Measured, then retried once with the
+   instruction hardened, rather than trusted. */
+const MAX_BOX_FRAC = 55;                 // percent of the image area
+function boxArea(b) { return ((b.x1 - b.x0) * (b.y1 - b.y0)) / 100; }
+function tooBig(b) { return boxArea(b) > MAX_BOX_FRAC; }
+
+const RETRY_NOTE =
+  "\n\nYour previous answer boxed far too much of the picture: it included the wearer, their skin and " +
+  "their clothing below the shirt, and possibly a watermark laid over the photo. Answer again with a " +
+  "box around THE PRINTED INK ONLY — the design on the fabric, from its topmost mark to its bottommost " +
+  "mark, with no skin, no denim, no waistband and no overlay text.";
+
+async function findGraphics(base64Data, mediaType, harden) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -165,7 +211,7 @@ async function findGraphics(base64Data, mediaType) {
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
       max_tokens: 300,
-      system: FIND_SYSTEM,
+      system: FIND_SYSTEM + (harden ? RETRY_NOTE : ""),
       messages: [{
         role: "user",
         content: [
@@ -201,6 +247,14 @@ async function findGraphics(base64Data, mediaType) {
   if (!boxes.length) {
     console.warn("[extract] no usable boxes, treating the upload as the artwork");
     return { boxes: null, protected: prot, whole: true };
+  }
+  const swallowed = boxes.filter(tooBig);
+  if (swallowed.length) {
+    console.warn(
+      "[extract] box covers " +
+      swallowed.map((b) => `${boxArea(b).toFixed(0)}%`).join(", ") +
+      " of the image - it has swallowed the wearer"
+    );
   }
   console.log(
     `[extract] found ${boxes.length} graphic(s): ` +
@@ -684,7 +738,23 @@ export default async function handler(req, res) {
     }
 
     // ---- step 1: locate, and check what it is ----
-    const found = await findGraphics(base64Data, mediaType);
+    let found = await findGraphics(base64Data, mediaType);
+    /* One retry when the box has clearly taken in the wearer. Cheap, and it is the difference between
+       a print file and a photograph of a woman in a crop top. */
+    if (Array.isArray(found.boxes) && found.boxes.some(tooBig)) {
+      console.warn("[extract] retrying the search with the instruction hardened");
+      try {
+        const again = await findGraphics(base64Data, mediaType, true);
+        if (Array.isArray(again.boxes) && again.boxes.length && !again.boxes.some(tooBig)) {
+          console.log("[extract] retry gave a sane box - using it");
+          found = { ...again, protected: again.protected || found.protected };
+        } else {
+          console.warn("[extract] retry no better - keeping the first answer");
+        }
+      } catch (e) {
+        console.warn("[extract] retry failed:", e.message);
+      }
+    }
     if (found.protected) {
       console.warn("[extract] REFUSED - protected material:", found.protected);
       return res.status(422).json({ error: IP_ERROR, blocked: "ip", reason: found.protected });
@@ -738,6 +808,12 @@ export default async function handler(req, res) {
     }
 
     const notices = [];
+    if (Array.isArray(found.boxes) && found.boxes.some(tooBig)) {
+      notices.push(
+        "לא הצלחנו לבודד את העיצוב מהחולצה — ייתכן שהתוצאה כוללת חלקים מהתמונה המקורית. " +
+        "כדאי לחתוך את התמונה סביב העיצוב ולהעלות שוב."
+      );
+    }
     if (skipped) notices.push(`נמצאו עוד ${skipped} עיצובים בתמונה שלא עובדו — העלו אותם בנפרד.`);
     for (const f of files) if (f.holeWarning) { notices.push(f.holeWarning); break; }
 
