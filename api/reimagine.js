@@ -1,5 +1,23 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v62
+// v62 change: v61's LAYOUT LOCK PUSHED THE RESULT INTO THE COPYRIGHT GATE. My regression, found in two
+// runs on the same reference within minutes of shipping it.
+// v61 added "Keep the existing layout exactly: the same overall shape and proportions, each thing in
+// the same place and at the same relative size, and the same margins" — on top of a lettering clause
+// already saying to keep the typeface, weight, curve, size, colour and position. Read together, that is
+// an instruction to preserve almost everything, and an edit model told to preserve almost everything
+// preserves the WORDS too. Both runs came back carrying the reference's own wording, GATE 2 caught them
+// and refused delivery. The gate did exactly its job; the prompt was the problem.
+// The lesson is the one this file keeps relearning, now for the seventh time (v34, v38, v39, v40, v42,
+// v43, and this): a new rule does not land in isolation. It lands ON TOP of every rule already there,
+// and the sum can say something none of them says alone. Before adding a preservation instruction,
+// read the preservation instructions already in the prompt as one paragraph.
+// So the layout clause now says what it was meant to say — keep the ARRANGEMENT — and every clause that
+// asks to preserve something now carries the counterweight: the character and the words are what
+// CHANGE, and the reference's wording may never appear in the output. Everything else from v61 stands.
+// The palette/technique lock is untouched (it is about style, not content, and cannot cause a copy),
+// and forceSolidInk is post-processing that runs after the gate, so it is untouched too.
 // api/reimagine.js — "עיצוב מחדש" v61
 // v61 change: THE SINGLE-INK DESIGNS COME BACK WEAK, AND ASKING NICELY HAS NOT FIXED IT.
 // Reviewed pair, 19 Aug: a pure-black "But First Coffee" reference came back with a grey-green shaded
@@ -899,9 +917,15 @@ function editInstruction(spec) {
   if (spec.technique) {
     parts.push(`THE TECHNIQUE IS: ${spec.technique}. Do not render it more realistically or more softly than that.`);
   }
+  /* v62: this used to read "keep the existing layout exactly ... the same overall shape and
+     proportions ... the same margins", and stacked on the lettering clause below it read as "preserve
+     everything" — two runs came back carrying the reference's own words and were refused by the
+     copyright gate. It means ARRANGEMENT, so it now says arrangement, and carries its own limit. */
   parts.push(
-    "Keep the existing layout exactly: the same overall shape and proportions, each thing in the same " +
-    "place and at the same relative size as in the reference, and the same margins."
+    "Keep the ARRANGEMENT of the design: the same balance and the same relative sizes, each thing in " +
+    "roughly the same place as in the reference, and the same margins. This is about WHERE things sit, " +
+    "not what they are — the character and the words are what change, and the finished design must be " +
+    "recognisably a NEW design rather than a copy of the reference."
   );
 
   if (spec.subject) {
@@ -930,7 +954,11 @@ function editInstruction(spec) {
       `LETTERS are shown: the words now read exactly "${spec.text}", spelled letter for letter as written ` +
       `here. If the design has several separate lines of lettering, distribute these words across them in ` +
       `the same order, keeping each line's own style. Every letter is fully formed, closed and legible — ` +
-      `no invented letters, no half-formed shapes, no leftover words from the original design. ` +
+      `no invented letters, no half-formed shapes. ` +
+      /* v62: the counterweight. Everything around this clause asks the model to preserve, so the one
+         thing that must NOT be preserved has to be said as forcefully as the rest. */
+      `NONE of the reference's original words may appear anywhere in the new design — not in full, not ` +
+      `in part, not faintly, not in a second smaller line. The typeface is copied; the words are not. ` +
       /* v61: the reviewed pair came back with script thinner than the reference and a serif eroded
          with white speckle through the strokes. Weight and fill are part of the typeface, so they are
          named as explicitly as the typeface itself. */
