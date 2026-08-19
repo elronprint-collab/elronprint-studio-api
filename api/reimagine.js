@@ -1,6 +1,34 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v60
+// api/reimagine.js — "עיצוב מחדש" v61
+// v61 change: THE SINGLE-INK DESIGNS COME BACK WEAK, AND ASKING NICELY HAS NOT FIXED IT.
+// Reviewed pair, 19 Aug: a pure-black "But First Coffee" reference came back with a grey-green shaded
+// cup, a distressed serif eroded with white speckle inside the strokes, and script noticeably thinner
+// than the source. His words: "הכיתוב לא חזק כמו המקור חסר צבע".
+// The spec was RIGHT on every field — palette "single colour", technique "no shading; clean outlines,
+// solid fill areas", composition "lettering dominates lower two-thirds". The analyser is not the
+// problem and there is no rule collision here. The edit instruction simply says "the same colours,
+// the same drawing style" and the model draws in its own house style anyway.
+// So this version does two different things, and the difference matters:
+//   1. A STYLE LOCK in editInstruction — the palette and the technique are now stated VERBATIM instead
+//      of gestured at, the layout is named as something to preserve, the replaced character must LEAVE
+//      the canvas rather than sit beside its replacement, and the lettering is asked for at the
+//      reference's own stroke weight, filled solid. This raises the odds. It guarantees nothing —
+//      the backdrop disc has been banned in six wordings across five versions and still appears.
+//   2. forceSolidInk() — CODE, not a request, and the reason this version is worth deploying. When the
+//      palette says the design is a single ink, every ink pixel is snapped to full strength and the
+//      white speckle eroded inside strokes is filled. Grey, washed strokes and distress holes cannot
+//      survive it, because nothing is being asked of a model.
+// What it deliberately does NOT do, so the next person does not "improve" it into a disaster:
+//   - It runs ONLY on a genuinely monochrome palette (paletteIsMonochrome, which is STRICTER than
+//     paletteIsLimited — two-colour and duotone are excluded, since collapsing two inks onto one
+//     destroys the design).
+//   - It refuses on any artwork that is actually multi-coloured, whatever the palette claims.
+//   - It leaves LARGE light regions alone. A pale cup body is an unfilled shape, and flooding it with
+//     ink would turn an outlined drawing into a silhouette. Only small enclosed pockets are filled.
+//   - It deepens the ink colour only when the palette NAMES a black/charcoal ink. A single-colour
+//     design in dusty rose stays dusty rose.
+//   - It runs BEFORE the monolight inversion, so "white print on a dark shirt" still works.
 // v60 change: THE MODEL DRAWS THE LETTERING NOW. His call, and the right one.
 // On these references the lettering IS the design — "LOVE" in outlined pink caps beside the bear,
 // "you" handwritten across it, "FOR NO REASON" below. Replacing all of that with black DejaVu Sans in
@@ -852,8 +880,36 @@ function editInstruction(spec) {
     "This is an existing t-shirt design. Redraw it as a NEW design that keeps the same drawing style, " +
     "the same colours, the same layout and the same surrounding elements, changing only what I name below."
   );
+
+  /* v61: THE STYLE LOCK. "the same colours, the same drawing style" is a gesture, and a reviewed pair
+     showed the model ignoring it completely on a spec that described the reference perfectly. The
+     palette and the technique are the two fields that were violated, so they are now stated in the
+     model's face instead of left to its eyes. Kept SHORT and limited to these two fields plus layout:
+     the v51 lesson was that re-describing everything is what produced the contradictions. */
+  if (spec.palette) {
+    parts.push(`THE COLOURS ARE: ${spec.palette}. Use these and nothing else — no extra colours, no greys.`);
+  }
+  if (paletteIsMonochrome(spec.palette)) {
+    parts.push(
+      "This is a ONE-INK print. Every shape and every letter is filled with that single ink at full " +
+      "strength — no grey, no tints, no shading, no gradients, no texture and no distress inside any " +
+      "shape. Anything not printed is left empty, never filled with a paler version of the ink."
+    );
+  }
+  if (spec.technique) {
+    parts.push(`THE TECHNIQUE IS: ${spec.technique}. Do not render it more realistically or more softly than that.`);
+  }
+  parts.push(
+    "Keep the existing layout exactly: the same overall shape and proportions, each thing in the same " +
+    "place and at the same relative size as in the reference, and the same margins."
+  );
+
   if (spec.subject) {
-    parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
+    parts.push(
+      `Replace the main character with: ${spec.subject}. Same size, same pose, same position in the ` +
+      `layout. This is a REPLACEMENT, not an addition: the original character is removed from the ` +
+      `design completely and must not appear anywhere alongside the new one.`
+    );
   }
   /* v58: NAME the supporting elements. "keep the same surrounding elements" was the only thing asking
      for them, and four reviewed runs came back with the main character alone on an empty canvas — the
@@ -874,7 +930,13 @@ function editInstruction(spec) {
       `LETTERS are shown: the words now read exactly "${spec.text}", spelled letter for letter as written ` +
       `here. If the design has several separate lines of lettering, distribute these words across them in ` +
       `the same order, keeping each line's own style. Every letter is fully formed, closed and legible — ` +
-      `no invented letters, no half-formed shapes, no leftover words from the original design.`
+      `no invented letters, no half-formed shapes, no leftover words from the original design. ` +
+      /* v61: the reviewed pair came back with script thinner than the reference and a serif eroded
+         with white speckle through the strokes. Weight and fill are part of the typeface, so they are
+         named as explicitly as the typeface itself. */
+      `Draw the lettering at the SAME STROKE WEIGHT as the reference — just as thick and just as heavy, ` +
+      `never thinner or lighter — and fill every letter 100% solid in the design's own ink: no texture, ` +
+      `no distress, no grain, no speckle, no erosion inside the strokes, no hollow or outline-only letters.`
     );
   } else {
     parts.push("Remove all wording. No text, no letters anywhere in the artwork.");
@@ -2407,6 +2469,208 @@ async function toPreviewCanvas(buf) {
     .toBuffer();
 }
 
+/* ---- v61: FULL-STRENGTH INK ON SINGLE-COLOUR DESIGNS ----
+   This is the deterministic half of v61. The prompt half above ASKS for a solid one-ink print; this
+   part MAKES it one, because five versions of asking have not held.
+
+   It is gated three ways on purpose, and every gate is there because removing it would destroy a
+   legitimate design:
+     - paletteIsMonochrome only. Two-colour and duotone briefs are excluded: collapsing two inks onto
+       one is not a fix, it is vandalism.
+     - the artwork itself must actually be monochrome. A palette can claim "single colour" over a
+       result that plainly is not, and the claim never wins over the pixels.
+     - large light regions are left alone. In a one-ink print an unfilled shape IS the garment showing
+       through; flooding it would turn an outlined cup into a black silhouette. Only pockets small
+       enough to be erosion or distress are filled.
+   Runs after the cut-out (it needs the real alpha) and BEFORE invertArtwork, so monolight still ends
+   up with genuinely white artwork. */
+
+const INK_DARK = 0.55;        // at or below this luminance the pixel is ink
+const INK_LIGHT = 0.80;       // at or above it the pixel is a gap, not ink
+const INK_FOREIGN_MAX = 0.12; // more saturated off-hue pixels than this and the artwork is not monochrome
+const POCKET_MAX_FRAC = 0.004;// an enclosed light pocket up to this share of the ink is erosion
+const INK_TARGET_LUM = 0.12;
+const POCKET_COUNT_MAX = 300; // more separate pockets than this is a TEXTURE, not erosion
+
+/* A distressed/vintage/halftone print is SUPPOSED to have holes in its strokes — that is the design,
+   and the v35 vintage preset asks for it deliberately. Filling them would be the same class of error
+   as flooding an outlined shape, so a brief that says so is left alone entirely. */
+const INK_TEXTURE_RE = /\b(distress\w*|vintage|retro|worn|weathered|halftone|grain\w*|grunge|rough\s+texture|textured|stipple\w*|cross[- ]?hatch\w*|screen[- ]?print\s+texture)\b/i;
+
+function inkTextureWanted(spec) {
+  return INK_TEXTURE_RE.test(
+    [spec && spec.technique, spec && spec.genre, spec && spec.palette].filter(Boolean).join(" ")
+  );
+}
+
+/* STRICTER than paletteIsLimited, deliberately: that one is about binding the subject to a tight
+   palette, this one is about collapsing everything onto one ink, which two-colour must never do. */
+function paletteIsMonochrome(palette) {
+  const p = String(palette || "").toLowerCase();
+  if (!p) return false;
+  if (/\b(two[- ]colou?r|duotone|2[- ]colou?r|three[- ]colou?r|tri[- ]colou?r)\b/.test(p)) return false;
+  return /\b(single[- ]colou?r|one[- ]colou?r|1[- ]colou?r|monochrom\w*|mono[- ]?tone|black\s+only|one\s+ink|single\s+ink)\b/.test(p);
+}
+
+/* Only a palette that NAMES a black/charcoal ink licenses deepening the colour. A single-colour design
+   in dusty rose is supposed to stay dusty rose; a black one that came back grey is not. */
+function darkInkNamed(palette) {
+  return /\b(black|charcoal|jet|noir|dark ink|ink black)\b/i.test(String(palette || ""));
+}
+
+function inkLum(r, g, b) {
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+function inkHueOf(r, g, b) {
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  if (!d) return { h: 0, s: 0 };
+  let h;
+  if (mx === r) h = ((g - b) / d) % 6;
+  else if (mx === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return { h, s: d / mx };
+}
+
+function inkHueGap(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+async function forceSolidInk(buf, palette) {
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const W = info.width, H = info.height, N = W * H;
+  const Lq = new Uint8Array(N);
+  const opaque = new Uint8Array(N);
+  const hist = new Uint32Array(256);
+  let inkCount = 0;
+
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    if (data[o + 3] < 128) continue;
+    opaque[i] = 1;
+    inkCount++;
+    const q = Math.min(255, Math.round(inkLum(data[o], data[o + 1], data[o + 2]) * 255));
+    Lq[i] = q;
+    hist[q]++;
+  }
+  if (!inkCount) return { buf, skipped: "nothing opaque" };
+
+  // the darkest fifth of the opaque pixels defines the ink colour
+  let cut = 255, seen = 0;
+  const want = inkCount * 0.2;
+  for (let v = 0; v < 256; v++) { seen += hist[v]; if (seen >= want) { cut = v; break; } }
+  let ir = 0, ig = 0, ib = 0, n = 0;
+  for (let i = 0; i < N; i++) {
+    if (!opaque[i] || Lq[i] > cut) continue;
+    const o = i * 4; ir += data[o]; ig += data[o + 1]; ib += data[o + 2]; n++;
+  }
+  if (!n) return { buf, skipped: "no ink pixels" };
+  let ink = [Math.round(ir / n), Math.round(ig / n), Math.round(ib / n)];
+  const hue = inkHueOf(ink[0], ink[1], ink[2]);
+
+  /* The ink itself can come back washed out — the whole design drawn in grey where the reference is
+     solid black. Deepen it, keeping its hue, but only when the palette actually named a black ink. */
+  let deepened = null;
+  if (darkInkNamed(palette)) {
+    const l = inkLum(ink[0], ink[1], ink[2]);
+    if (l > INK_TARGET_LUM) {
+      const k = INK_TARGET_LUM / Math.max(l, 0.001);
+      deepened = ink.slice();
+      ink = ink.map((c) => Math.max(0, Math.min(255, Math.round(c * k))));
+    }
+  }
+
+  // the pixels decide, not the palette
+  let foreign = 0;
+  for (let i = 0; i < N; i++) {
+    if (!opaque[i]) continue;
+    const o = i * 4;
+    const c = inkHueOf(data[o], data[o + 1], data[o + 2]);
+    if (c.s < 0.35) continue;
+    if (hue.s < 0.2 || inkHueGap(c.h, hue.h) > 60) foreign++;
+  }
+  const foreignRatio = foreign / inkCount;
+  if (foreignRatio > INK_FOREIGN_MAX) {
+    return { buf, skipped: `artwork is multi-coloured (${foreignRatio.toFixed(3)})` };
+  }
+
+  // pass 1 — every ink pixel to full strength; mid tones keep their coverage as alpha, so edges stay soft
+  let snapped = 0;
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    if (data[o + 3] === 0) continue;
+    const l = inkLum(data[o], data[o + 1], data[o + 2]);
+    if (l >= INK_LIGHT) continue;
+    const cover = l <= INK_DARK ? 1 : (INK_LIGHT - l) / (INK_LIGHT - INK_DARK);
+    data[o] = ink[0]; data[o + 1] = ink[1]; data[o + 2] = ink[2];
+    data[o + 3] = Math.round(data[o + 3] * cover);
+    snapped++;
+  }
+
+  // pass 2 — light pockets enclosed by ink are erosion or distress. Fill the small ones only.
+  const gap = new Uint8Array(N);
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    gap[i] = data[o + 3] < 128 || inkLum(data[o], data[o + 1], data[o + 2]) >= INK_LIGHT ? 1 : 0;
+  }
+  const outside = new Uint8Array(N);
+  const stack = [];
+  const push = (i) => { if (gap[i] && !outside[i]) { outside[i] = 1; stack.push(i); } };
+  for (let x = 0; x < W; x++) { push(x); push((H - 1) * W + x); }
+  for (let y = 0; y < H; y++) { push(y * W); push(y * W + W - 1); }
+  while (stack.length) {
+    const i = stack.pop();
+    const x = i % W, y = (i / W) | 0;
+    if (x > 0) push(i - 1);
+    if (x < W - 1) push(i + 1);
+    if (y > 0) push(i - W);
+    if (y < H - 1) push(i + W);
+  }
+
+  const maxPocket = Math.max(4, Math.round(inkCount * POCKET_MAX_FRAC));
+  const seenP = new Uint8Array(N);
+  const comps = [];
+  let filled = 0;
+  for (let i = 0; i < N; i++) {
+    if (!gap[i] || outside[i] || seenP[i]) continue;
+    const comp = [];
+    const q = [i];
+    seenP[i] = 1;
+    while (q.length) {
+      const j = q.pop();
+      comp.push(j);
+      const x = j % W, y = (j / W) | 0;
+      if (x > 0 && gap[j - 1] && !outside[j - 1] && !seenP[j - 1]) { seenP[j - 1] = 1; q.push(j - 1); }
+      if (x < W - 1 && gap[j + 1] && !outside[j + 1] && !seenP[j + 1]) { seenP[j + 1] = 1; q.push(j + 1); }
+      if (y > 0 && gap[j - W] && !outside[j - W] && !seenP[j - W]) { seenP[j - W] = 1; q.push(j - W); }
+      if (y < H - 1 && gap[j + W] && !outside[j + W] && !seenP[j + W]) { seenP[j + W] = 1; q.push(j + W); }
+    }
+    if (comp.length > maxPocket) continue;
+    comps.push(comp);
+    if (comps.length > POCKET_COUNT_MAX) break;
+  }
+
+  /* Hundreds of small holes spread through the strokes are not erosion — that is a halftone or a
+     distressed print, and filling them would flatten the design's whole character. Second guard on
+     top of inkTextureWanted(), because a texture can arrive without any word announcing it. */
+  const texture = comps.length > POCKET_COUNT_MAX;
+  if (!texture) {
+    for (const comp of comps) {
+      for (const j of comp) {
+        const o = j * 4;
+        data[o] = ink[0]; data[o + 1] = ink[1]; data[o + 2] = ink[2]; data[o + 3] = 255;
+        filled++;
+      }
+    }
+  }
+
+  const out = await sharp(data, { raw: { width: W, height: H, channels: 4 } }).png().toBuffer();
+  return { buf: out, ink, deepened, snapped, pockets: texture ? 0 : comps.length, filled, foreignRatio, texture };
+}
+
 /* Negates RGB and leaves alpha alone, so black artwork on transparency becomes WHITE artwork on
    transparency. Applied AFTER the cut-out — inverting first would turn the white background black
    and the removal would have nothing to key on. */
@@ -2858,7 +3122,7 @@ async function finishTextOnly(serverText, t0, preview) {
   };
 }
 
-async function finishArtwork(art, t0, preview, invert, serverText) {
+async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalette) {
   const elapsed = () => Date.now() - t0;
 
   let cutout = await fal("fal-ai/birefnet", { image_url: art });
@@ -2882,6 +3146,27 @@ async function finishArtwork(art, t0, preview, invert, serverText) {
       cutBuf = await stripLeftoverBackground(cutBuf);
     } catch (e) {
       console.warn("flood fill failed, keeping birefnet output:", e.message);
+    }
+  }
+
+  /* v61: full-strength ink, before the inversion so monolight still yields white artwork.
+     Every failure keeps the artwork exactly as it was — this must never cost him a design. */
+  if (solidInkPalette) {
+    try {
+      const r = await forceSolidInk(cutBuf, solidInkPalette);
+      if (r.skipped) {
+        console.log(`[reimagine] solid ink skipped: ${r.skipped}`);
+      } else {
+        cutBuf = r.buf;
+        console.log(
+          `[reimagine] solid ink: ink=${r.ink.join(",")}` +
+          `${r.deepened ? ` (deepened from ${r.deepened.join(",")})` : ""}` +
+          ` snapped=${r.snapped} pockets=${r.pockets} filled=${r.filled}` +
+          `${r.texture ? " (texture detected - holes left alone)" : ""}`
+        );
+      }
+    } catch (e) {
+      console.warn("[reimagine] solid ink failed, keeping the artwork as it is:", e.message);
     }
   }
 
@@ -3143,7 +3428,8 @@ export default async function handler(req, res) {
 
       const chosen = presetFor(specUsed);
       const out = await finishArtwork(
-        art, t0, isPreview, !!(chosen && chosen.invert), wanted
+        art, t0, isPreview, !!(chosen && chosen.invert), wanted,
+        paletteIsMonochrome(specUsed.palette) && !inkTextureWanted(specUsed) ? specUsed.palette : null
       );
 
       // charged only now, after a design actually exists
