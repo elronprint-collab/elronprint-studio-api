@@ -1,5 +1,26 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v65
+// v65 change: ONE CLAUSE BACK, and only one. This is the promised way of working after v61 shipped six
+// at once and cost four rounds of guessing.
+// First: the five refusals were never the code. The 00:19 run passed with the SAME v64 prompt, and the
+// only thing he changed was the text field. The reference reads "Go Outside / WORST CASE SCENARIO /
+// A Bear Kills You" and the analyser kept "Worst Case Scenario" verbatim in the new wording, because
+// that phrase IS the joke format. GATE 2 asks whether the artwork shows "any of the original wording,
+// or wording that is clearly the same phrase" — so it answered yes, correctly by its own definition and
+// wrongly for what he wants. Changing the wording to "Go Hiking / A Cougar Gets You" passed first try.
+// The defect this version addresses is the worst one in that passing result: the caption says A COUGAR
+// and the animal is still the reference's grizzly, same upright pose, same beer bottle. The subject
+// swap simply did not happen — the same additive/no-op habit that left the coffee cup beside its
+// replacement. v60's subject line ends with "Same size, same pose, same position in the layout", which
+// is three preservation demands and nothing at all insisting the original animal LEAVE.
+// So the one clause returning is the REPLACEMENT clause, and it is chosen deliberately: it is about
+// what must CHANGE, not what must be kept, so it cannot push the result toward the copy verdict that
+// GATE 2 refuses. Every other v61 clause stays out until this one is judged.
+// NOT touched, and next in line once this is judged: the sunset disc (sighting six, now with white
+// stripes inside it that the cut-out will tear into holes), the dropped final word "You" with two
+// orphan letters left floating, and the gate's shared-phrase false positive — the refusal message could
+// name the offending words instead of leaving him to guess, which would have saved five runs tonight.
 // api/reimagine.js — "עיצוב מחדש" v64
 // v64 change: I UNDO MY OWN PROMPT WORK. FOUR REFUSALS, NOTHING DELIVERED.
 // v60 delivered. v61, v62 and v63 each refused, and the fourth refusal came on an ILLUSTRATION-led
@@ -954,7 +975,15 @@ function editInstruction(spec) {
   );
 
   if (spec.subject) {
-    parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
+    parts.push(
+      `Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout. ` +
+      /* v65: the one clause returning from v61. It is about what CHANGES, so it cannot push the result
+         toward the copy verdict. The 00:19 run captioned a COUGAR and drew the reference's grizzly. */
+      `This is a REPLACEMENT and not an addition: the original character is gone from the design ` +
+      `completely and appears nowhere in it, not beside the new one and not behind it. What stands ` +
+      `there now is ${spec.subject} — a different creature, not the original one redrawn. If someone ` +
+      `who knows the reference would still call it the same character, the change has not been made.`
+    );
   }
   /* v58: NAME the supporting elements. "keep the same surrounding elements" was the only thing asking
      for them, and four reviewed runs came back with the main character alone on an empty canvas — the
