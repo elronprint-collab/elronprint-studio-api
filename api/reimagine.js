@@ -1,5 +1,22 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v66
+// v66 change: THE LETTERING CHECK COULD NOT SEE THE THING THAT WAS WRONG. One change, in the GATE.
+// v65 is confirmed: bear -> gray wolf, the first real subject swap on this reference. The clause stays.
+// What that run exposed is a hole in GATE 2, not a new prompt problem. The artwork read
+// "Go Hiking" arched across the top with "A Cougar Gets" crammed into the same arc and overlapping it,
+// and "A You    You" along the bottom — the last word drawn TWICE and the middle phrase displaced.
+// The gate's LETTERING question asks only whether "EVERY word is present and spelled exactly right".
+// Every word WAS present and spelled right; there was simply an extra one, in the wrong place. So the
+// check answered "ok", the retry it already owns never fired, and a broken design was delivered.
+// The previous run had the mirror-image version of the same blind spot: the final word "You" MISSING
+// and two orphan letters ("g", "ts") floating loose under the arc. Neither is a spelling fault either.
+// So the LETTERING question now also reports: a word drawn more than once, letters or fragments not
+// part of any word, and lettering that overlaps other lettering or the artwork badly enough to hurt
+// legibility. All three feed the retry that already exists (worth() scores lettering at 2, above a
+// print defect), and the existing behaviour on failure is unchanged: never a refusal, just the Hebrew
+// notice telling him to run it again. The edit instruction is NOT touched, so this cannot move the copy
+// verdict that cost five runs earlier tonight.
 // api/reimagine.js — "עיצוב מחדש" v65
 // v65 change: ONE CLAUSE BACK, and only one. This is the promised way of working after v61 shipped six
 // at once and cost four rounds of guessing.
@@ -1044,9 +1061,13 @@ async function editFromSpec(spec, reference, harden, defectNote, letteringNote, 
     prompt +=
       ` FIX THE LETTERING: the previous attempt had ${letteringNote}. Draw the words again, larger and ` +
       `cleaner, reading EXACTLY "${spec.text}" — every word present, every letter a real letter, ` +
-      "fully formed and filled solid. Keep the same lettering style and the same placement as the " +
-      "reference. Legibility matters more than decoration: if a flourish makes a letter ambiguous, " +
-      "drop the flourish.";
+      "fully formed and filled solid. " +
+      /* v66: the three faults the gate can now see all need saying, not just spelling. */
+      "The whole wording appears ONCE and once only: no word is drawn twice, and there are no loose " +
+      "letters left over from another word. Give each line its own space — no line may sit on top of " +
+      "another line or run into the artwork. " +
+      "Keep the same lettering style and the same placement as the reference. Legibility matters more " +
+      "than decoration: if a flourish makes a letter ambiguous, drop the flourish.";
   }
   if (defectNote) {
     prompt +=
@@ -1219,10 +1240,14 @@ Answer two questions about the artwork you are shown:
    published work, a recognisable copyrighted character, or an artist's signature or watermark?
    Answer with the specific reason, or the single word: none
 3. LETTERING — you will be told the wording this design is supposed to show.
-   If it is supposed to show wording, answer "ok" only when EVERY word is present and spelled exactly
-   right. Answer with the specific problem otherwise: a misspelling, a missing word, letters that are
-   not real letters, or wording that is illegible. If the design is supposed to have no wording and
-   has none, answer: ok
+   If it is supposed to show wording, answer "ok" only when ALL of these are true:
+   - every word is present and spelled exactly right
+   - NO word is drawn more than once anywhere on the canvas
+   - there are no loose letters or fragments that are not part of one of those words
+   - no piece of lettering overlaps other lettering, or the artwork, badly enough to be hard to read
+   Answer with the specific problem otherwise, naming the word: a misspelling, a missing word, a word
+   repeated twice, stray letters, or lettering that collides with other lettering.
+   If the design is supposed to have no wording and has none, answer: ok
 4. DEFECTS — this artwork will be printed on fabric, and anything white is cut away and becomes a hole.
    Report either of these, or the single word: none
    - a solid shape sitting BEHIND the subject: a disc, circle, sun, badge, panel or rounded blob,
