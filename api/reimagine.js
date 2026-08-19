@@ -1,6 +1,23 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v58
+// api/reimagine.js — "עיצוב מחדש" v59
+// v59 change: the last three defects on the list, then the tool goes to work.
+// 1. EVERY ANIMAL BECAME A MOOSE. Not a model failure — the analyser was told to pick "a DIFFERENT
+//    ANIMAL of similar size and appeal", and for a North American campfire scene that lands on the
+//    same two or three every time. It is now told the animal only has to fit the pose and the setting,
+//    given concrete less-obvious options, and asked for the choice a designer would reach for THIRD.
+// 2. WHITE FILLS TEAR HOLES. A variation drew the retro sunburst with WHITE stripes; white is the
+//    background here, so the cut-out opened gaps straight through the trees and the campfire. The
+//    edit instruction now says where the reference uses white, use a light tint of the design’s own
+//    colours — and says it covers stripes, rays and highlights, not just fills.
+// 3. THE BACKDROP DISC, SIGHTING FIVE. Banned in the negative since v19 and in the edit instruction
+//    since v51, and a striped sunburst appeared behind the moose anyway. Naming the exact shapes that
+//    keep turning up beats the category word, so disc/circle/sun/sunburst/striped semicircle/halo are
+//    now all named.
+// AND, because prompts alone have not held on 2 and 3 for five versions, the v57 output gate now also
+// reports these two as DEFECTS and fires the retry it already had. A defect is a quality problem, not
+// a legal one, so it is worth one retry and NEVER a refusal: if the second attempt is no better, the
+// first is delivered exactly as before. The gate costs nothing extra — it is the same single call.
 // v58 change: three defects from the two moose runs of 19 Aug, all read off real output.
 // 1. NAMED ELEMENTS WERE NOT DRAWN — fourth sighting. The spec listed "pine trees, camping tent,
 //    campfire, wilderness ground line" and the result was the animal alone on an empty canvas. The
@@ -839,19 +856,34 @@ function editInstruction(spec) {
     "If the reference is a photo of someone wearing the shirt, use ONLY the printed graphic and ignore " +
     "the wearer, the garment and the background completely. Output the artwork alone on a flat pure " +
     "white #FFFFFF background, complete, with wide empty margins on all four sides and nothing touching " +
-    "an edge. No panel, no badge, no disc, no frame behind it. Nothing in the artwork may be white or " +
-    "near-white — white is cut away, so use a mid-tone or deep shade instead."
+    "an edge. Nothing in the artwork may be white or near-white — white is cut away and leaves holes " +
+    "in the print, so where the reference uses white, use a light tint of the design's own colours " +
+    "instead. This applies to stripes, rays and highlights as much as to fills. " +
+    /* v59: sighting five. The ban has been in the negative since v19 and in this instruction since
+       v51, and a retro sunburst still appeared behind the moose. Naming the exact shapes that keep
+       turning up works better than the category word alone. */
+    "DRAW NO SHAPE BEHIND THE SUBJECT: no disc, no circle, no sun, no sunburst, no striped " +
+    "semicircle, no halo, no badge, no panel, no rounded blob, no frame. Even if the reference has " +
+    "one, leave it out — the elements float freely on an empty background."
   );
   return parts.join(" ");
 }
 
-async function editFromSpec(spec, reference, harden) {
+async function editFromSpec(spec, reference, harden, defectNote) {
   let prompt = editInstruction(spec);
   if (harden) {
     prompt +=
       " IMPORTANT: the previous attempt reproduced the original design almost unchanged. This is a NEW " +
       "design, not a copy. Do not reproduce ANY of the original wording, and do not draw any logo, " +
       "brand name, signature or watermark. The main character must visibly differ from the original.";
+  }
+  if (defectNote) {
+    prompt +=
+      ` FIX THIS: the previous attempt had ${defectNote}. Draw NO shape behind the subject — no disc, ` +
+      "no circle, no sun, no sunburst, no striped semicircle, no badge, no panel. The elements float " +
+      "freely on empty background. And nothing in the artwork may be white or near-white: white is cut " +
+      "away and leaves holes, so where you would use white, use a light tint of the design's own " +
+      "colours instead.";
   }
   console.log(
     `[reimagine] editing the reference (lettering drawn by the model: ${spec.text ? "yes" : "no text"}):`,
@@ -1015,9 +1047,15 @@ Answer two questions about the artwork you are shown:
 2. PROTECTED — does it display a company logo, brand name or wordmark, the title or author of a real
    published work, a recognisable copyrighted character, or an artist's signature or watermark?
    Answer with the specific reason, or the single word: none
+3. DEFECTS — this artwork will be printed on fabric, and anything white is cut away and becomes a hole.
+   Report either of these, or the single word: none
+   - a solid shape sitting BEHIND the subject: a disc, circle, sun, badge, panel or rounded blob,
+     including a retro sunburst or striped semicircle
+   - white or near-white areas INSIDE the artwork: white stripes, white rays, white fills, white gaps
+   Do not report the empty background around the artwork — only shapes and fills within the design.
 
 Answer with ONLY a JSON object, no prose, no markdown fences:
-{"reused":"yes" or "no","protected":"..." or "none"}`;
+{"reused":"yes" or "no","protected":"..." or "none","defects":"..." or "none"}`;
 
 async function inspectArtwork(artUrl, originalWording) {
   try {
@@ -1030,15 +1068,19 @@ async function inspectArtwork(artUrl, originalWording) {
       (originalWording ? JSON.stringify(originalWording) : "(no lettering)") +
       ". Check the artwork. JSON only.";
     const j = parseJsonish(await claudeVision(ART_INSPECT_SYSTEM, small.toString("base64"), "image/jpeg", ask, 200));
-    if (!j) return { reused: false, protected: "" };
+    if (!j) return { reused: false, protected: "", defects: "" };
     const reused = /^yes$/i.test(String(j.reused || "").trim());
     const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
-    console.log(`[reimagine] artwork gate: reused=${reused} protected=${JSON.stringify(prot.slice(0, 70))}`);
-    return { reused, protected: prot };
+    const defects = NONE_RE.test(String(j.defects || "")) ? "" : String(j.defects || "").trim();
+    console.log(
+      `[reimagine] artwork gate: reused=${reused} protected=${JSON.stringify(prot.slice(0, 70))}` +
+      ` defects=${JSON.stringify(defects.slice(0, 70))}`
+    );
+    return { reused, protected: prot, defects };
   } catch (e) {
     // a failed check must not block a legitimate design
     console.warn("[reimagine] artwork gate failed, delivering anyway:", e.message);
-    return { reused: false, protected: "" };
+    return { reused: false, protected: "", defects: "" };
   }
 }
 
@@ -1685,7 +1727,13 @@ KEEP FAITHFUL — describe what is actually there, in detail:
 CHANGE ONLY THESE TWO:
   subject -> the SAME KIND of character, a different individual. A woman stays a woman with the
              same age, build, pose and framing, but a different face and hair. An animal becomes
-             a DIFFERENT ANIMAL of similar size and appeal. Never change the category itself.
+             a DIFFERENT ANIMAL that fits the same scene and pose. Never change the category itself.
+             PICK SOMETHING LESS OBVIOUS. "Similar size and appeal" sends every North American
+             wilderness scene to the same two or three animals — a grizzly becomes a moose, then a
+             moose, then a moose. The animal only has to work in that pose and that setting, and it
+             does not have to be the same size: a fox, a raccoon, a wolf, a badger, a beaver, a goat,
+             an owl or a porcupine all stand in a campfire scene perfectly well. Choose the animal a
+             designer would reach for THIRD, not first, and never the most predictable substitute.
   text    -> different wording with the same intent and roughly the same length
 
 Return ONLY a JSON object, no prose, no markdown fences, with exactly these keys:
@@ -2954,13 +3002,23 @@ export default async function handler(req, res) {
            charged. A refusal he can read beats a print-ready copy of someone else's product. */
         if (art) {
           let verdict = await inspectArtwork(art, refWording);
-          if ((verdict.reused || verdict.protected) && Date.now() - t0 < 32000) {
-            console.warn("[reimagine] artwork came back as a copy - one hardened retry");
+          const isCopy = (v) => !!(v.reused || v.protected);
+          const worth = (v) => (v.reused ? 4 : 0) + (v.protected ? 4 : 0) + (v.defects ? 1 : 0);
+          /* v59: the retry now also fires on PRINT DEFECTS — a backdrop disc, or white fills that the
+             cut-out turns into holes. Both were seen on 19 Aug: a retro sunburst behind the moose, and
+             a variation whose white sunburst stripes tore holes through the trees and the campfire.
+             A defect is a quality problem, not a legal one, so it is worth one retry and never a
+             refusal: if the second attempt is no better, the first is delivered as before. */
+          if (worth(verdict) > 0 && Date.now() - t0 < 32000) {
+            console.warn(
+              "[reimagine] one hardened retry -",
+              isCopy(verdict) ? "artwork came back as a copy" : `print defect: ${verdict.defects}`
+            );
             try {
-              const art2 = await editFromSpec(specUsed, reference, true);
+              const art2 = await editFromSpec(specUsed, reference, true, verdict.defects);
               const v2 = await inspectArtwork(art2, refWording);
-              if (!v2.reused && !v2.protected) { art = art2; verdict = v2; }
-              else verdict = v2;
+              if (worth(v2) < worth(verdict)) { art = art2; verdict = v2; console.log("[reimagine] retry accepted"); }
+              else console.log("[reimagine] retry no better - keeping the first attempt");
             } catch (e) {
               console.error("[reimagine] hardened retry failed:", e.message);
             }
