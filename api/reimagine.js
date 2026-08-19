@@ -1,6 +1,22 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v59
+// api/reimagine.js — "עיצוב מחדש" v60
+// v60 change: THE MODEL DRAWS THE LETTERING NOW. His call, and the right one.
+// On these references the lettering IS the design — "LOVE" in outlined pink caps beside the bear,
+// "you" handwritten across it, "FOR NO REASON" below. Replacing all of that with black DejaVu Sans in
+// a band under the artwork produces something that reads as an illustration with a label stuck on,
+// never as a shirt, and he said plainly he cannot sell it. That server caption has been the ceiling on
+// this whole tool since v44, and no amount of fixing around it raises the ceiling.
+// The v54 window (14 characters, no script faces) was fitted to ONE good example and was sending work
+// to the server that the model actually handles: "Add Your Art Here" came back as clean filled script
+// at 16 characters, and "CRAZY about YOU for every REASON" was never even attempted. So the window is
+// gone — with a reference, the model always draws the words.
+// What makes that safe is that the v57 output gate now READS THE RESULT: every word present, every
+// word spelled right. Wrong spelling earns one hardened retry, and if it is still wrong the design is
+// delivered with a Hebrew notice telling him to run it again — never a silent shipment of gibberish,
+// and never a refusal, because the artwork may still be exactly what he wants.
+// Hebrew is the one hard exception and stays with the server: no image model draws it legibly.
+// EDIT_TEXT_MAX and FRAGILE_TYPE_RE are kept, unused, as the record of what v54 assumed.
 // v59 change: the last three defects on the list, then the tool goes to work.
 // 1. EVERY ANIMAL BECAME A MOOSE. Not a model failure — the analyser was told to pick "a DIFFERENT
 //    ANIMAL of similar size and appeal", and for a North American campfire scene that lands on the
@@ -445,13 +461,24 @@ const FRAGILE_TYPE_RE = new RegExp(
   "i"
 );
 
+/* v60: THE WINDOW IS OPEN. His call, and the right one: the server caption is a hard ceiling on the
+   whole tool. On these references the lettering IS the design — "LOVE" in outlined pink caps beside
+   the bear, "you" handwritten across it, "FOR NO REASON" below — and replacing all of that with black
+   DejaVu Sans under the artwork produces something that reads as an illustration with a label stuck
+   on, never as a shirt. He said plainly he cannot sell that.
+   The v54 rules (14 characters, no script faces) were fitted to ONE successful example and they were
+   sending work to the server that the model handles well: "Add Your Art Here" came back as clean
+   filled script at 16 characters, and "CRAZY about YOU for every REASON" was never even attempted.
+   So on the edit path the model now always draws the lettering. What makes that safe is that the v57
+   output gate reads the result: if the words come back misspelled or missing, one hardened retry, and
+   the run is delivered with a notice rather than silently shipping gibberish.
+   Hebrew is the one hard exception — no image model draws it legibly, so it stays with the server.
+   EDIT_TEXT_MAX and FRAGILE_TYPE_RE are kept, unused, as the record of what v54 assumed. */
 function editCanKeepLettering(spec) {
   if (!EDIT_LETTERING_ENABLED) return false;
   const t = String(spec.text || "").trim();
   if (!t) return true;                                   // nothing to draw either way
-  if (HEBREW_RE.test(t)) return false;                   // the model cannot draw Hebrew at all
-  if (t.replace(/\s+/g, "").length > EDIT_TEXT_MAX) return false;
-  if (FRAGILE_TYPE_RE.test(String(spec.typography || ""))) return false;
+  if (HEBREW_RE.test(t)) return false;                   // no image model draws Hebrew legibly
   return true;
 }
 
@@ -869,13 +896,21 @@ function editInstruction(spec) {
   return parts.join(" ");
 }
 
-async function editFromSpec(spec, reference, harden, defectNote) {
+async function editFromSpec(spec, reference, harden, defectNote, letteringNote) {
   let prompt = editInstruction(spec);
   if (harden) {
     prompt +=
       " IMPORTANT: the previous attempt reproduced the original design almost unchanged. This is a NEW " +
       "design, not a copy. Do not reproduce ANY of the original wording, and do not draw any logo, " +
       "brand name, signature or watermark. The main character must visibly differ from the original.";
+  }
+  if (letteringNote) {
+    prompt +=
+      ` FIX THE LETTERING: the previous attempt had ${letteringNote}. Draw the words again, larger and ` +
+      `cleaner, reading EXACTLY "${spec.text}" — every word present, every letter a real letter, ` +
+      "fully formed and filled solid. Keep the same lettering style and the same placement as the " +
+      "reference. Legibility matters more than decoration: if a flourish makes a letter ambiguous, " +
+      "drop the flourish.";
   }
   if (defectNote) {
     prompt +=
@@ -1047,7 +1082,12 @@ Answer two questions about the artwork you are shown:
 2. PROTECTED — does it display a company logo, brand name or wordmark, the title or author of a real
    published work, a recognisable copyrighted character, or an artist's signature or watermark?
    Answer with the specific reason, or the single word: none
-3. DEFECTS — this artwork will be printed on fabric, and anything white is cut away and becomes a hole.
+3. LETTERING — you will be told the wording this design is supposed to show.
+   If it is supposed to show wording, answer "ok" only when EVERY word is present and spelled exactly
+   right. Answer with the specific problem otherwise: a misspelling, a missing word, letters that are
+   not real letters, or wording that is illegible. If the design is supposed to have no wording and
+   has none, answer: ok
+4. DEFECTS — this artwork will be printed on fabric, and anything white is cut away and becomes a hole.
    Report either of these, or the single word: none
    - a solid shape sitting BEHIND the subject: a disc, circle, sun, badge, panel or rounded blob,
      including a retro sunburst or striped semicircle
@@ -1055,9 +1095,9 @@ Answer two questions about the artwork you are shown:
    Do not report the empty background around the artwork — only shapes and fills within the design.
 
 Answer with ONLY a JSON object, no prose, no markdown fences:
-{"reused":"yes" or "no","protected":"..." or "none","defects":"..." or "none"}`;
+{"reused":"yes" or "no","protected":"..." or "none","lettering":"ok" or "...","defects":"..." or "none"}`;
 
-async function inspectArtwork(artUrl, originalWording) {
+async function inspectArtwork(artUrl, originalWording, wantedWording) {
   try {
     const buf = Buffer.from(await (await fetch(artUrl)).arrayBuffer());
     // downscale before sending: the check is about words and marks, not fine detail
@@ -1066,21 +1106,25 @@ async function inspectArtwork(artUrl, originalWording) {
     const ask =
       "The original design displayed this wording: " +
       (originalWording ? JSON.stringify(originalWording) : "(no lettering)") +
+      ". This new design is supposed to show this wording: " +
+      (wantedWording ? JSON.stringify(wantedWording) : "(no wording at all)") +
       ". Check the artwork. JSON only.";
     const j = parseJsonish(await claudeVision(ART_INSPECT_SYSTEM, small.toString("base64"), "image/jpeg", ask, 200));
-    if (!j) return { reused: false, protected: "", defects: "" };
+    if (!j) return { reused: false, protected: "", defects: "", lettering: "" };
     const reused = /^yes$/i.test(String(j.reused || "").trim());
     const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
     const defects = NONE_RE.test(String(j.defects || "")) ? "" : String(j.defects || "").trim();
+    const lv = String(j.lettering || "ok").trim();
+    const lettering = /^(ok|none|fine|correct)$/i.test(lv) ? "" : lv;
     console.log(
       `[reimagine] artwork gate: reused=${reused} protected=${JSON.stringify(prot.slice(0, 70))}` +
-      ` defects=${JSON.stringify(defects.slice(0, 70))}`
+      ` lettering=${JSON.stringify(lettering.slice(0, 70))} defects=${JSON.stringify(defects.slice(0, 70))}`
     );
-    return { reused, protected: prot, defects };
+    return { reused, protected: prot, defects, lettering };
   } catch (e) {
     // a failed check must not block a legitimate design
     console.warn("[reimagine] artwork gate failed, delivering anyway:", e.message);
-    return { reused: false, protected: "", defects: "" };
+    return { reused: false, protected: "", defects: "", lettering: "" };
   }
 }
 
@@ -2970,6 +3014,7 @@ export default async function handler(req, res) {
       /* v57: ONE inspection of the reference — box, its wording, and whether it is someone else's
          property. Runs before a single fal credit is spent. */
       let refWording = "";
+      let letteringNotice = "";
       if (reference) {
         const info = await inspectReference(reference);
         if (info.protected) {
@@ -3001,9 +3046,14 @@ export default async function handler(req, res) {
            instruction hardened; if it comes back a copy again, nothing is delivered and nothing is
            charged. A refusal he can read beats a print-ready copy of someone else's product. */
         if (art) {
-          let verdict = await inspectArtwork(art, refWording);
+          // what the model was ASKED to letter — empty when the server owns the caption
+          const askedWording = wanted ? "" : (specUsed.text || "");
+          let verdict = await inspectArtwork(art, refWording, askedWording);
           const isCopy = (v) => !!(v.reused || v.protected);
-          const worth = (v) => (v.reused ? 4 : 0) + (v.protected ? 4 : 0) + (v.defects ? 1 : 0);
+          /* v60: bad lettering is now worth a retry too, and ranks above a backdrop shape — the type
+             is the design on these references, so a misspelling costs more than a stray disc. */
+          const worth = (v) =>
+            (v.reused ? 4 : 0) + (v.protected ? 4 : 0) + (v.lettering ? 2 : 0) + (v.defects ? 1 : 0);
           /* v59: the retry now also fires on PRINT DEFECTS — a backdrop disc, or white fills that the
              cut-out turns into holes. Both were seen on 19 Aug: a retro sunburst behind the moose, and
              a variation whose white sunburst stripes tore holes through the trees and the campfire.
@@ -3012,16 +3062,27 @@ export default async function handler(req, res) {
           if (worth(verdict) > 0 && Date.now() - t0 < 32000) {
             console.warn(
               "[reimagine] one hardened retry -",
-              isCopy(verdict) ? "artwork came back as a copy" : `print defect: ${verdict.defects}`
+              isCopy(verdict) ? "artwork came back as a copy"
+                : verdict.lettering ? `lettering: ${verdict.lettering}`
+                : `print defect: ${verdict.defects}`
             );
             try {
-              const art2 = await editFromSpec(specUsed, reference, true, verdict.defects);
-              const v2 = await inspectArtwork(art2, refWording);
+              const art2 = await editFromSpec(
+                specUsed, reference, isCopy(verdict), verdict.defects, verdict.lettering
+              );
+              const v2 = await inspectArtwork(art2, refWording, askedWording);
               if (worth(v2) < worth(verdict)) { art = art2; verdict = v2; console.log("[reimagine] retry accepted"); }
               else console.log("[reimagine] retry no better - keeping the first attempt");
             } catch (e) {
               console.error("[reimagine] hardened retry failed:", e.message);
             }
+          }
+          if (verdict.lettering) {
+            /* Never a refusal: the artwork may still be exactly what he wants, and he is the one who
+               decides. Say so plainly instead of shipping broken type as though it were intended. */
+            console.warn("[reimagine] lettering still wrong after the retry:", verdict.lettering);
+            letteringNotice =
+              "הכיתוב בעיצוב לא יצא מדויק. נסו ליצור שוב — בכל הרצה המנוע מצייר את האותיות מחדש.";
           }
           if (verdict.reused || verdict.protected) {
             console.warn("[reimagine] REFUSED - output is a copy:", verdict.protected || "original wording reused");
@@ -3104,7 +3165,7 @@ export default async function handler(req, res) {
         Object.assign(
           {
             spec: specUsed,
-            notice: prepared.notice,
+            notice: [prepared.notice, letteringNotice].filter(Boolean).join(" "),
             freeLeft: left.freeLeft,
             credits: left.credits,
             owner: !!owner,
