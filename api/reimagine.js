@@ -1,6 +1,20 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v57
+// api/reimagine.js — "עיצוב מחדש" v58
+// v58 change: three defects from the two moose runs of 19 Aug, all read off real output.
+// 1. NAMED ELEMENTS WERE NOT DRAWN — fourth sighting. The spec listed "pine trees, camping tent,
+//    campfire, wilderness ground line" and the result was the animal alone on an empty canvas. The
+//    only thing asking for them was "keeps the same surrounding elements" in the edit instruction —
+//    implied, never named. editInstruction now lists them explicitly and says none may be dropped.
+// 2. THE CAPTION LOST ITS SHAPE. These jokes are written "Go Hiking / Worst Case Scenario / A Moose
+//    Stomps You" and the source sets them as three lines; v56 treated "/" as an ordinary word and ran
+//    them into one sentence. A "/" is the author’s own line break, so it now decides the lines
+//    whenever the result still fits and stays legible.
+// 3. A STRAY BROWN FRAGMENT floated beside the animal’s leg in both runs — a piece of an element the
+//    model began and abandoned, which prints as an unexplained smudge. dropSpecks() removes
+//    disconnected fragments, and is deliberately timid: a design legitimately contains separate pieces
+//    (a campfire, a tent, stars), and deleting one of those is far worse than leaving a smudge, so a
+//    fragment goes only when it is tiny in absolute terms AND negligible against the main artwork.
 // v57 change: TWO GATES — ON THE REFERENCE, AND ON THE RESULT.
 // A run on 18 Aug returned the source design essentially untouched: the same arched "Go Outside", the
 // same "WORST CASE SCENARIO", the same bear, the same "A Bear Kills You" — a print-ready 300 DPI copy
@@ -797,6 +811,17 @@ function editInstruction(spec) {
   if (spec.subject) {
     parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
   }
+  /* v58: NAME the supporting elements. "keep the same surrounding elements" was the only thing asking
+     for them, and four reviewed runs came back with the main character alone on an empty canvas — the
+     pine trees, tent and campfire simply not drawn. The spec already lists them, so say them out loud;
+     a named thing is drawn far more reliably than an implied one. */
+  if (spec.elements && spec.elements.length) {
+    parts.push(
+      `KEEP ALL OF THESE, drawn in the same place and at the same size as in the reference: ` +
+      `${spec.elements.join(", ")}. Every one of them must appear in the new design. Do not drop any ` +
+      `of them and do not leave the character alone on an empty background.`
+    );
+  }
   if (spec.text) {
     parts.push(
       `THE LETTERING: keep every piece of lettering exactly where it is and exactly as it is drawn — ` +
@@ -1403,10 +1428,73 @@ async function stripLeftoverBackground(buf) {
     .toBuffer();
 }
 
+/* ---- v58: STRAY FRAGMENTS ----
+   Two runs came back with a small brown blob floating beside the animal's leg — a piece of an element
+   the model started and abandoned. On a transparent print file that prints as an unexplained smudge.
+   This drops disconnected fragments, and it is deliberately TIMID: a design legitimately contains
+   separate pieces (a campfire, a tent, stars, hatching), and deleting one of those would be far worse
+   than leaving a smudge. So a fragment goes only when it is tiny in absolute terms AND negligible
+   against the main artwork. Anything close to the line is kept. */
+const SPECK_MAX_FRAC_OF_CANVAS = 0.0012;   // under ~0.12% of the frame
+const SPECK_MAX_FRAC_OF_MAIN  = 0.02;      // and under 2% of the largest piece
+
+async function dropSpecks(buf) {
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+  const n = w * h;
+
+  const on = new Uint8Array(n);
+  for (let p = 0, i = 3; p < n; p++, i += ch) on[p] = data[i] > 128 ? 1 : 0;
+
+  const label = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  const sizes = [];
+  for (let s = 0; s < n; s++) {
+    if (!on[s] || label[s] !== -1) continue;
+    const id = sizes.length;
+    let sp = 0, count = 0;
+    label[s] = id; stack[sp++] = s;
+    while (sp > 0) {
+      const q = stack[--sp];
+      count++;
+      const x = q % w, y = (q / w) | 0;
+      if (x > 0     && on[q - 1] && label[q - 1] === -1) { label[q - 1] = id; stack[sp++] = q - 1; }
+      if (x < w - 1 && on[q + 1] && label[q + 1] === -1) { label[q + 1] = id; stack[sp++] = q + 1; }
+      if (y > 0     && on[q - w] && label[q - w] === -1) { label[q - w] = id; stack[sp++] = q - w; }
+      if (y < h - 1 && on[q + w] && label[q + w] === -1) { label[q + w] = id; stack[sp++] = q + w; }
+    }
+    sizes.push(count);
+  }
+  if (sizes.length < 2) return buf;
+
+  const main = Math.max(...sizes);
+  const limit = Math.min(n * SPECK_MAX_FRAC_OF_CANVAS, main * SPECK_MAX_FRAC_OF_MAIN);
+  const doomed = sizes.map((c) => c < limit);
+  const dropped = doomed.reduce((a, d, i) => a + (d ? sizes[i] : 0), 0);
+  const count = doomed.filter(Boolean).length;
+  if (!count) {
+    console.log(`[reimagine] specks: ${sizes.length} pieces, none small enough to drop`);
+    return buf;
+  }
+
+  for (let p = 0; p < n; p++) if (label[p] >= 0 && doomed[label[p]]) data[p * ch + 3] = 0;
+  console.log(
+    `[reimagine] specks: dropped ${count} of ${sizes.length} pieces (${dropped}px, ` +
+    `${((dropped / main) * 100).toFixed(2)}% of the main artwork)`
+  );
+  return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
+}
+
 /* ---------------- print canvas ---------------- */
 async function toPrintCanvas(buf) {
   const stats = await sharp(buf).ensureAlpha().stats();
   if (stats.isOpaque) console.warn("[reimagine] WARNING: image has no transparency");
+
+  try {
+    buf = await dropSpecks(buf);
+  } catch (e) {
+    console.warn("[reimagine] speck removal failed, keeping the artwork as it is:", e.message);
+  }
 
   buf = await cleanEdges(buf);
 
@@ -2483,6 +2571,18 @@ const TEXT_MIN_SIZE = 24;
 /* Splits into n lines by character count with the word order preserved. The v44 version split any
    line over 18 characters into its individual words and then kept the first three, which silently
    threw away the rest of the caption. */
+/* v58: a "/" in the wording is the author's own line break — these captions read
+   "Go Hiking / Worst Case Scenario / A Moose Stomps You" and the source design sets them as three
+   separate lines. v56 treated "/" as just another word, so the caption ran them together into one
+   sentence and the joke lost its shape. When slashes are present they decide the lines. */
+function splitOnSlashes(text) {
+  const parts = String(text || "")
+    .split("/")
+    .map((s) => s.trim().replace(/\s+/g, " "))
+    .filter(Boolean);
+  return parts.length > 1 ? parts : null;
+}
+
 function splitInto(words, n) {
   if (n <= 1) return [words.join(" ")];
   const target = words.join(" ").length / n;
@@ -2505,6 +2605,21 @@ function splitInto(words, n) {
 function layoutText(font, text, boxW, boxH) {
   const words = String(text || "").trim().split(/\s+/).filter(Boolean);
   if (!words.length) return null;
+
+  // v58: explicit "/" breaks win, as long as they fit and stay legible
+  const explicit = splitOnSlashes(text);
+  if (explicit && explicit.length <= TEXT_MAX_LINES) {
+    let byWidth = Infinity;
+    for (const l of explicit) {
+      const unit = runWidth(font, glyphsFor(font, l), 1, TEXT_TRACK);
+      byWidth = Math.min(byWidth, boxW / Math.max(unit, 0.001));
+    }
+    const size = Math.floor(Math.min(byWidth, boxH / (explicit.length * TEXT_LINE_H)));
+    if (size >= TEXT_MIN_SIZE) {
+      console.log(`[reimagine] caption: honouring ${explicit.length} slash-separated lines`);
+      return { lines: explicit, size };
+    }
+  }
 
   let best = null;
   for (let n = 1; n <= Math.min(TEXT_MAX_LINES, words.length); n++) {
