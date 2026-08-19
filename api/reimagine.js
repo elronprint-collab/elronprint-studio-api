@@ -1,5 +1,35 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v64
+// v64 change: I UNDO MY OWN PROMPT WORK. FOUR REFUSALS, NOTHING DELIVERED.
+// v60 delivered. v61, v62 and v63 each refused, and the fourth refusal came on an ILLUSTRATION-led
+// reference (the bear), which kills the theory that this was about text-heavy designs.
+// Counting what my own edits did to editInstruction, the answer is plain. v61 added: the palette
+// verbatim, a one-ink clause, the technique verbatim, a layout lock, "same size, same pose, same
+// position" on the subject, and "the SAME STROKE WEIGHT as the reference" on the lettering. v63 added
+// "exactly as many separate pieces of lettering as the reference has, in the same places". Stacked on
+// clauses that already said keep the typeface, weight, curve, size, colour and position, and KEEP ALL
+// of the elements in the same place at the same size, the prompt now says: keep the colours, keep the
+// technique, keep the arrangement, keep every element, keep the typography — change the character and
+// the letters. That is a description of a copy, and the gate is right to call it one.
+// v62 softened ONE of those clauses and left five in place, which is why it did not help.
+// So the prompt goes back to exactly what it was in v60, which is the last version known to deliver:
+//   - the whole v61 style-lock block is gone (palette, one-ink, technique, layout)
+//   - the subject clause goes back to the v60 wording
+//   - the lettering clause goes back to the v60 wording (no stroke-weight demand, no word ban, no
+//     lettering-count clause)
+// KEPT, because neither can make a result MORE like the original:
+//   - forceSolidInk(), the deterministic full-strength ink pass. This is the one thing that actually
+//     answers "הכיתוב חסר צבע", and it runs after the gate has already passed, so it can never cause a
+//     refusal. It has still never run: every attempt since it shipped was refused before delivery.
+//   - the hardened RETRY quoting the original wording (v63), which only fires after the gate has
+//     already caught a copy.
+// WHAT THIS COSTS, said plainly rather than hidden: the palette and technique are no longer stated to
+// the model, so the grey-shaded-cup complaint is back to being asked for rather than enforced, and
+// thin strokes stay thin. forceSolidInk still fixes the colour strength and the eroded holes on
+// single-ink designs.
+// HOW TO ADD ANY OF IT BACK: one clause at a time, testing after each. That is the only way to learn
+// which one trips the gate, and it is what I should have done instead of shipping six clauses at once.
 // api/reimagine.js — "עיצוב מחדש" v63
 // v63 change: THE OLD WORDS WERE NEVER NAMED TO THE MODEL. Read off a real log, not guessed.
 // Three refusals in a row on the "But First Coffee" reference. The 23:54 log settles what happened:
@@ -916,48 +946,15 @@ async function generate(prompt, style, dataUri) {
    specific instruction in the prompt, because keeping the reference's own lettering is the whole
    point of this version. The model is copying letterforms it can see, not inventing them, so it is
    told to treat the typography as something to PRESERVE and only the letters as something to change. */
-function editInstruction(spec, refWording) {
+function editInstruction(spec) {
   const parts = [];
   parts.push(
     "This is an existing t-shirt design. Redraw it as a NEW design that keeps the same drawing style, " +
     "the same colours, the same layout and the same surrounding elements, changing only what I name below."
   );
 
-  /* v61: THE STYLE LOCK. "the same colours, the same drawing style" is a gesture, and a reviewed pair
-     showed the model ignoring it completely on a spec that described the reference perfectly. The
-     palette and the technique are the two fields that were violated, so they are now stated in the
-     model's face instead of left to its eyes. Kept SHORT and limited to these two fields plus layout:
-     the v51 lesson was that re-describing everything is what produced the contradictions. */
-  if (spec.palette) {
-    parts.push(`THE COLOURS ARE: ${spec.palette}. Use these and nothing else — no extra colours, no greys.`);
-  }
-  if (paletteIsMonochrome(spec.palette)) {
-    parts.push(
-      "This is a ONE-INK print. Every shape and every letter is filled with that single ink at full " +
-      "strength — no grey, no tints, no shading, no gradients, no texture and no distress inside any " +
-      "shape. Anything not printed is left empty, never filled with a paler version of the ink."
-    );
-  }
-  if (spec.technique) {
-    parts.push(`THE TECHNIQUE IS: ${spec.technique}. Do not render it more realistically or more softly than that.`);
-  }
-  /* v62: this used to read "keep the existing layout exactly ... the same overall shape and
-     proportions ... the same margins", and stacked on the lettering clause below it read as "preserve
-     everything" — two runs came back carrying the reference's own words and were refused by the
-     copyright gate. It means ARRANGEMENT, so it now says arrangement, and carries its own limit. */
-  parts.push(
-    "Keep the ARRANGEMENT of the design: the same balance and the same relative sizes, each thing in " +
-    "roughly the same place as in the reference, and the same margins. This is about WHERE things sit, " +
-    "not what they are — the character and the words are what change, and the finished design must be " +
-    "recognisably a NEW design rather than a copy of the reference."
-  );
-
   if (spec.subject) {
-    parts.push(
-      `Replace the main character with: ${spec.subject}. Same size, same pose, same position in the ` +
-      `layout. This is a REPLACEMENT, not an addition: the original character is removed from the ` +
-      `design completely and must not appear anywhere alongside the new one.`
-    );
+    parts.push(`Replace the main character with: ${spec.subject}. Same size, same pose, same position in the layout.`);
   }
   /* v58: NAME the supporting elements. "keep the same surrounding elements" was the only thing asking
      for them, and four reviewed runs came back with the main character alone on an empty canvas — the
@@ -978,28 +975,7 @@ function editInstruction(spec, refWording) {
       `LETTERS are shown: the words now read exactly "${spec.text}", spelled letter for letter as written ` +
       `here. If the design has several separate lines of lettering, distribute these words across them in ` +
       `the same order, keeping each line's own style. Every letter is fully formed, closed and legible — ` +
-      `no invented letters, no half-formed shapes. ` +
-      /* v62: the counterweight. Everything around this clause asks the model to preserve, so the one
-         thing that must NOT be preserved has to be said as forcefully as the rest. */
-      /* v63: the ban is only enforceable if the model is told WHAT to leave out. GATE 1 already read
-         the reference's wording into refWording; until now it was used to judge the result and never
-         to prevent it. */
-      (refWording
-        ? `The reference currently reads ${JSON.stringify(refWording)}. THOSE WORDS ARE BEING REPLACED: ` +
-          `they must not appear anywhere in the new design — not in full, not in part, not faintly, not ` +
-          `in a smaller second line. Wherever they appear in the reference, the new words stand instead. `
-        : `None of the reference's original words may appear anywhere in the new design. `) +
-      `The typeface is copied; the words are not. ` +
-      /* v63: the additive habit again — the log shows the OLD and the NEW wording both on the canvas,
-         the same fault as the reference's cup surviving beside its replacement. */
-      `The new design has exactly as many separate pieces of lettering as the reference has, in the ` +
-      `same places: you are changing the letters inside them, never adding another block of lettering. ` +
-      /* v61: the reviewed pair came back with script thinner than the reference and a serif eroded
-         with white speckle through the strokes. Weight and fill are part of the typeface, so they are
-         named as explicitly as the typeface itself. */
-      `Draw the lettering at the SAME STROKE WEIGHT as the reference — just as thick and just as heavy, ` +
-      `never thinner or lighter — and fill every letter 100% solid in the design's own ink: no texture, ` +
-      `no distress, no grain, no speckle, no erosion inside the strokes, no hollow or outline-only letters.`
+      `no invented letters, no half-formed shapes, no leftover words from the original design.`
     );
   } else {
     parts.push("Remove all wording. No text, no letters anywhere in the artwork.");
@@ -1022,7 +998,7 @@ function editInstruction(spec, refWording) {
 }
 
 async function editFromSpec(spec, reference, harden, defectNote, letteringNote, refWording) {
-  let prompt = editInstruction(spec, refWording);
+  let prompt = editInstruction(spec);
   if (harden) {
     prompt +=
       " IMPORTANT: the previous attempt reproduced the original design almost unchanged. This is a NEW " +
