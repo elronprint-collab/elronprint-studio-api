@@ -1,6 +1,22 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
-// api/reimagine.js — "עיצוב מחדש" v56
+// api/reimagine.js — "עיצוב מחדש" v57
+// v57 change: TWO GATES — ON THE REFERENCE, AND ON THE RESULT.
+// A run on 18 Aug returned the source design essentially untouched: the same arched "Go Outside", the
+// same "WORST CASE SCENARIO", the same bear, the same "A Bear Kills You" — a print-ready 300 DPI copy
+// of another shop’s product with our new caption pasted underneath. Minutes earlier the SAME reference
+// had produced a good, original result. That is the nature of an edit model told to keep everything and
+// change a little: sometimes it changes nothing, and no prompt wording makes that impossible.
+// Every other defect in this file is a quality problem. This one is a file he cannot legally hold, so
+// it is the only one enforced in code rather than asked for in a prompt:
+//   GATE 1, on the reference, before a single fal credit is spent — one vision call now answers all
+//   three questions at once (graphic box, the wording it carries, whether it is someone else’s
+//   property), so it costs no more than the box call v55 already made. Brand marks, real book/film
+//   titles, copyrighted characters, artist signatures and photos of identifiable people are refused.
+//   GATE 2, on the produced artwork, before it is delivered — does it still carry the original wording,
+//   or any logo or signature? One hardened retry, and if it is still a copy the run is refused and NOT
+//   charged. A refusal he can read beats a print-ready copy of someone else’s product.
+// Both gates FAIL OPEN: an unreadable answer, a 500 or a network error never blocks a legitimate run.
 // v56 change: THE CAPTION BUG, FOUND AND FIXED AT ITS ROOT. It was never the line layout.
 // opentype.js rounds path coordinates with string arithmetic:
 //     roundDecimal(f, p) => +(Math.round(f + "e+" + p) + "e-" + p)
@@ -804,8 +820,14 @@ function editInstruction(spec) {
   return parts.join(" ");
 }
 
-async function editFromSpec(spec, reference) {
-  const prompt = editInstruction(spec);
+async function editFromSpec(spec, reference, harden) {
+  let prompt = editInstruction(spec);
+  if (harden) {
+    prompt +=
+      " IMPORTANT: the previous attempt reproduced the original design almost unchanged. This is a NEW " +
+      "design, not a copy. Do not reproduce ANY of the original wording, and do not draw any logo, " +
+      "brand name, signature or watermark. The main character must visibly differ from the original.";
+  }
   console.log(
     `[reimagine] editing the reference (lettering drawn by the model: ${spec.text ? "yes" : "no text"}):`,
     prompt.slice(0, 220)
@@ -837,28 +859,32 @@ function referenceFrom(body, spec) {
    so any extra key is dropped (that is the same reason `ref` never round-tripped). So it is fetched
    here, with one small vision call. ~1-2s and a few tokens per run, only when the reference is a fresh
    upload, and every failure falls back to using the full image exactly as before. */
-const GRAPHIC_BOX_SYSTEM = `You locate the printed graphic inside a t-shirt image.
+const REF_INSPECT_SYSTEM = `You inspect a t-shirt design before it is remixed. Answer three questions.
 
 The image is either a standalone artwork file, or a photo/mockup of someone WEARING a printed garment.
 
-If a garment or a wearer is present, answer with the bounding box of the PRINTED GRAPHIC ONLY — the
-artwork on the fabric. Not the shirt, not the person, not their hands, hair, jewellery or jeans, not
-the room. Draw the box tightly around the artwork, including all of its lettering.
+1. GRAPHIC — where is the printed artwork?
+   If a garment or wearer is present, give the bounding box of the PRINTED GRAPHIC ONLY: not the shirt,
+   not the person, not their hands, hair, jewellery or jeans, not the room. Draw it tightly around the
+   artwork, including all of its lettering. If the image is already just the artwork, answer: full
 
-If the image is already just the artwork with no garment and no wearer, answer: full
+2. WORDING — every word visible in the artwork, exactly as printed, separated by " | ".
+   If there is no lettering, answer: none
 
-Answer with ONE line and nothing else, in one of these two forms:
-GRAPHIC: x0,y0,x1,y1
-GRAPHIC: full
+3. PROTECTED — is any part of this artwork someone else's property? Answer with the specific reason, or
+   the single word: none
+   Say yes for: a company logo, brand name or wordmark (Nike, adidas, Puma, Disney, a swoosh, a trefoil);
+   the title or author of a real published book, film, song or band; a recognisable copyrighted character;
+   an artist's signature, watermark or studio mark; a photograph of a real identifiable person.
+   Say none for: generic animals, objects, scenery, ordinary slogans and made-up phrases.
 
-where each value is a whole number 0-100, a percentage of the image width or height; x0,y0 is the
-top-left corner and x1,y1 the bottom-right.`;
+Answer with ONLY a JSON object, no prose, no markdown fences:
+{"graphic":"x0,y0,x1,y1" or "full","wording":"..." or "none","protected":"..." or "none"}
 
-async function graphicBox(dataUri) {
-  const m = String(dataUri || "").match(/^data:(image\/\w+);base64,(.+)$/);
-  if (!m) return null;
-  const [, mediaType, base64Data] = m;
+where the box values are whole numbers 0-100, percentages of the image width or height, x0,y0 top-left
+and x1,y1 bottom-right.`;
 
+async function claudeVision(system, base64Data, mediaType, ask, maxTokens) {
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -868,55 +894,136 @@ async function graphicBox(dataUri) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 32,
-      system: GRAPHIC_BOX_SYSTEM,
+      max_tokens: maxTokens || 200,
+      system,
       messages: [{
         role: "user",
         content: [
           { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Where is the printed graphic? One line only." },
+          { type: "text", text: ask },
         ],
       }],
     }),
   });
   if (!r.ok) {
-    console.error("[reimagine] graphic box call failed:", r.status);
+    console.error("[reimagine] vision call failed:", r.status);
     return null;
   }
   const data = await r.json();
-  const raw = (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+  return (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+}
 
-  if (/GRAPHIC:\s*full/i.test(raw)) {
-    console.log("[reimagine] graphic box: full image (no garment detected)");
-    return null;
-  }
-  const nums = raw.match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
-  if (!nums) {
-    console.warn("[reimagine] graphic box: unreadable answer, using the full reference:", raw.slice(0, 80));
-    return null;
-  }
+function parseJsonish(raw) {
+  if (!raw) return null;
+  const s = raw.replace(/```json/gi, "").replace(/```/g, "");
+  const a = s.indexOf("{"), b = s.lastIndexOf("}");
+  if (a === -1 || b === -1) return null;
+  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
+}
+
+function parseBox(v) {
+  if (!v || /^full$/i.test(String(v).trim())) return null;
+  const nums = String(v).match(/(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+  if (!nums) return null;
   const [x0, y0, x1, y1] = nums.slice(1, 5).map(Number);
-  if (!(x1 > x0 && y1 > y0 && x1 <= 100 && y1 <= 100)) {
-    console.warn(`[reimagine] graphic box: implausible (${x0},${y0},${x1},${y1}), using the full reference`);
-    return null;
-  }
-  console.log(`[reimagine] graphic box: ${x0},${y0},${x1},${y1}`);
+  if (!(x1 > x0 && y1 > y0 && x1 <= 100 && y1 <= 100)) return null;
   return { x0, y0, x1, y1 };
 }
 
-/* Crops the reference down to the printed graphic when there is a wearer to remove. Never throws:
-   on any failure the original reference is returned and behaviour is exactly as before. */
-async function cropReferenceToGraphic(reference) {
-  if (!/^data:image\//.test(String(reference || ""))) return reference;   // already a parked URL
+const NONE_RE = /^\s*(none|no|n\/a|-)\s*$/i;
+
+/* v57: ONE call on the reference answers all three questions, so this costs no more than the single
+   box call v55 already made. Returns {box, wording, protected} and never throws — on any failure the
+   run proceeds exactly as it would have before, with no crop and no gate. */
+async function inspectReference(dataUri) {
+  const m = String(dataUri || "").match(/^data:(image\/\w+);base64,(.+)$/);
+  if (!m) return { box: null, wording: "", protected: "" };
   try {
-    const box = await graphicBox(reference);
-    if (!box) return reference;
+    const raw = await claudeVision(REF_INSPECT_SYSTEM, m[2], m[1], "Inspect this design. JSON only.", 300);
+    const j = parseJsonish(raw);
+    if (!j) {
+      console.warn("[reimagine] reference inspect unreadable, continuing without it:", String(raw).slice(0, 90));
+      return { box: null, wording: "", protected: "" };
+    }
+    const box = parseBox(j.graphic);
+    const wording = NONE_RE.test(String(j.wording || "")) ? "" : String(j.wording || "").trim();
+    const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
+    console.log(
+      `[reimagine] reference: box=${box ? `${box.x0},${box.y0},${box.x1},${box.y1}` : "full"}` +
+      ` wording=${JSON.stringify(wording.slice(0, 70))} protected=${JSON.stringify(prot.slice(0, 70))}`
+    );
+    return { box, wording, protected: prot };
+  } catch (e) {
+    console.warn("[reimagine] reference inspect failed, continuing without it:", e.message);
+    return { box: null, wording: "", protected: "" };
+  }
+}
+
+/* Crops the wearer away. Never throws: on any failure the original reference is returned. */
+async function cropReferenceToGraphic(reference, box) {
+  if (!box) return reference;
+  if (!/^data:image\//.test(String(reference || ""))) return reference;
+  try {
     return await cropToGraphic(reference, box);
   } catch (e) {
     console.warn("[reimagine] graphic crop failed, using the full reference:", e.message);
     return reference;
   }
 }
+
+/* ---- v57: THE OUTPUT GATE ----
+   A run on 18 Aug returned the reference design essentially unchanged: the same arched "Go Outside",
+   the same "WORST CASE SCENARIO", the same bear, the same "A Bear Kills You" — a print-ready 300 DPI
+   copy of another shop's product, with our new caption pasted underneath it. Every other defect in
+   this file is a quality problem; that one is a file he cannot legally hold, and it came from the same
+   reference that had produced a good result minutes earlier. An edit model asked to "keep everything
+   and change a little" will sometimes change nothing, and no prompt wording makes that impossible.
+   So the OUTPUT is checked before it is delivered, not just the input. */
+const ART_INSPECT_SYSTEM = `You are checking a newly generated t-shirt artwork before it is delivered.
+
+You will be told which words appeared on the ORIGINAL design this was derived from.
+
+Answer two questions about the artwork you are shown:
+
+1. REUSED — does it display any of the original wording, or wording that is clearly the same phrase?
+   Answer yes or no. Ignore small differences in case or punctuation.
+2. PROTECTED — does it display a company logo, brand name or wordmark, the title or author of a real
+   published work, a recognisable copyrighted character, or an artist's signature or watermark?
+   Answer with the specific reason, or the single word: none
+
+Answer with ONLY a JSON object, no prose, no markdown fences:
+{"reused":"yes" or "no","protected":"..." or "none"}`;
+
+async function inspectArtwork(artUrl, originalWording) {
+  try {
+    const buf = Buffer.from(await (await fetch(artUrl)).arrayBuffer());
+    // downscale before sending: the check is about words and marks, not fine detail
+    const small = await sharp(buf).flatten({ background: "#ffffff" })
+      .resize(768, 768, { fit: "inside" }).jpeg({ quality: 82 }).toBuffer();
+    const ask =
+      "The original design displayed this wording: " +
+      (originalWording ? JSON.stringify(originalWording) : "(no lettering)") +
+      ". Check the artwork. JSON only.";
+    const j = parseJsonish(await claudeVision(ART_INSPECT_SYSTEM, small.toString("base64"), "image/jpeg", ask, 200));
+    if (!j) return { reused: false, protected: "" };
+    const reused = /^yes$/i.test(String(j.reused || "").trim());
+    const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
+    console.log(`[reimagine] artwork gate: reused=${reused} protected=${JSON.stringify(prot.slice(0, 70))}`);
+    return { reused, protected: prot };
+  } catch (e) {
+    // a failed check must not block a legitimate design
+    console.warn("[reimagine] artwork gate failed, delivering anyway:", e.message);
+    return { reused: false, protected: "" };
+  }
+}
+
+const IP_ERROR =
+  "העיצוב שהועלה כולל סימן מסחרי, לוגו, דמות מוגנת או חתימת אמן. " +
+  "הכלי לא מייצר עיצובים על בסיס חומר כזה — נסו עיצוב מקור אחר.";
+
+const COPY_ERROR =
+  "התוצאה יצאה קרובה מדי לעיצוב המקור וכללה את הניסוח המקורי, ולכן היא לא נמסרה. " +
+  "נסו שוב, או שנו את הנושא והטקסט בטופס כדי להרחיק את התוצאה מהמקור.";
 
 /* ---------------- quality control ---------------- */
 async function inspect(url) {
@@ -2697,9 +2804,17 @@ export default async function handler(req, res) {
         fluxPrepared = true;
       };
 
-      /* v54: decide per design who draws the words. Outside the window the edit path is fed
-         exactly what v52 fed it — lettering scrubbed out, server caption composited afterwards. */
+      /* v57: ONE inspection of the reference — box, its wording, and whether it is someone else's
+         property. Runs before a single fal credit is spent. */
+      let refWording = "";
       if (reference) {
+        const info = await inspectReference(reference);
+        if (info.protected) {
+          console.warn("[reimagine] REFUSED - protected material in the reference:", info.protected);
+          return res.status(422).json({ error: IP_ERROR, blocked: "ip", reason: info.protected });
+        }
+        refWording = info.wording;
+
         const keep = editCanKeepLettering(prepared.spec);
         console.log(
           `[reimagine] lettering: ${keep ? "MODEL keeps the design's own type" : "SERVER draws it"}` +
@@ -2708,7 +2823,7 @@ export default async function handler(req, res) {
         if (!keep) prepareFluxOnce();
 
         // v55: strip the wearer BEFORE the edit model sees anything. Words never won this argument.
-        reference = await cropReferenceToGraphic(reference);
+        reference = await cropReferenceToGraphic(reference, info.box);
       }
 
       if (reference) {
@@ -2716,6 +2831,33 @@ export default async function handler(req, res) {
           art = await editFromSpec(specUsed, reference);
         } catch (e) {
           console.error("[reimagine] edit path failed, falling back to flux:", e.message);
+        }
+
+        /* v57: THE OUTPUT GATE. An edit model asked to keep everything and change a little will
+           sometimes change nothing, and hand back the source design intact. One retry with the
+           instruction hardened; if it comes back a copy again, nothing is delivered and nothing is
+           charged. A refusal he can read beats a print-ready copy of someone else's product. */
+        if (art) {
+          let verdict = await inspectArtwork(art, refWording);
+          if ((verdict.reused || verdict.protected) && Date.now() - t0 < 32000) {
+            console.warn("[reimagine] artwork came back as a copy - one hardened retry");
+            try {
+              const art2 = await editFromSpec(specUsed, reference, true);
+              const v2 = await inspectArtwork(art2, refWording);
+              if (!v2.reused && !v2.protected) { art = art2; verdict = v2; }
+              else verdict = v2;
+            } catch (e) {
+              console.error("[reimagine] hardened retry failed:", e.message);
+            }
+          }
+          if (verdict.reused || verdict.protected) {
+            console.warn("[reimagine] REFUSED - output is a copy:", verdict.protected || "original wording reused");
+            return res.status(422).json({
+              error: verdict.protected ? IP_ERROR : COPY_ERROR,
+              blocked: verdict.protected ? "ip" : "copy",
+              reason: verdict.protected || "original wording reused",
+            });
+          }
         }
       } else {
         console.warn("[reimagine] no reference available - falling back to flux");
