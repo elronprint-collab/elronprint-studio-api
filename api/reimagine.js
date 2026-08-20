@@ -1,5 +1,27 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v70
+// v70 change: THE SERVER DRAWS THE LETTERING AGAIN. His decision, taken with the trade-off in front
+// of him, and it closes a failure the gate could not.
+// The 07:46 run asked for "Always Need Tea" and the model drew "A", "N ed" and "Tea" — the first two
+// words shredded. The artwork itself was excellent: solid black, clean heart, no fragments. And the
+// gate passed it: no notice reached him, so the LETTERING check answered "ok" on lettering that is
+// plainly broken. That is the THIRD time broken type has walked through that check (07:35 fragments,
+// 00:27 duplicated word, now this), and it is why v70 does not tighten it again. A vision model
+// verifying letterforms is not a reliable foundation, and no amount of rewording that question makes
+// it one.
+// The server path draws the caption with opentype.js from a real font file. Letters drawn from glyph
+// outlines by code CANNOT come out malformed — not sometimes, not on a bad seed. The cost, which he
+// accepted: the type is the server's font under the artwork, not the reference's brush script woven
+// through it. On lettering-led designs like this one that trade is worth it; on illustration-led ones
+// like the bear, the model's script was genuinely good and this is a loss.
+// Two flags do it, and BOTH are needed — flipping only the first leaves short strings with the model,
+// which is exactly the case that failed here ("Always Need Tea" is 13 characters, under SERVER_TEXT_MAX):
+//   EDIT_LETTERING_ENABLED = false  -> the edit path stops keeping the design's own type
+//   SERVER_DRAWS_ALL_LETTERING      -> needsServerText() is true for ANY wording, not just long or Hebrew
+// TO GO BACK, or to make this per-design later: set SERVER_DRAWS_ALL_LETTERING to false and
+// EDIT_LETTERING_ENABLED to true. Nothing else was touched, so that returns v69 exactly. SERVER_TEXT_MAX
+// and the v54 rules are still in the file as the record of what was tried.
 // api/reimagine.js — "עיצוב מחדש" v69
 // v69 change: TORN BLACK FRAGMENTS IN THE CORNERS, AND THE ARTWORK SHRUNK TO NOTHING. One cause.
 // The 07:35 "i love you" run delivered a file with a black blob cut off at the top-left corner and two
@@ -641,7 +663,10 @@ const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
 /* v53: THE MASTER SWITCH. false = v52 behaviour always (server draws every caption). */
-const EDIT_LETTERING_ENABLED = true;
+/* v70: his choice — the server draws the lettering, because a vision check on letterforms proved
+   unreliable three times over. Set this back to true (and SERVER_DRAWS_ALL_LETTERING to false) to
+   restore v69 exactly. */
+const EDIT_LETTERING_ENABLED = false;
 
 /* v54: WHEN the model is allowed to keep the lettering, decided per design rather than globally.
    Read off six reviewed source→result pairs, not guessed:
@@ -674,9 +699,11 @@ const FRAGILE_TYPE_RE = new RegExp(
    Hebrew is the one hard exception — no image model draws it legibly, so it stays with the server.
    EDIT_TEXT_MAX and FRAGILE_TYPE_RE are kept, unused, as the record of what v54 assumed. */
 function editCanKeepLettering(spec) {
-  if (!EDIT_LETTERING_ENABLED) return false;
   const t = String(spec.text || "").trim();
   if (!t) return true;                                   // nothing to draw either way
+  /* v70: order matters — a WORDLESS design must answer true here and skip the flux preparation
+     entirely, exactly as it did before. The switch only governs designs that actually carry words. */
+  if (!EDIT_LETTERING_ENABLED) return false;
   if (HEBREW_RE.test(t)) return false;                   // no image model draws Hebrew legibly
   return true;
 }
@@ -2685,9 +2712,16 @@ async function prepareSpec(spec) {
    server and leave the rest alone — a plain caption underneath is worse than good integrated type. */
 const SERVER_TEXT_MAX = 14;
 
+/* v70: the second half of his decision. Turning EDIT_LETTERING_ENABLED off is NOT enough on its own —
+   the caption only moves to the server when needsServerText() says so, and under the old rule a short
+   Latin string stayed with the model. "Always Need Tea" is 13 characters, so the very run that failed
+   would have gone straight back to the model. With this on, any wording at all is drawn by the server. */
+const SERVER_DRAWS_ALL_LETTERING = true;
+
 function needsServerText(text) {
   const t = String(text || "").trim();
   if (!t) return false;
+  if (SERVER_DRAWS_ALL_LETTERING) return true;     // v70: every caption, not just the hard cases
   if (HEBREW_RE.test(t)) return true;              // flux cannot draw Hebrew at all
   return t.replace(/\s+/g, "").length > SERVER_TEXT_MAX;
 }
