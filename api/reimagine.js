@@ -1,5 +1,25 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v67
+// v67 change: A LETTERING RETRY NO LONGER REDRAWS THE WHOLE DESIGN. One change.
+// v66 worked exactly as intended — the widened LETTERING question caught a broken result, fired the
+// retry it already owned, and told him instead of delivering in silence. But the 00:32 result showed
+// what the retry itself costs: a clean raccoon with "Go Hiking" and NOTHING else. No pine trees, no
+// tent, the campfire reduced to a few sticks. The first attempt had all of them.
+// Cause, straight from the code rather than guessed: the retry called editFromSpec(specUsed, reference)
+// — it goes back to the ORIGINAL REFERENCE and draws a completely new design from scratch, discarding
+// a first attempt whose only fault was its words. Everything else in that attempt is collateral.
+// So when the ONLY complaint is lettering (no copy verdict, no print defect), the retry now edits THE
+// FIRST ATTEMPT instead of the reference, with an instruction that changes nothing but the words. The
+// scenery survives by construction rather than by asking for it — the same reason forceSolidInk works
+// where five versions of asking did not.
+// The log also corrected something I had told him: at 00:19 I called the missing "You" a defect. It was
+// not. His text field reads "Go Hiking / A Cougar Gets" with no "You" — the tool drew exactly what he
+// asked. "You" bleeds in from the reference's own "A Bear Kills You", which is why the fix instruction
+// here names the reference's wording (refWording was already threaded in for the hardened retry) and
+// tells the model to remove those words specifically.
+// Unchanged: the edit instruction, both gates, forceSolidInk, and the accept rule — a retry is still
+// only kept when worth() says it is genuinely better, otherwise the first attempt stands.
 // api/reimagine.js — "עיצוב מחדש" v66
 // v66 change: THE LETTERING CHECK COULD NOT SEE THE THING THAT WAS WRONG. One change, in the GATE.
 // v65 is confirmed: bear -> gray wolf, the first real subject swap on this reference. The clause stays.
@@ -1041,6 +1061,32 @@ function editInstruction(spec) {
     "one, leave it out — the elements float freely on an empty background."
   );
   return parts.join(" ");
+}
+
+/* v67: the lettering-only retry. Edits the FIRST ATTEMPT, not the reference, so the artwork that was
+   already right cannot be lost while fixing the words. Used only when lettering is the sole complaint —
+   a copy verdict or a print defect still needs a full redraw from the reference. */
+async function fixLettering(attempt, spec, letteringNote, refWording) {
+  const prompt =
+    "This design is finished and correct EXCEPT for its lettering. " +
+    "Change NOTHING else: every character, animal, object, tree, colour, position and size stays exactly " +
+    "as it is. Do not redraw the scene, do not move anything, do not add or remove any element. " +
+    `The lettering is the only thing you touch. The problem with it: ${letteringNote}. ` +
+    `Redraw the wording so it reads EXACTLY "${spec.text}" — those words and no others, each word drawn ` +
+    "once, every letter fully formed and filled solid, no loose letters left over. " +
+    (refWording
+      ? `Words from the original design keep creeping in: ${JSON.stringify(refWording)}. None of those ` +
+        "words belong here — remove every one of them from the canvas. "
+      : "") +
+    "Keep the lettering in the same style and the same place as it is now, and give each line its own " +
+    "space so no line overlaps another line or the artwork.";
+  console.log(`[reimagine] lettering-only retry on the first attempt: ${letteringNote}`);
+  return await fal("fal-ai/nano-banana/edit", {
+    prompt,
+    image_urls: [attempt],
+    num_images: 1,
+    output_format: "png",
+  });
 }
 
 async function editFromSpec(spec, reference, harden, defectNote, letteringNote, refWording) {
@@ -3451,9 +3497,14 @@ export default async function handler(req, res) {
                 : `print defect: ${verdict.defects}`
             );
             try {
-              const art2 = await editFromSpec(
-                specUsed, reference, isCopy(verdict), verdict.defects, verdict.lettering, refWording
-              );
+              /* v67: lettering alone -> repair the attempt we already have. Anything else still
+                 needs a fresh draw from the reference. */
+              const letteringOnly = !isCopy(verdict) && !!verdict.lettering && !verdict.defects;
+              const art2 = letteringOnly
+                ? await fixLettering(art, specUsed, verdict.lettering, refWording)
+                : await editFromSpec(
+                    specUsed, reference, isCopy(verdict), verdict.defects, verdict.lettering, refWording
+                  );
               const v2 = await inspectArtwork(art2, refWording, askedWording);
               if (worth(v2) < worth(verdict)) { art = art2; verdict = v2; console.log("[reimagine] retry accepted"); }
               else console.log("[reimagine] retry no better - keeping the first attempt");
