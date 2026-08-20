@@ -1,5 +1,26 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v68
+// v68 change: STOP TUNING PROMPTS. THE ANALYSER AND THE GATE WERE WORKING AGAINST EACH OTHER.
+// He said, fairly, that a thousand attempts is not funny any more. He is right, and the reason is not
+// that the model is stubborn — it is that two parts of THIS file disagree, and I kept trying to fix the
+// disagreement by rewording one of them.
+// The analyser is TOLD to keep the design on the same shelf, so on "Go Outside / WORST CASE SCENARIO /
+// A Bear Kills You" it keeps "Worst Case Scenario" — that phrase IS the joke format. GATE 2 then asks
+// whether the artwork shows "any of the original wording, or wording that is clearly the same phrase",
+// sees it, and refuses. Both are behaving exactly as specified. Every collision costs him a full
+// generation, a 20-second wait and a message that does not say WHICH words were the problem — and every
+// press of "analyse" reseeds the wording, so the trap re-arms itself.
+// So the check moves to where it is cheap and fixable: BEFORE generating, in CODE.
+// `sharedWording()` compares the reference's wording (GATE 1 already read it, before any credit is
+// spent) against the wording the design is about to show. Shared content words and shared phrases are
+// found deterministically — no model, no judgement, no variance. On a hit the request stops immediately
+// with 409 and a Hebrew message that NAMES the offending words, so he edits one field and runs again,
+// instead of paying for a generation that was doomed before it started.
+// Deliberately NOT done: silently rewriting his words. They are his design decision; the tool's job is
+// to tell him what will fail and why, not to overrule him.
+// GATE 2 keeps its own check — it must, because the model can still draw the old words even when the
+// spec is clean. This is a cheap early exit in front of it, not a replacement for it.
 // api/reimagine.js — "עיצוב מחדש" v67
 // v67 change: A LETTERING RETRY NO LONGER REDRAWS THE WHOLE DESIGN. One change.
 // v66 worked exactly as intended — the widened LETTERING question caught a broken result, fired the
@@ -1338,6 +1359,71 @@ async function inspectArtwork(artUrl, originalWording, wantedWording) {
 const IP_ERROR =
   "העיצוב שהועלה כולל סימן מסחרי, לוגו, דמות מוגנת או חתימת אמן. " +
   "הכלי לא מייצר עיצובים על בסיס חומר כזה — נסו עיצוב מקור אחר.";
+
+/* ---- v68: the collision the analyser and the gate could never see between them ----
+   Deterministic on purpose. A model deciding "is this too close" is what we already have downstream and
+   it costs a generation to ask; this costs nothing and always gives the same answer.
+   Stop words are excluded because "a", "the" and "is" are shared by half of all English slogans and
+   mean nothing; what matters is a content word carried over, or any two-word phrase carried over. */
+const WORDING_STOP = new Set([
+  "a", "an", "the", "and", "or", "but", "of", "in", "on", "at", "to", "for", "with", "is", "it",
+  "my", "your", "you", "i", "me", "we", "be", "am", "are", "was", "so", "if", "no", "not", "do",
+]);
+
+function wordingWords(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/* Returns the words and phrases the new wording carries over from the reference.
+   Phrases are built as MAXIMAL RUNS in the order the new wording actually reads, so a three-word slogan
+   comes back as "worst case scenario" and not as two overlapping pairs. */
+function sharedWording(refWording, newWording) {
+  const ref = wordingWords(refWording);
+  const now = wordingWords(newWording);
+  if (ref.length < 2 || !now.length) {
+    if (!ref.length || !now.length) return { phrases: [], words: [] };
+  }
+
+  const refPairs = new Set();
+  for (let i = 0; i < ref.length - 1; i++) refPairs.add(`${ref[i]} ${ref[i + 1]}`);
+
+  // mark every position that takes part in a shared adjacent pair, then read off the runs
+  const inPhrase = new Array(now.length).fill(false);
+  for (let i = 0; i < now.length - 1; i++) {
+    if (refPairs.has(`${now[i]} ${now[i + 1]}`)) { inPhrase[i] = true; inPhrase[i + 1] = true; }
+  }
+  const phrases = [];
+  for (let i = 0; i < now.length; i++) {
+    if (!inPhrase[i]) continue;
+    let j = i;
+    while (j + 1 < now.length && inPhrase[j + 1]) j++;
+    /* trim stop words off the ENDS so the message reads "worst case scenario" and not
+       "worst case scenario a" — the run is right, the trailing "a" is just noise to him. */
+    let a = i, b = j;
+    while (a < b && WORDING_STOP.has(now[a])) a++;
+    while (b > a && WORDING_STOP.has(now[b])) b--;
+    phrases.push(now.slice(a, b + 1).join(" "));
+    i = j;
+  }
+
+  const refSet = new Set(ref.filter((w) => w.length > 2 && !WORDING_STOP.has(w)));
+  const words = [...new Set(now.filter((w, i) => !inPhrase[i] && refSet.has(w)))];
+
+  return { phrases, words };
+}
+
+function sharedWordingError(hit) {
+  const list = [...hit.phrases, ...hit.words].map((w) => `"${w}"`).join(", ");
+  return (
+    `הטקסט שביקשתם מכיל ניסוח שמופיע גם בעיצוב המקור: ${list}. ` +
+    "בדיקת ההעתקה תחסום את התוצאה בגלל זה, אז עצרנו לפני היצירה ולא נוצל קרדיט. " +
+    "שנו את המילים האלה בשדה הטקסט ולחצו שוב על יצירה."
+  );
+}
 
 const COPY_ERROR =
   "התוצאה יצאה קרובה מדי לעיצוב המקור וכללה את הניסוח המקורי, ולכן היא לא נמסרה. " +
@@ -3452,6 +3538,20 @@ export default async function handler(req, res) {
           return res.status(422).json({ error: IP_ERROR, blocked: "ip", reason: info.protected });
         }
         refWording = info.wording;
+
+        /* v68: catch the collision here, where it costs nothing, instead of after a full generation. */
+        const shared = sharedWording(refWording, prepared.spec.text);
+        if (shared.phrases.length || shared.words.length) {
+          console.warn(
+            `[reimagine] BLOCKED BEFORE GENERATING - wording shared with the reference:`,
+            JSON.stringify(shared), `| reference wording: ${JSON.stringify(refWording)}`
+          );
+          return res.status(409).json({
+            error: sharedWordingError(shared),
+            blocked: "wording",
+            shared: [...shared.phrases, ...shared.words],
+          });
+        }
 
         const keep = editCanKeepLettering(prepared.spec);
         console.log(
