@@ -1,5 +1,54 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v73
+// v73 change: BACK TO THE 16 AUGUST BEHAVIOUR. His call, and he was specific about which one.
+// He showed the afro-portrait tee and said that was the stage he liked and wants restored. That is the
+// v41 era: the analyser writes a DETAILED spec (composition, elements, palette, technique, typography
+// all kept faithfully) and **flux draws the design from that spec alone, never seeing the reference**.
+// The edit path — nano-banana looking at the reference and redrawing it — arrived later, at v51 on
+// 17 Aug, and everything since has been built on it.
+// This is a ROUTING switch, not a rewrite, because the flux path was never removed: it has been sitting
+// there the whole time as the fallback for when no reference reaches the server. So one flag moves the
+// tool back, and one flag moves it forward again.
+// WHAT COMES BACK WITH IT, and he should expect all three:
+//   - The result is a NEW drawing of the same design rather than an edit of his image, so it is further
+//     from the source. That is what made the portrait run good, and it is also a wider copyright margin.
+//   - flux draws short Latin lettering INTO the design again (arched, textured, woven in) instead of the
+//     server setting it underneath — v45's rule returns: the server takes over only for Hebrew or for
+//     wording over 14 characters, where flux reliably misspells. **This reverses the choice he made at
+//     08:00 today.** It is the honest reading of "restore that stage", it is why "MS JONES" came out
+//     perfect back then, and it is one constant to undo if he prefers the guaranteed spelling.
+//   - The additive habit goes away by construction: flux cannot leave the reference's coffee cup in the
+//     picture, because it never sees the reference.
+// WHAT STAYS, because none of it depends on the edit path and all of it is downstream of generation:
+//   forceSolidInk (v61/v71), dropEdgeStrays (v69), the four typefaces (v72), the cut-out, the QC, the
+//   print canvas, the paywall. GATE 1 still inspects the reference for protected material and still runs
+//   the v68 wording collision check before a credit is spent.
+// TO GO FORWARD AGAIN: USE_EDIT_PATH = true, and set the two lettering flags back the way v70 had them.
+// api/reimagine.js — "עיצוב מחדש" v72
+// v72 change: THE SERVER CAPTION GETS REAL TYPEFACES AND THE REFERENCE'S OWN TWO-TIER STRUCTURE.
+// He sent a "ROOTED in faith" design the tool had produced and called it what it was: a bad design.
+// He was right, and the fault was not that CODE draws the letters — v70 proved code draws them
+// perfectly. It was that the code had exactly ONE typeface and ONE shape to put them in.
+//   - one font: DejaVu Sans Bold, a generic UI sans, whatever the reference's own type looked like.
+//   - one shape: a single band under the artwork, centred, every line the same size and face.
+// The reference it was remixing sets "ROOTED" as large display serif caps with "in faith" in script
+// beneath — two faces, two sizes, one over the other. Reproducing that is geometry and font choice,
+// which is precisely what code is good at. So:
+//   1. FOUR faces instead of one: display serif (Playfair Display), script (Dancing Script),
+//      condensed sans (Oswald), and DejaVu Bold as before. All OFL, free for commercial use.
+//   2. The face is CHOSEN FROM THE SPEC's typography field, which the analyser already fills with
+//      exactly this ("large flowing cursive lower word, smaller upright accent phrase above").
+//   3. A two-line caption is now set as PRIMARY + ACCENT — different faces, different sizes, and the
+//      large one goes wherever the typography says it goes, above or below.
+// ⚠️ HEBREW: of the four, ONLY DejaVu has Hebrew glyphs. `fontCovers()` checks every character before
+// a face is used and falls back to DejaVu, so a Hebrew caption can never come back as empty boxes.
+// This is separate from the open bug where a Hebrew caption does not reach the file at all — that one
+// still needs the `lettering:` log line to settle, and v72 does not claim to fix it.
+// ⚠️ DEPLOY NOTE: Vercel's tracer prunes .ttf files it cannot see being used — that is what killed the
+// captions once already (v47). vercel.json must force-include the new fonts as well as DejaVu, and
+// package.json needs the three new dependencies. If either is missing the code still runs: every face
+// falls back to DejaVu and the caption is drawn exactly as in v71.
 // api/reimagine.js — "עיצוב מחדש" v71
 // v71 change: ON A ONE-INK DESIGN, A LIGHT FILL IS NOT A COLOUR — IT IS THE SHIRT.
 // v70 is confirmed: "I love you" came back perfectly formed, every letter clean. That problem is closed.
@@ -682,10 +731,17 @@ const CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || "dztd5g0p8";
 const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 
 /* v53: THE MASTER SWITCH. false = v52 behaviour always (server draws every caption). */
-/* v70: his choice — the server draws the lettering, because a vision check on letterforms proved
-   unreliable three times over. Set this back to true (and SERVER_DRAWS_ALL_LETTERING to false) to
-   restore v69 exactly. */
-const EDIT_LETTERING_ENABLED = false;
+/* ---- v73: WHICH ENGINE DRAWS THE DESIGN ----
+   false = the 16 August behaviour he asked to have back: flux draws from the spec and never sees his
+   image. true = the v51..v72 edit path, where nano-banana redraws his actual reference.
+   The flux path has always been present as the fallback, so this genuinely is one switch. */
+const USE_EDIT_PATH = false;
+
+/* v73: with flux drawing again, v45's lettering rule is the right one — flux weaves short Latin
+   lettering into the design far better than a caption set underneath, and only loses on Hebrew (which
+   it cannot draw at all) and on long strings (which it misspells). Setting BOTH of these the other way
+   (false / true) restores v70's "the server draws every caption". */
+const EDIT_LETTERING_ENABLED = true;
 
 /* v54: WHEN the model is allowed to keep the lettering, decided per design rather than globally.
    Read off six reviewed source→result pairs, not guessed:
@@ -2735,7 +2791,7 @@ const SERVER_TEXT_MAX = 14;
    the caption only moves to the server when needsServerText() says so, and under the old rule a short
    Latin string stayed with the model. "Always Need Tea" is 13 characters, so the very run that failed
    would have gone straight back to the model. With this on, any wording at all is drawn by the server. */
-const SERVER_DRAWS_ALL_LETTERING = true;
+const SERVER_DRAWS_ALL_LETTERING = false;   // v73: back to Hebrew-or-long-string only
 
 function needsServerText(text) {
   const t = String(text || "").trim();
@@ -2751,7 +2807,8 @@ function needsServerText(text) {
    Returns { spec, wanted }, where `wanted` non-null means the server draws the caption. */
 function prepareForFlux(spec) {
   const wanted = needsServerText(spec.text)
-    ? { text: spec.text, colour: chosenTextColour(spec) }
+    /* v72: the typography sentence travels with the caption - it is what chooses the faces. */
+    ? { text: spec.text, colour: chosenTextColour(spec), typography: spec.typography || "" }
     : null;
 
   if (wanted) {
@@ -3108,28 +3165,120 @@ function escapeXml(v) {
    covers Hebrew, which is half the reason this path exists. */
 
 const FONT_REL = "node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf";
-let _font = null;
+
+/* v72: four faces, chosen from the spec's own typography wording. `sans` is DejaVu and stays the
+   fallback for everything — it is the only one of the four with Hebrew glyphs, and the only one
+   already proven to survive the Vercel bundle. */
+const FONT_FILES = {
+  sans:      FONT_REL,
+  serif:     "node_modules/@expo-google-fonts/playfair-display/700Bold/PlayfairDisplay_700Bold.ttf",
+  script:    "node_modules/@expo-google-fonts/dancing-script/700Bold/DancingScript_700Bold.ttf",
+  condensed: "node_modules/@expo-google-fonts/oswald/700Bold/Oswald_700Bold.ttf",
+};
+
+const _fonts = {};      // key -> parsed font or null
+let _font = null;       // the sans face, kept under its old name so nothing else has to change
 let _fontTried = false;
 
 /* v47: module resolution is NOT enough on Vercel. The tracer only bundles files it can see being
    used, it does not follow require.resolve() through a variable, and the .ttf was pruned — the log
    said "Cannot find module". vercel.json force-includes it now, and this walks real paths so a
    change in how the lambda is laid out cannot silently kill the captions again. */
-function fontCandidates() {
+function fontCandidates(rel) {
   const out = [];
+  const spec = String(rel).replace(/^node_modules\//, "");
   try {
-    out.push(createRequire(import.meta.url).resolve("dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf"));
+    out.push(createRequire(import.meta.url).resolve(spec));
   } catch (e) {
     // not resolvable from the bundle - the explicit paths below are the ones that matter
   }
-  out.push(path.join(process.cwd(), FONT_REL));      // /var/task on Vercel
-  out.push(path.join("/var/task", FONT_REL));
+  out.push(path.join(process.cwd(), rel));           // /var/task on Vercel
+  out.push(path.join("/var/task", rel));
   try {
-    out.push(fileURLToPath(new URL("../" + FONT_REL, import.meta.url)));
+    out.push(fileURLToPath(new URL("../" + rel, import.meta.url)));
   } catch (e) {
     // import.meta.url is always a file URL here, but never let path building throw
   }
   return out.filter((p, i) => p && out.indexOf(p) === i);
+}
+
+/* v72: load any of the four by key. A face that will not load is remembered as null and silently
+   replaced by the sans everywhere, so a missing .ttf costs typography and never a caption. */
+function loadFontKey(key) {
+  if (key in _fonts) return _fonts[key];
+  const rel = FONT_FILES[key];
+  if (!rel) { _fonts[key] = null; return null; }
+
+  for (const p of fontCandidates(rel)) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const buf = fs.readFileSync(p);
+      _fonts[key] = opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      console.log(`[reimagine] font "${key}" loaded from ${p}`);
+      return _fonts[key];
+    } catch (e) {
+      console.error(`[reimagine] font "${key}" at ${p} failed:`, e.message);
+    }
+  }
+  console.warn(`[reimagine] font "${key}" unavailable - falling back to the sans face`);
+  _fonts[key] = null;
+  return null;
+}
+
+/* Every character must exist in the face, or the caption prints as empty boxes. Only DejaVu carries
+   Hebrew, so this is what keeps a Hebrew caption safe when a decorative face was chosen. */
+function fontCovers(font, text) {
+  if (!font) return false;
+  for (const ch of String(text || "")) {
+    if (ch === " ") continue;
+    if (!font.charToGlyphIndex(ch)) return false;
+  }
+  return true;
+}
+
+/* Picks the face for a line: the requested one when it exists AND covers the words, sans otherwise. */
+function faceFor(key, text) {
+  const f = loadFontKey(key);
+  if (f && fontCovers(f, text)) return { font: f, key };
+  const sans = loadFontKey("sans");
+  if (f && !fontCovers(f, text)) {
+    console.log(`[reimagine] face "${key}" does not cover this wording - using sans`);
+  }
+  return { font: sans, key: "sans" };
+}
+
+const SCRIPT_RE    = /\b(script|cursive|calligraph\w*|handwritten|hand[- ]lettered|brush|signature|flowing)\b/i;
+const SERIF_RE     = /\b(serif|display\s+serif|elegant|classic|editorial|roman)\b/i;
+/* "tall" was in here and it broke "tall display serif headline" — the analyser uses tall to describe a
+   display SERIF far more often than a condensed sans. Keywords have to be unambiguous to be useful. */
+const CONDENSED_RE = /\b(condensed|narrow|compressed|athletic|varsity|block\s+caps)\b/i;
+const LOWER_BIG_RE = /\b(large|big|bold|main|dominant)\b[^,;]{0,40}\b(lower|bottom|below|beneath|under)\b|\b(lower|bottom)\b[^,;]{0,40}\b(large|big|dominant)\b/i;
+
+/* v72: reads the analyser's own typography sentence and returns how to set the caption.
+   `primaryLast` matters because references disagree: "ROOTED in faith" is big-on-top, while
+   "But First Coffee" is small-on-top with the big script beneath. */
+function readTypography(typography) {
+  const t = String(typography || "");
+  const hasScript = SCRIPT_RE.test(t);
+  const hasSerif = SERIF_RE.test(t) && !/sans[- ]serif/i.test(t);
+  const hasCondensed = CONDENSED_RE.test(t);
+
+  /* Which of the two named faces is the HEADLINE is decided by ORDER, not by a ranking of my own.
+     The analyser writes the headline first and the accent second — "tall display serif headline,
+     flowing script accent below", "bold brush script for the main word, smaller upright sans for the
+     accent phrase". Ranking script above serif got "ROOTED in faith" backwards, setting the headline
+     in the accent face. */
+  const at = (re, on) => (on ? t.search(re) : -1);
+  const named = [
+    { key: "script", i: at(SCRIPT_RE, hasScript) },
+    { key: "serif", i: at(SERIF_RE, hasSerif) },
+    { key: "condensed", i: at(CONDENSED_RE, hasCondensed) },
+  ].filter((x) => x.i >= 0).sort((a, b) => a.i - b.i);
+
+  const primary = named.length ? named[0].key : "sans";
+  const accent = named.length > 1 ? named[1].key : "sans";
+
+  return { primary, accent, primaryLast: LOWER_BIG_RE.test(t) };
 }
 
 function loadFont() {
@@ -3137,12 +3286,13 @@ function loadFont() {
   _fontTried = true;
 
   const tried = [];
-  for (const p of fontCandidates()) {
+  for (const p of fontCandidates(FONT_REL)) {
     tried.push(p);
     try {
       if (!fs.existsSync(p)) continue;
       const buf = fs.readFileSync(p);
       _font = opentype.parse(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      _fonts.sans = _font;                       // v72: the registry and the old name share one parse
       console.log("[reimagine] font loaded from", p);
       return _font;
     } catch (e) {
@@ -3404,6 +3554,60 @@ function layoutText(font, text, boxW, boxH) {
   return best && best.size >= TEXT_MIN_SIZE ? best : null;
 }
 
+/* ---- v72: two-tier caption ----
+   The reference sets a headline and a quieter accent line — two faces, two sizes, one above the other.
+   `layoutStyled` solves for the single largest base size at which every line still fits its own face
+   and scale, so nothing is guessed and nothing overflows. */
+const ACCENT_SCALE = 0.52;   // the accent line relative to the headline
+
+function layoutStyled(lines, boxW, boxH, typography) {
+  if (lines.length !== 2) return null;                       // one tier only for 1 or 3+ lines
+  const style = readTypography(typography);
+  if (style.primary === style.accent) return null;           // nothing to gain over the plain path
+
+  const primaryIdx = style.primaryLast ? 1 : 0;
+  const parts = lines.map((text, i) => {
+    const isPrimary = i === primaryIdx;
+    const face = faceFor(isPrimary ? style.primary : style.accent, text);
+    return { text, face, scale: isPrimary ? 1 : ACCENT_SCALE };
+  });
+  if (parts.every((p) => p.face.key === "sans")) return null; // both fell back - use the plain path
+
+  let size = Infinity;
+  for (const p of parts) {
+    const unit = runWidth(p.face.font, glyphsFor(p.face.font, p.text), 1, TEXT_TRACK);
+    size = Math.min(size, boxW / Math.max(unit * p.scale, 0.001));
+  }
+  const totalH = parts.reduce((a, p) => a + p.scale * TEXT_LINE_H, 0);
+  size = Math.floor(Math.min(size, boxH / totalH));
+  if (!(size >= TEXT_MIN_SIZE)) return null;
+
+  console.log(
+    `[reimagine] caption set in two tiers: ${parts.map((p) => `${p.face.key}@${(p.scale * size).toFixed(0)}`).join(" + ")}` +
+    ` (headline ${style.primaryLast ? "below" : "above"})`
+  );
+  return { parts, size };
+}
+
+function styledSvg(layout, boxW, boxH, colour) {
+  const { parts, size } = layout;
+  const totalH = parts.reduce((a, p) => a + p.scale * size * TEXT_LINE_H, 0);
+  let y = (boxH - totalH) / 2;
+
+  let body = "";
+  for (const p of parts) {
+    const s = p.scale * size;
+    const gs = glyphsFor(p.face.font, p.text);
+    const w = runWidth(p.face.font, gs, s, s * TEXT_TRACK);
+    const baseline = y + (p.face.font.ascender / p.face.font.unitsPerEm) * s;
+    body += `<path d="${runPath(p.face.font, gs, (boxW - w) / 2, baseline, s, s * TEXT_TRACK)}" fill="${colour}"/>`;
+    y += s * TEXT_LINE_H;
+  }
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
+  );
+}
+
 function textSvg(font, layout, boxW, boxH, colour) {
   const { lines, size } = layout;
   const lineBox = size * TEXT_LINE_H;
@@ -3426,15 +3630,26 @@ function textSvg(font, layout, boxW, boxH, colour) {
 
 /* Returns a transparent PNG of the lettering, or null if it could not be drawn. Null is a supported
    answer, not an error: the caller then delivers the ordinary wordless print file. */
-async function renderTextLayer(text, boxW, boxH, colour) {
+async function renderTextLayer(text, boxW, boxH, colour, typography) {
   const font = loadFont();
   if (!font) return null;
 
   const layout = layoutText(font, text, boxW, boxH);
   if (!layout) return null;
 
+  /* v72: when the caption is two lines and the typography asks for two faces, set it that way.
+     Any reason to decline (one line, one face, would not fit) falls straight back to the v71 path. */
+  let styled = null;
   try {
-    const svg = textSvg(font, layout, boxW, boxH, colour || "#111111");
+    styled = layoutStyled(layout.lines, boxW, boxH, typography);
+  } catch (e) {
+    console.warn("[reimagine] two-tier caption failed, using the plain one:", e.message);
+  }
+
+  try {
+    const svg = styled
+      ? styledSvg(styled, boxW, boxH, colour || "#111111")
+      : textSvg(font, layout, boxW, boxH, colour || "#111111");
     /* v56 belt and braces: a single non-finite coordinate makes librsvg abandon the rest of a
        <path>, and the result is a caption missing half its words — which ships silently and looks
        like a design decision. If one ever appears again, drop the caption and say so in the log. */
@@ -3458,11 +3673,11 @@ async function renderTextLayer(text, boxW, boxH, colour) {
 }
 
 /* Places the wordless artwork in the upper area and the lettering beneath it. */
-async function composeWithText(artBuf, text, colour) {
+async function composeWithText(artBuf, text, colour, typography) {
   const TEXT_H = Math.round(CANVAS_H * 0.22);
   const ART_H = CANVAS_H - TEXT_H;
 
-  const layer = await renderTextLayer(text, Math.round(CANVAS_W * SAFE), TEXT_H, colour);
+  const layer = await renderTextLayer(text, Math.round(CANVAS_W * SAFE), TEXT_H, colour, typography);
   if (!layer) return null;                       // caller falls back to the wordless design
 
   const art = await sharp(artBuf)
@@ -3500,7 +3715,8 @@ async function finishTextOnly(serverText, t0, preview) {
   const H = preview ? PREVIEW_H : CANVAS_H;
 
   const layer = await renderTextLayer(
-    serverText.text, Math.round(W * SAFE), Math.round(H * 0.55), serverText.colour
+    serverText.text, Math.round(W * SAFE), Math.round(H * 0.55), serverText.colour,
+    serverText.typography
   );
   if (!layer) throw new Error("לא הצלחנו לצייר את הכיתוב. נסו שוב או קצרו את הטקסט.");
 
@@ -3594,7 +3810,7 @@ async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalet
   let canvas = null;
   let textDrawn = false;
   if (serverText && !preview) {
-    canvas = await composeWithText(cutBuf, serverText.text, serverText.colour);
+    canvas = await composeWithText(cutBuf, serverText.text, serverText.colour, serverText.typography);
     textDrawn = !!canvas;
     if (!canvas) console.error("[reimagine] falling back to wordless artwork");
   }
@@ -3745,7 +3961,7 @@ export default async function handler(req, res) {
         reference = await cropReferenceToGraphic(reference, info.box);
       }
 
-      if (reference) {
+      if (reference && USE_EDIT_PATH) {
         try {
           art = await editFromSpec(specUsed, reference, false, "", "", refWording);
         } catch (e) {
@@ -3809,6 +4025,8 @@ export default async function handler(req, res) {
             });
           }
         }
+      } else if (!USE_EDIT_PATH) {
+        console.log("[reimagine] drawing from the spec with flux (edit path off - v73)");
       } else {
         console.warn("[reimagine] no reference available - falling back to flux");
       }
