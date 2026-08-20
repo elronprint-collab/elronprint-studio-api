@@ -1,5 +1,24 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v71
+// v71 change: ON A ONE-INK DESIGN, A LIGHT FILL IS NOT A COLOUR — IT IS THE SHIRT.
+// v70 is confirmed: "I love you" came back perfectly formed, every letter clean. That problem is closed.
+// What the same run exposed is the third sighting of the cream fill. The palette said "black ink,
+// single colour" and both cups came back filled beige. On a white shirt those bodies nearly vanish and
+// only the outlines and the hearts print — a print defect, not a matter of taste.
+// forceSolidInk could not help, and correctly so: v61 made it leave LARGE light regions alone, because
+// flooding them with ink would turn an outlined cup into a black silhouette. That reasoning was right
+// about what NOT to do and wrong about what to do instead. In a genuine one-ink print there are only
+// two states — ink, or the garment showing through. A large pale field is the second one. So it should
+// become TRANSPARENT, not beige and not black. The shirt then shows through exactly as it does in the
+// reference, on a white shirt AND on a dark one.
+// This is the third state the pass was missing, and it completes it:
+//   small light pocket enclosed by ink  -> fill with ink   (erosion/speckle, v61)
+//   anything else light                 -> make transparent (v71, the garment)
+//   everything darker                   -> full-strength ink (v61)
+// Scope is unchanged and still tight: monochrome palettes only, never on artwork that is actually
+// multi-coloured, and never on a distressed/vintage/halftone brief. It runs BEFORE invertArtwork, so
+// "white print on a dark shirt" still works. Reversible with CLEAR_LIGHT_FILLS.
 // api/reimagine.js — "עיצוב מחדש" v70
 // v70 change: THE SERVER DRAWS THE LETTERING AGAIN. His decision, taken with the trade-off in front
 // of him, and it closes a failure the gate could not.
@@ -2861,6 +2880,9 @@ async function toPreviewCanvas(buf) {
 
 const INK_DARK = 0.55;        // at or below this luminance the pixel is ink
 const INK_LIGHT = 0.80;       // at or above it the pixel is a gap, not ink
+/* v71: and a gap in a one-ink print is the garment, so it is cleared rather than left pale.
+   Set to false to go back to v70 exactly (light fills stay as the model drew them). */
+const CLEAR_LIGHT_FILLS = true;
 const INK_FOREIGN_MAX = 0.12; // more saturated off-hue pixels than this and the artwork is not monochrome
 const POCKET_MAX_FRAC = 0.004;// an enclosed light pocket up to this share of the ink is erosion
 const INK_TARGET_LUM = 0.12;
@@ -2932,13 +2954,16 @@ async function forceSolidInk(buf, palette) {
   }
   if (!inkCount) return { buf, skipped: "nothing opaque" };
 
-  // the darkest fifth of the opaque pixels defines the ink colour
-  let cut = 255, seen = 0;
-  const want = inkCount * 0.2;
-  for (let v = 0; v < 256; v++) { seen += hist[v]; if (seen >= want) { cut = v; break; } }
+  /* The ink colour is the average of the pixels that ARE ink — everything at or below INK_DARK.
+     v71 fix: this used to take the darkest fifth of all opaque pixels, which breaks on exactly the
+     designs this pass exists for. An outlined cup with a big pale body is less than a fifth ink, so
+     the "darkest fifth" reached up into the cream, the ink came out desaturated, and the hue guard
+     then read every real ink pixel as foreign and refused the whole pass. Defining ink by luminance
+     instead of by rank has no such blind spot, and `hist` stays for the log. */
   let ir = 0, ig = 0, ib = 0, n = 0;
+  const darkCut = Math.round(INK_DARK * 255);
   for (let i = 0; i < N; i++) {
-    if (!opaque[i] || Lq[i] > cut) continue;
+    if (!opaque[i] || Lq[i] > darkCut) continue;
     const o = i * 4; ir += data[o]; ig += data[o + 1]; ib += data[o + 2]; n++;
   }
   if (!n) return { buf, skipped: "no ink pixels" };
@@ -3041,8 +3066,21 @@ async function forceSolidInk(buf, palette) {
     }
   }
 
+  /* pass 3 (v71) — everything still light is the garment showing through, not a pale ink. Runs LAST so
+     the pockets pass 2 just filled are already ink and are not cleared again. */
+  let cleared = 0;
+  if (CLEAR_LIGHT_FILLS) {
+    for (let i = 0; i < N; i++) {
+      const o = i * 4;
+      if (data[o + 3] === 0) continue;
+      if (inkLum(data[o], data[o + 1], data[o + 2]) < INK_LIGHT) continue;
+      data[o + 3] = 0;
+      cleared++;
+    }
+  }
+
   const out = await sharp(data, { raw: { width: W, height: H, channels: 4 } }).png().toBuffer();
-  return { buf: out, ink, deepened, snapped, pockets: texture ? 0 : comps.length, filled, foreignRatio, texture };
+  return { buf: out, ink, deepened, snapped, pockets: texture ? 0 : comps.length, filled, cleared, foreignRatio, texture };
 }
 
 /* Negates RGB and leaves alpha alone, so black artwork on transparency becomes WHITE artwork on
@@ -3535,7 +3573,7 @@ async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalet
         console.log(
           `[reimagine] solid ink: ink=${r.ink.join(",")}` +
           `${r.deepened ? ` (deepened from ${r.deepened.join(",")})` : ""}` +
-          ` snapped=${r.snapped} pockets=${r.pockets} filled=${r.filled}` +
+          ` snapped=${r.snapped} pockets=${r.pockets} filled=${r.filled} cleared=${r.cleared}` +
           `${r.texture ? " (texture detected - holes left alone)" : ""}`
         );
       }
