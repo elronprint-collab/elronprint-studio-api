@@ -1,5 +1,25 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v69
+// v69 change: TORN BLACK FRAGMENTS IN THE CORNERS, AND THE ARTWORK SHRUNK TO NOTHING. One cause.
+// The 07:35 "i love you" run delivered a file with a black blob cut off at the top-left corner and two
+// black streaks cut off at the left and right edges — leftovers from a generation that filled its frame,
+// which birefnet kept because they are large and solid. dropSpecks() could not touch them: it is
+// deliberately timid (under 0.12% of the canvas AND under 2% of the main piece) so that a campfire or a
+// tent is never deleted, and these fragments are far bigger than that.
+// The second symptom has the same cause. toPrintCanvas() trims to the bounding box of everything that
+// survived, so three fragments pinned to three different edges stretch that box across the whole frame
+// and the real artwork gets scaled down to a small island in the middle with huge empty margins. Fix the
+// fragments and the size fixes itself.
+// dropEdgeStrays() adds a second rule alongside dropSpecks, and every condition is a safety catch:
+//   - the piece must be DETACHED from the core (the main piece plus anything at least a tenth its size,
+//     so a design made of several real parts keeps all of them)
+//   - it must sit clear of the core by a real gap, not merely be a separate outline beside it
+//   - it must be a minority of the main artwork
+//   - and it must TOUCH THE CANVAS EDGE. That is the discriminating signal: a deliberate element sits
+//     inside the composition, while a leftover from a full-bleed draw is cut off by the frame.
+// A legitimately isolated element that does not run off the edge is therefore never dropped, and if the
+// pass fails for any reason the artwork is kept exactly as it was.
 // api/reimagine.js — "עיצוב מחדש" v68
 // v68 change: STOP TUNING PROMPTS. THE ANALYSER AND THE GATE WERE WORKING AGAINST EACH OTHER.
 // He said, fairly, that a thousand attempts is not funny any more. He is right, and the reason is not
@@ -1864,6 +1884,88 @@ async function dropSpecks(buf) {
   return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
 }
 
+/* ---- v69: EDGE STRAYS ----
+   dropSpecks handles the small abandoned smudge. This handles the other kind: a big solid fragment
+   left over from a generation that filled its frame, cut off by the canvas edge. Those are too large
+   for the speck rule by design, and they wreck the print canvas twice over — they print, and they
+   stretch the trim box so the real artwork is scaled down to an island in the middle. */
+const STRAY_CORE_FRAC     = 0.10;  // a piece at least a tenth of the main one is part of the design
+const STRAY_MAX_FRAC_MAIN = 0.40;  // never drop anything approaching the size of the main artwork
+const STRAY_GAP_FRAC      = 0.03;  // it must clear the core by this share of the longest side
+
+async function dropEdgeStrays(buf) {
+  const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+  const n = w * h;
+
+  const on = new Uint8Array(n);
+  for (let p = 0, i = 3; p < n; p++, i += ch) on[p] = data[i] > 128 ? 1 : 0;
+
+  const label = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  const sizes = [];
+  const box = [];        // x0,y0,x1,y1 per component
+  const touches = [];    // does it run off the canvas edge
+  for (let s = 0; s < n; s++) {
+    if (!on[s] || label[s] !== -1) continue;
+    const id = sizes.length;
+    let sp = 0, count = 0, edge = false;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    label[s] = id; stack[sp++] = s;
+    while (sp > 0) {
+      const q = stack[--sp];
+      count++;
+      const x = q % w, y = (q / w) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) edge = true;
+      if (x > 0     && on[q - 1] && label[q - 1] === -1) { label[q - 1] = id; stack[sp++] = q - 1; }
+      if (x < w - 1 && on[q + 1] && label[q + 1] === -1) { label[q + 1] = id; stack[sp++] = q + 1; }
+      if (y > 0     && on[q - w] && label[q - w] === -1) { label[q - w] = id; stack[sp++] = q - w; }
+      if (y < h - 1 && on[q + w] && label[q + w] === -1) { label[q + w] = id; stack[sp++] = q + w; }
+    }
+    sizes.push(count); box.push([x0, y0, x1, y1]); touches.push(edge);
+  }
+  if (sizes.length < 2) return buf;
+
+  const main = Math.max(...sizes);
+  /* The core is the main piece plus everything substantial that sits INSIDE the frame. An edge-touching
+     piece never defines the core, however big it is — otherwise three fragments pinned to three edges
+     define a core spanning the whole canvas and nothing can ever be recognised as a stray. */
+  const mainIdx = sizes.indexOf(main);
+  let cx0 = w, cy0 = h, cx1 = -1, cy1 = -1;
+  sizes.forEach((c, i) => {
+    if (i !== mainIdx && (touches[i] || c < main * STRAY_CORE_FRAC)) return;
+    const b = box[i];
+    if (b[0] < cx0) cx0 = b[0]; if (b[1] < cy0) cy0 = b[1];
+    if (b[2] > cx1) cx1 = b[2]; if (b[3] > cy1) cy1 = b[3];
+  });
+  const gap = Math.round(Math.max(w, h) * STRAY_GAP_FRAC);
+
+  const doomed = sizes.map((c, i) => {
+    if (i === mainIdx) return false;                    // never the main artwork
+    if (!touches[i] && c >= main * STRAY_CORE_FRAC) return false;  // a real part of the design
+    if (c >= main * STRAY_MAX_FRAC_MAIN) return false;  // too big to gamble on
+    if (!touches[i]) return false;                      // not cut off by the frame -> deliberate
+    const b = box[i];
+    const clear = b[2] < cx0 - gap || b[0] > cx1 + gap || b[3] < cy0 - gap || b[1] > cy1 + gap;
+    return clear;                                       // detached AND clear of the core
+  });
+
+  const count = doomed.filter(Boolean).length;
+  if (!count) {
+    console.log(`[reimagine] edge strays: ${sizes.length} pieces, none matched`);
+    return buf;
+  }
+  const dropped = doomed.reduce((a, d, i) => a + (d ? sizes[i] : 0), 0);
+  for (let p = 0; p < n; p++) if (label[p] >= 0 && doomed[label[p]]) data[p * ch + 3] = 0;
+  console.log(
+    `[reimagine] edge strays: dropped ${count} of ${sizes.length} pieces (${dropped}px, ` +
+    `${((dropped / main) * 100).toFixed(1)}% of the main artwork) - the trim box shrinks with them`
+  );
+  return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
+}
+
 /* ---------------- print canvas ---------------- */
 async function toPrintCanvas(buf) {
   const stats = await sharp(buf).ensureAlpha().stats();
@@ -1873,6 +1975,13 @@ async function toPrintCanvas(buf) {
     buf = await dropSpecks(buf);
   } catch (e) {
     console.warn("[reimagine] speck removal failed, keeping the artwork as it is:", e.message);
+  }
+
+  /* v69: and the big frame-edge leftovers the speck rule is deliberately too timid to touch. */
+  try {
+    buf = await dropEdgeStrays(buf);
+  } catch (e) {
+    console.warn("[reimagine] stray removal failed, keeping the artwork as it is:", e.message);
   }
 
   buf = await cleanEdges(buf);
