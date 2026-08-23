@@ -1,5 +1,32 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v74
+// v74 change: ONE BUTTON. Upload a design, get a design — no form, no English fields, no chips.
+// His words: "מערכת אוטומטית — מעלה עיצוב, הופך אותו לעיצוב דומה אבל שונה", and the same for a design
+// with lettering and for a design that IS lettering. The form was built when the analyser could not be
+// trusted; four clean runs this afternoon were produced without him touching a single field.
+// `action: "auto"` analyses and generates in ONE request. It does not duplicate the generate path — it
+// builds the spec, then falls through into exactly the same code, so the paywall, both gates, the
+// cut-out, forceSolidInk, dropEdgeStrays and the print canvas all behave identically.
+// Three decisions that used to be HIS now happen in code, because an automatic mode that still needs a
+// human to notice them is not automatic:
+//   1. LIGHT INK ON A DARK GROUND. The pipeline draws on white and cuts the white away, so white
+//      lettering vanishes — the answer has always been the `monolight` preset (draw black, invert after
+//      the cut-out), and until now he had to know that and press a chip. `referenceIsLightOnDark()`
+//      measures the reference itself: mostly dark with a substantial light minority. That is exactly
+//      the "OPEN YOUR EYES" design he was about to lose.
+//   2. THE WORDING COLLISION. v68 stops the run when the new wording carries a phrase from the
+//      reference and asks him to edit the field. In auto mode there is no field to edit, so
+//      `rewordAway()` asks Claude once for different wording that avoids those words, and only if that
+//      fails does it fall back to the 409.
+//   3. TEXT-ONLY DESIGNS STOP FALLING TO THE SERVER FONT. v48 skipped the generator when the reference
+//      was pure typography, which was right when the generator was blind and produced a black blob of
+//      gibberish. Today flux draws brush lettering with real texture — proven this afternoon on STREET
+//      SOUL and NOT YOUR GIRL — and the server font is the weakest thing the tool can produce on
+//      precisely the designs where typography IS the design. `finishTextOnly` stays as the fallback.
+// The form is NOT removed. `action: "analyze"` and `action: "generate"` behave exactly as before, so the
+// page can keep an "edit it yourself" route, and every automatic choice is reported back in `auto` so
+// the response says what was decided rather than deciding silently.
 // api/reimagine.js — "עיצוב מחדש" v73
 // v73 change: BACK TO THE 16 AUGUST BEHAVIOUR. His call, and he was specific about which one.
 // He showed the afro-portrait tee and said that was the stage he liked and wants restored. That is the
@@ -2539,6 +2566,45 @@ const STYLE_PRESETS = {
   },
 };
 
+/* ---- v74: does this reference print LIGHT ink on a DARK garment? ----
+   Measured, not asked. The pipeline draws on white and removes the white, so light artwork is cut away
+   with the background; the `monolight` preset exists for exactly this and draws in black, then inverts
+   after the cut-out. Until now he had to know that and press a chip.
+   A design is light-on-dark when most of it is dark AND a substantial minority is light — that is a
+   dark ground carrying pale ink. An ordinary design on white fails the first half; a dark solid shape
+   on white fails the second. */
+const LIGHT_ON_DARK_GROUND = 0.55;   // this much of the image below DARK_MAX
+/* 3%, not 5%: this runs on the WHOLE upload, before cropToGraphic, so a chest print on a photo of a
+   black shirt is diluted by the shirt around it. A small white logo on a black tee is a real case and
+   4% of the frame. The cost of going lower is a dark photograph with bright highlights being read as
+   light ink — LOD_LIGHT_MIN is high enough that ordinary shading does not reach it. */
+const LIGHT_ON_DARK_INK    = 0.03;
+const LOD_DARK_MAX = 0.30;
+const LOD_LIGHT_MIN = 0.72;
+
+async function referenceIsLightOnDark(buf) {
+  const { data, info } = await sharp(buf)
+    .resize(160, 160, { fit: "inside" })
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const px = info.width * info.height;
+  if (!px) return false;
+  let dark = 0, light = 0;
+  for (let i = 0; i < data.length; i += info.channels) {
+    const l = inkLum(data[i], data[i + 1], data[i + 2]);
+    if (l <= LOD_DARK_MAX) dark++;
+    else if (l >= LOD_LIGHT_MIN) light++;
+  }
+  const darkFrac = dark / px, lightFrac = light / px;
+  const verdict = darkFrac >= LIGHT_ON_DARK_GROUND && lightFrac >= LIGHT_ON_DARK_INK;
+  console.log(
+    `[reimagine] reference tone: dark=${darkFrac.toFixed(2)} light=${lightFrac.toFixed(2)}` +
+    ` -> ${verdict ? "LIGHT ink on a dark ground (monolight)" : "ordinary dark ink"}`
+  );
+  return verdict;
+}
+
 function presetFor(spec) {
   const key = String((spec && spec.style) || "").trim().toLowerCase();
   return Object.prototype.hasOwnProperty.call(STYLE_PRESETS, key) ? STYLE_PRESETS[key] : null;
@@ -2755,6 +2821,56 @@ async function translateSpec(spec) {
 }
 
 /* Returns { spec, notice }. spec is guaranteed English-safe for the generator. */
+/* ---- v74: reword away from the reference's own slogan ----
+   v68 stops the run when the new wording carries a phrase from the reference and tells him which words
+   to change. In automatic mode there is no field for him to change, so ask once for different wording.
+   Fails open: any error returns null and the caller falls back to the 409, which is still correct
+   behaviour — better a clear message than a design the copy gate will refuse anyway. */
+async function rewordAway(text, banned, genre) {
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 100,
+        system:
+          "You write short slogans for printed t-shirts.\n" +
+          "Given a slogan and a list of forbidden words or phrases, return ONE new slogan with the " +
+          "same feel, the same tone and roughly the same length, that uses NONE of the forbidden " +
+          "words. Keep the same line breaks if there are any. Reply with the slogan alone - no " +
+          "quotes, no explanation, no markdown.",
+        messages: [{
+          role: "user",
+          content:
+            `Design type: ${genre || "t-shirt slogan"}\n` +
+            `Slogan: ${text}\n` +
+            `Forbidden: ${banned.join(", ")}`,
+        }],
+      }),
+    });
+    if (!r.ok) {
+      console.error("[reimagine] reword failed:", r.status);
+      return null;
+    }
+    const data = await r.json();
+    const out = (data?.content || [])
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join(" ")
+      .replace(/^["'\s]+|["'\s]+$/g, "")
+      .slice(0, 120);
+    return out || null;
+  } catch (e) {
+    console.error("[reimagine] reword threw:", e.message);
+    return null;
+  }
+}
+
 async function prepareSpec(spec) {
   let notice = "";
 
@@ -2792,6 +2908,10 @@ const SERVER_TEXT_MAX = 14;
    Latin string stayed with the model. "Always Need Tea" is 13 characters, so the very run that failed
    would have gone straight back to the model. With this on, any wording at all is drawn by the server. */
 const SERVER_DRAWS_ALL_LETTERING = false;   // v73: back to Hebrew-or-long-string only
+
+/* v74: a pure-typography reference is drawn by the GENERATOR now, not set in the server font.
+   Set to false to restore v48's skip-the-generator behaviour. */
+const TEXT_ONLY_USES_GENERATOR = true;
 
 function needsServerText(text) {
   const t = String(text || "").trim();
@@ -3848,7 +3968,54 @@ export default async function handler(req, res) {
   }
 
   const body = req.body || {};
-  const action = String(body.action || "").toLowerCase();
+  let action = String(body.action || "").toLowerCase();
+
+  /* ---- v74: ONE BUTTON ----
+     Analyse and generate in a single request. Everything decided automatically is recorded in
+     `autoNotes` and returned to the page, so the response says what was chosen rather than choosing
+     silently. Deliberately NOT a separate pipeline: it builds the spec and then falls through into the
+     generate branch below, which keeps the paywall, both gates and every image step identical. */
+  const isAuto = action === "auto";
+  const autoNotes = {};
+  if (isAuto) {
+    try {
+      const img = typeof body.image === "string" ? body.image : "";
+      /* Parsed exactly as the analyze branch does further down — same regex, same failure message
+         shape. `splitDataUrl` does not exist in this file; writing it as though it did is the v33
+         mistake (a symbol that passes `node --check` and throws at runtime). */
+      const m = img.match(/^data:(image\/\w+);base64,(.+)$/);
+      if (!m) {
+        return res.status(400).json({ error: "לא התקבלה תמונה תקינה — נסו להעלות שוב." });
+      }
+      const mt = m[1], b64 = m[2];
+      const spec = await analyzeSpec(b64, mt);
+      console.log("[reimagine] auto spec:", JSON.stringify(spec).slice(0, 300));
+
+      /* Light ink on a dark ground has to be spotted BEFORE anything is drawn, or the artwork is cut
+         away with the white background. This is the chip he used to have to know about. */
+      try {
+        if (await referenceIsLightOnDark(Buffer.from(b64, "base64"))) {
+          spec.style = "monolight";
+          autoNotes.style = "monolight";
+        }
+      } catch (e) {
+        console.warn("[reimagine] tone check failed, continuing without it:", e.message);
+      }
+
+      let ref = null;
+      try {
+        ref = await uploadCloudinary(Buffer.from(b64, "base64"));
+      } catch (e) {
+        console.error("[reimagine] could not park the reference:", e.message);
+      }
+      body.spec = Object.assign({}, spec, ref ? { [REF_KEY]: ref } : {});
+      autoNotes.spec = spec;
+      action = "generate";
+    } catch (err) {
+      console.error("[reimagine] auto analyse failed:", err);
+      return res.status(502).json({ error: "לא הצלחנו לנתח את העיצוב. נסו שוב." });
+    }
+  }
 
   /* ---- v26 step 2: draw from an edited spec ---- */
   if (action === "generate") {
@@ -3937,17 +4104,36 @@ export default async function handler(req, res) {
         refWording = info.wording;
 
         /* v68: catch the collision here, where it costs nothing, instead of after a full generation. */
-        const shared = sharedWording(refWording, prepared.spec.text);
+        let shared = sharedWording(refWording, prepared.spec.text);
         if (shared.phrases.length || shared.words.length) {
+          const banned = [...shared.phrases, ...shared.words];
           console.warn(
-            `[reimagine] BLOCKED BEFORE GENERATING - wording shared with the reference:`,
+            `[reimagine] wording shared with the reference:`,
             JSON.stringify(shared), `| reference wording: ${JSON.stringify(refWording)}`
           );
-          return res.status(409).json({
-            error: sharedWordingError(shared),
-            blocked: "wording",
-            shared: [...shared.phrases, ...shared.words],
-          });
+
+          /* v74: in automatic mode there is no field for him to edit, so reword it here and check the
+             new wording the same way. One attempt only — a second would be guesswork on a guess. */
+          if (isAuto) {
+            const fresh = await rewordAway(prepared.spec.text, banned, prepared.spec.genre);
+            const still = fresh ? sharedWording(refWording, fresh) : null;
+            if (fresh && still && !still.phrases.length && !still.words.length) {
+              console.log(`[reimagine] reworded automatically: ${JSON.stringify(prepared.spec.text)} -> ${JSON.stringify(fresh)}`);
+              autoNotes.reworded = { from: prepared.spec.text, to: fresh, avoided: banned };
+              prepared.spec.text = fresh;
+              shared = { phrases: [], words: [] };
+            } else {
+              console.warn("[reimagine] automatic rewording did not clear the collision");
+            }
+          }
+
+          if (shared.phrases.length || shared.words.length) {
+            return res.status(409).json({
+              error: sharedWordingError(shared),
+              blocked: "wording",
+              shared: banned,
+            });
+          }
         }
 
         const keep = editCanKeepLettering(prepared.spec);
@@ -4038,6 +4224,19 @@ export default async function handler(req, res) {
         /* v48: if the subject scrubbed away to nothing, the reference was pure typography — the
            design IS the wording. There is no artwork to regenerate, and asking flux for one is what
            produced the black blob covered in gibberish. Skip the generator, deliver the lettering. */
+        /* v74: a text-only reference used to skip the generator entirely (v48), which was right when
+           the generator was blind and returned a black blob of gibberish. flux now draws brush
+           lettering with real texture, and the server font is the weakest thing this tool produces on
+           exactly the designs where the typography IS the design. So try the generator first and keep
+           finishTextOnly as the fallback. */
+        if (wanted && !specUsed.subject && TEXT_ONLY_USES_GENERATOR) {
+          console.log("[reimagine] text-only reference: letting the generator draw the lettering");
+          specUsed.text = wanted.text;
+          specUsed.typography = wanted.typography || specUsed.typography || "";
+          if (!specUsed.subject) specUsed.subject = "";
+          wanted = null;
+        }
+
         if (wanted && !specUsed.subject) {
           console.log("[reimagine] text-only reference: skipping the generator, lettering only");
           const out = await finishTextOnly(wanted, t0, isPreview);
@@ -4051,6 +4250,7 @@ export default async function handler(req, res) {
             Object.assign(
               {
                 spec: specUsed,
+                auto: isAuto ? autoNotes : undefined,
                 notice: prepared.notice,
                 freeLeft: left.freeLeft,
                 credits: left.credits,
