@@ -1,5 +1,28 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v77
+// v77 change: ONE BILL. Every language/vision call moves from the Anthropic API to fal.
+// He ran out of Anthropic credit mid-session and asked to be charged by fal only. Two accounts, two
+// balances, two ways to be stopped — and the stop looks identical to a bug from the outside, which is
+// exactly how tonight went until the log said "credit balance is too low".
+// Five call sites used the Anthropic Messages API directly: analyzeSpec (the spec), claudeVision (both
+// copyright gates), translateSpec (Hebrew), rewordAway (auto rewording) and the dead legacy analyser.
+// They all sent the same shape, so instead of editing five fetches this adds ONE provider layer and
+// points all of them at it:
+//   askLLM({ system, ask, image, mediaType, maxTokens }) -> plain text, or null on failure
+// Routed by LLM_PROVIDER, which is an ENV VAR, not a constant: if fal's model turns out worse at
+// reading designs, set LLM_PROVIDER=anthropic in Vercel and everything reverts with no code change and
+// no redeploy of this file. That lever matters, because the analyser is the part of this tool that
+// decides output quality — every deterministic fix built this week reads the fields it writes.
+// ⚠️ TWO HONEST WARNINGS I GAVE HIM BEFORE BUILDING:
+//   1. fal proxies models through `fal-ai/any-llm`. I could not verify its exact response shape from
+//      here, so the reader accepts several plausible field names and LOGS THE RAW KEYS when none match.
+//      The first live run will either work or print exactly what to fix — it will not fail silently.
+//   2. If FAL_LLM_MODEL names a Claude model, the analysis is byte-for-byte the same model as before and
+//      only the bill moves. If it names something else, the spec wording will change, and the spec is
+//      what everything downstream depends on. Default is a Claude model for that reason.
+// Nothing else moves: the gates, the spec prompts, the deterministic image passes and the paywall are
+// untouched.
 // api/reimagine.js — "עיצוב מחדש" v76
 // v76 change: I CAPPED THE CAPTION'S WIDTH AND FORGOT ITS HEIGHT. My omission, one line short.
 // v75 put the caption above the artwork and stopped it spanning the canvas — both worked on the first
@@ -906,6 +929,102 @@ async function fal(model, input) {
   return url;
 }
 
+/* ---------------- v77: one provider layer for every language/vision call ----------------
+   Every LLM call in this file asked Anthropic directly and each one had its own copy of the request.
+   They now go through here, so the provider is one decision in one place.
+   `LLM_PROVIDER` is read from the environment on purpose — flipping it back to "anthropic" in Vercel
+   is a settings change, not a deploy. */
+const LLM_PROVIDER = (process.env.LLM_PROVIDER || "fal").toLowerCase();
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+/* Through fal, a Claude model keeps the analysis identical and moves only the bill. Override with
+   FAL_LLM_MODEL if you deliberately want a different one. */
+const FAL_LLM_MODEL = process.env.FAL_LLM_MODEL || "anthropic/claude-3.5-sonnet";
+
+async function askAnthropic({ system, ask, image, mediaType, maxTokens }) {
+  const content = image
+    ? [{ type: "image", source: { type: "base64", media_type: mediaType, data: image } },
+       { type: "text", text: ask }]
+    : [{ type: "text", text: ask }];
+
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL,
+      max_tokens: maxTokens || 200,
+      system,
+      messages: [{ role: "user", content }],
+    }),
+  });
+  if (!r.ok) {
+    console.error("[reimagine] anthropic call failed:", r.status, (await r.text()).slice(0, 400));
+    return null;
+  }
+  const d = await r.json();
+  return (d?.content || []).filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+}
+
+/* fal returns a different envelope for every model family, and I could not confirm this one's shape
+   from the build environment. So read the field if it is one of the obvious ones, and if it is not,
+   print the keys that DID come back — the first real run then tells us exactly what to read instead of
+   failing with nothing to go on. */
+function readFalText(d) {
+  const cand = d?.output ?? d?.text ?? d?.response ?? d?.content ?? d?.message ?? d?.completion;
+  if (typeof cand === "string" && cand.trim()) return cand.trim();
+  if (Array.isArray(cand)) {
+    const joined = cand
+      .map((b) => (typeof b === "string" ? b : b?.text || ""))
+      .filter(Boolean).join(" ").trim();
+    if (joined) return joined;
+  }
+  const choice = d?.choices?.[0]?.message?.content;
+  if (typeof choice === "string" && choice.trim()) return choice.trim();
+  console.error(
+    "[reimagine] fal LLM: could not find the text in the response. Top-level keys were:",
+    JSON.stringify(Object.keys(d || {}))
+  );
+  return null;
+}
+
+async function askFal({ system, ask, image, mediaType, maxTokens }) {
+  const model = image ? "fal-ai/any-llm/vision" : "fal-ai/any-llm";
+  const input = {
+    model: FAL_LLM_MODEL,
+    prompt: ask,
+    system_prompt: system,
+    max_tokens: maxTokens || 200,
+  };
+  if (image) input.image_url = `data:${mediaType};base64,${image}`;
+
+  const r = await fetch(`https://fal.run/${model}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Key ${process.env.FAL_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  if (!r.ok) {
+    console.error(`[reimagine] fal ${model} failed:`, r.status, (await r.text()).slice(0, 400));
+    return null;
+  }
+  return readFalText(await r.json());
+}
+
+/* The single entry point. Returns trimmed text, or null - every caller already handles null. */
+async function askLLM(opts) {
+  try {
+    return LLM_PROVIDER === "anthropic" ? await askAnthropic(opts) : await askFal(opts);
+  } catch (e) {
+    console.error(`[reimagine] ${LLM_PROVIDER} call threw:`, e.message);
+    return null;
+  }
+}
+
 /* ---------------- step 1: Claude writes an original prompt ---------------- */
 const ANALYSIS_SYSTEM_PROMPT = `You are a creative director for a t-shirt printing studio.
 
@@ -1072,38 +1191,16 @@ Then a blank line, then 2-4 sentences as a direct image-generation prompt in Eng
 No preamble, no markdown, nothing else.`;
 
 async function analyzeAndReimagine(base64Data, mediaType) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 450,
-      system: ANALYSIS_SYSTEM_PROMPT,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic - and if the graphic has several elements, carry across the MAIN figure (the creature or person), not the object it sits on - but a different pose and different details. Keep the reference's colour palette: if the graphic is one-colour ink, yours is that same single colour, lettering included - EXCEPT that nothing may be white or pale, because the background is white and would swallow it, so a white-on-black reference becomes deep dark ink on white. Every letter and shape is filled solid, never a hollow outline. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first." },
-        ],
-      }],
-    }),
+  /* v77: the legacy one-shot route goes through the provider layer too, so no path in this file
+     can still bill Anthropic. Its instruction text is unchanged. */
+  const raw = await askLLM({
+    system: ANALYSIS_SYSTEM_PROMPT,
+    ask: "If this is a photo of someone wearing a shirt, describe ONLY the graphic printed on the shirt and ignore the wearer entirely. Same subject category and rendering technique as that graphic - and if the graphic has several elements, carry across the MAIN figure (the creature or person), not the object it sits on - but a different pose and different details. Keep the reference's colour palette: if the graphic is one-colour ink, yours is that same single colour, lettering included - EXCEPT that nothing may be white or pale, because the background is white and would swallow it, so a white-on-black reference becomes deep dark ink on white. Every letter and shape is filled solid, never a hollow outline. Subject alone, no objects beside it, and absolutely no outline or stroke tracing the artwork. The reference is probably a full-bleed panel filled edge to edge - do NOT copy that shape; your design is one isolated subject floating on empty white with wide margins on every side, nothing touching an edge. Copy the drawing technique but NOT the surface it is drawn on — even if the reference sits on cream or textured stock, your design sits on pure white #FFFFFF and nothing else. Remember the STYLE: line first.",
+    image: base64Data,
+    mediaType,
+    maxTokens: 450,
   });
-  if (!r.ok) {
-    const t = await r.text();
-    console.error("anthropic analyze failed:", r.status, t);
-    throw new Error("Analysis failed");
-  }
-  const data = await r.json();
-  const raw = (data?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join(" ")
-    .trim();
-  if (!raw) throw new Error("No analysis text returned");
+  if (!raw) throw new Error("Analysis failed");
 
   const m = raw.match(/^\s*STYLE:\s*(photoreal|illustration)\s*/i);
   const style = m ? m[1].toLowerCase() : "illustration";
@@ -1391,32 +1488,9 @@ where the box values are whole numbers 0-100, percentages of the image width or 
 and x1,y1 bottom-right.`;
 
 async function claudeVision(system, base64Data, mediaType, ask, maxTokens) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: maxTokens || 200,
-      system,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: ask },
-        ],
-      }],
-    }),
-  });
-  if (!r.ok) {
-    console.error("[reimagine] vision call failed:", r.status);
-    return null;
-  }
-  const data = await r.json();
-  return (data?.content || []).filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
+  /* v77: kept its name and signature so the two gates are untouched; the provider decision lives in
+     askLLM now. */
+  return await askLLM({ system, ask, image: base64Data, mediaType, maxTokens: maxTokens || 200 });
 }
 
 function parseJsonish(raw) {
@@ -2407,40 +2481,18 @@ RULES
 - Never mention the reference image, the wearer, or that you were shown anything.`;
 
 async function analyzeSpec(base64Data, mediaType) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 700,
-      system: SPEC_SYSTEM_PROMPT,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Return the JSON spec. Keep the composition, elements, palette, typography and technique FAITHFUL to what you see — same design. Change ONLY the individual character (same category, different individual) and the wording. Match the realism level exactly. JSON only." },
-        ],
-      }],
-    }),
+  const raw0 = await askLLM({
+    system: SPEC_SYSTEM_PROMPT,
+    ask: "Return the JSON spec. Keep the composition, elements, palette, typography and technique FAITHFUL to what you see — same design. Change ONLY the individual character (same category, different individual) and the wording. Match the realism level exactly. JSON only.",
+    image: base64Data,
+    mediaType,
+    maxTokens: 700,
   });
-  if (!r.ok) {
-    const t = await r.text();
-    console.error("anthropic spec failed:", r.status, t);
+  if (!raw0) {
+    console.error("[reimagine] spec analysis returned nothing");
     throw new Error("Analysis failed");
   }
-  const data = await r.json();
-  let raw = (data?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join(" ")
-    .trim();
-  if (!raw) throw new Error("No analysis text returned");
-
-  raw = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+  let raw = raw0.replace(/```json/gi, "").replace(/```/g, "").trim();
   const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
   if (a === -1 || b === -1) throw new Error("Spec was not JSON");
 
@@ -2816,38 +2868,18 @@ async function translateSpec(spec) {
     composition: spec.composition,
   };
 
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 600,
-      system:
-        "You translate t-shirt design specs into English for an image generator.\n" +
-        "Return ONLY the same JSON object with the same keys, every value translated to natural " +
-        "English design vocabulary. Keep values short. 'elements' stays an array. Values already in " +
-        "English pass through unchanged. No prose, no markdown fences.",
-      messages: [{ role: "user", content: JSON.stringify(payload) }],
-    }),
+  const out = await askLLM({                                   // v77
+    system:
+      "You translate t-shirt design specs into English for an image generator.\n" +
+      "Return ONLY the same JSON object with the same keys, every value translated to natural " +
+      "English design vocabulary. Keep values short. 'elements' stays an array. Values already in " +
+      "English pass through unchanged. No prose, no markdown fences.",
+    ask: JSON.stringify(payload),
+    maxTokens: 600,
   });
+  if (!out) return spec;                                       // never block a generation over translation
 
-  if (!r.ok) {
-    console.error("translate failed:", r.status, await r.text());
-    return spec; // never block a generation over translation
-  }
-
-  const data = await r.json();
-  let raw = (data?.content || [])
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join(" ")
-    .replace(/```json/gi, "")
-    .replace(/```/g, "")
-    .trim();
+  let raw = out.replace(/```json/gi, "").replace(/```/g, "").trim();
 
   const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
   if (a === -1 || b === -1) return spec;
@@ -2868,48 +2900,21 @@ async function translateSpec(spec) {
    Fails open: any error returns null and the caller falls back to the 409, which is still correct
    behaviour — better a clear message than a design the copy gate will refuse anyway. */
 async function rewordAway(text, banned, genre) {
-  try {
-    const r = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 100,
-        system:
-          "You write short slogans for printed t-shirts.\n" +
-          "Given a slogan and a list of forbidden words or phrases, return ONE new slogan with the " +
-          "same feel, the same tone and roughly the same length, that uses NONE of the forbidden " +
-          "words. Keep the same line breaks if there are any. Reply with the slogan alone - no " +
-          "quotes, no explanation, no markdown.",
-        messages: [{
-          role: "user",
-          content:
-            `Design type: ${genre || "t-shirt slogan"}\n` +
-            `Slogan: ${text}\n` +
-            `Forbidden: ${banned.join(", ")}`,
-        }],
-      }),
-    });
-    if (!r.ok) {
-      console.error("[reimagine] reword failed:", r.status);
-      return null;
-    }
-    const data = await r.json();
-    const out = (data?.content || [])
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join(" ")
-      .replace(/^["'\s]+|["'\s]+$/g, "")
-      .slice(0, 120);
-    return out || null;
-  } catch (e) {
-    console.error("[reimagine] reword threw:", e.message);
-    return null;
-  }
+  const out = await askLLM({                                   // v77
+    system:
+      "You write short slogans for printed t-shirts.\n" +
+      "Given a slogan and a list of forbidden words or phrases, return ONE new slogan with the " +
+      "same feel, the same tone and roughly the same length, that uses NONE of the forbidden " +
+      "words. Keep the same line breaks if there are any. Reply with the slogan alone - no " +
+      "quotes, no explanation, no markdown.",
+    ask:
+      `Design type: ${genre || "t-shirt slogan"}\n` +
+      `Slogan: ${text}\n` +
+      `Forbidden: ${banned.join(", ")}`,
+    maxTokens: 100,
+  });
+  if (!out) return null;
+  return out.replace(/^["'\s]+|["'\s]+$/g, "").slice(0, 120) || null;
 }
 
 async function prepareSpec(spec) {
