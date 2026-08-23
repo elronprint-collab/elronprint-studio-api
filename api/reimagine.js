@@ -1,5 +1,20 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v79
+// v79 change: fal PRINTED THE ALLOWED LIST. Use it, and stop treating 422 as fatal.
+// The v78 search walked one step and stopped. Two things came out of that run, both useful:
+//   1. fal's validator answers with the WHOLE catalogue when the id is wrong:
+//      "Input should be 'anthropic/claude-sonnet-4.5', 'anthropic/claude-haiku-4.5',
+//       'anthropic/claude-3.7-sonnet', 'anthropic/claude-3.5-sonnet', 'anthropic/claude-3-haiku',
+//       'google/gemini-pro-1.5', 'google/gemini-flash-1.5', 'google/gemini-flash-1.5-8b' …"
+//      So the candidate list is no longer a guess. It is copied from fal's own answer, newest first.
+//   2. That answer came back as **422**, not 404 — and `looksLikeUnknownModel` only walked on for 404.
+//      The guard did exactly what I wrote it to do and stopped, which was right in general and wrong
+//      here: a 422 whose body is a `literal_error` on the `model` field is precisely an unknown id.
+//      Narrowed to that shape, so a genuine validation error on any OTHER field still stops at once.
+// ⚠️ Note for whoever reads this next: `anthropic/claude-3.5-sonnet` IS in fal's allowed list, yet the
+// first attempt was rejected with "No endpoints found". A name can be valid and still be unavailable to
+// this account — which is exactly why this searches rather than assuming, and why the winner is logged.
 // api/reimagine.js — "עיצוב מחדש" v78
 // v78 change: THE fal ENDPOINT IS RIGHT, THE MODEL NAME WAS NOT. Stop guessing it — try and remember.
 // v77's first live call came back:
@@ -959,20 +974,26 @@ const FAL_MODEL_PIN = process.env.FAL_LLM_MODEL || "";
 
 /* Ordered by preference: the same model family as before first, so a success keeps the analysis
    identical and only moves the bill; capable general vision models after that. */
+/* v79: copied from fal's own validation error, which lists every id it accepts. Newest Claude first —
+   a success there keeps the analysis closest to what has been proven all week — then the older Claudes,
+   then Gemini. Note that a listed id can still be unavailable to this account (3.5-sonnet was), which
+   is why this is a search and not a single value. */
 const FAL_VISION_CANDIDATES = [
+  "anthropic/claude-sonnet-4.5",
+  "anthropic/claude-3.7-sonnet",
   "anthropic/claude-3.5-sonnet",
-  "anthropic/claude-3-5-sonnet",
-  "google/gemini-flash-1.5",
   "google/gemini-pro-1.5",
-  "openai/gpt-4o",
-  "meta-llama/llama-3.2-90b-vision-instruct",
-];
-const FAL_TEXT_CANDIDATES = [
-  "anthropic/claude-3.5-sonnet",
-  "anthropic/claude-3-5-sonnet",
   "google/gemini-flash-1.5",
-  "openai/gpt-4o-mini",
-  "meta-llama/llama-3.1-8b-instruct",
+  "anthropic/claude-haiku-4.5",
+];
+/* Rewording and translating are cheap text jobs — the small fast models are the right default here,
+   and the big ones are only the fallback. */
+const FAL_TEXT_CANDIDATES = [
+  "anthropic/claude-haiku-4.5",
+  "google/gemini-flash-1.5",
+  "anthropic/claude-sonnet-4.5",
+  "anthropic/claude-3.5-sonnet",
+  "google/gemini-pro-1.5",
 ];
 
 /* Remembered per lambda: the search runs once, not on every call. */
@@ -983,7 +1004,13 @@ let _falTextModel = null;
    malformed request means every candidate will fail the same way, and walking the list would just turn
    one clear error into six. */
 function looksLikeUnknownModel(status, body) {
-  return status === 404 || /no endpoints found|model not found|unknown model|404/i.test(body || "");
+  const b = body || "";
+  if (status === 404 || /no endpoints found|model not found|unknown model/i.test(b)) return true;
+  /* v79: fal rejects a bad model id with 422 and a literal_error on the "model" field, and lists the
+     ids it accepts. That IS an unknown model, so walk on. A 422 about any other field is a real
+     validation failure and must still stop — hence both conditions, not just the status. */
+  if (status === 422 && /literal_error/i.test(b) && /"model"/.test(b)) return true;
+  return false;
 }
 
 async function askAnthropic({ system, ask, image, mediaType, maxTokens }) {
