@@ -1,5 +1,21 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v76
+// v76 change: I CAPPED THE CAPTION'S WIDTH AND FORGOT ITS HEIGHT. My omission, one line short.
+// v75 put the caption above the artwork and stopped it spanning the canvas — both worked on the first
+// live run. But "ALWAYS ON / Eat Clean" came back with "Eat Clean" nearly a quarter of the canvas tall,
+// towering over the fruit.
+// Same mechanism I had just fixed on the other axis and did not follow through: the layout takes the
+// LARGEST size at which the text still fits its box. Capping the WIDTH stops a long line sprawling, but
+// a SHORT line simply grows until it hits the height instead. Two short words in a 22% band become
+// enormous. The band is a container, and the code was treating it as a target.
+// So the size is now capped against the CANVAS, not just the box: CAP_HEADLINE = 0.075 of the canvas
+// height for the headline line. A long caption is unaffected — width already binds it first — and a
+// short one simply stops growing at a sensible size and sits in its band with air around it, which is
+// what the reference does.
+// Applied in BOTH layout paths (the plain one and the two-tier one), because they solve for size
+// separately and a cap in only one of them would show up as a caption that changes size depending on
+// how many typefaces the analyser happened to name.
 // api/reimagine.js — "עיצוב מחדש" v75
 // v75 change: THE CAPTION WAS SET LIKE A FILE NAME UNDER A PHOTO. Three geometry fixes, no model asked.
 // v72's typefaces landed and are proven — "ALWAYS FINISH" in sans caps over "Eat Complete" in script.
@@ -3672,6 +3688,20 @@ const CAPTION_W    = 0.72;   // caption box width as a fraction of the canvas (a
 const CAPTION_FILL = 0.76;   // how much of its own band the type may occupy, leaving air above/below
 const TIER_GAP     = 0.20;   // gap between the headline and the accent line, in font sizes
 
+/* v76: a ceiling on the TYPE ITSELF, measured against the canvas rather than against the band.
+   Without it a short caption grows until it fills the band's height — "Eat Clean" came back a quarter
+   of the canvas tall. Long captions never reach this cap because the width binds them first, so this
+   only ever restrains the short ones, which are exactly the ones that were coming out oversized. */
+/* Expressed against the BAND, not the canvas. The band is already a fixed share of whichever canvas is
+   in play, so this scales to the watermarked preview for free — whereas a constant tied to CANVAS_H
+   would have to be corrected for it, and my first attempt "corrected" it with a term that always
+   evaluated to 1. On the print canvas this works out to ~405px, about 7.5% of the height. */
+const CAP_HEADLINE = 0.45;   // tallest a headline line may be, as a fraction of its own band
+
+function capSize(size, boxH) {
+  return Math.min(size, Math.floor(boxH * CAP_HEADLINE));
+}
+
 /* Splits into n lines by character count with the word order preserved. The v44 version split any
    line over 18 characters into its individual words and then kept the first three, which silently
    threw away the rest of the caption. */
@@ -3718,7 +3748,9 @@ function layoutText(font, text, boxW, boxH) {
       const unit = runWidth(font, glyphsFor(font, l), 1, TEXT_TRACK);
       byWidth = Math.min(byWidth, boxW / Math.max(unit, 0.001));
     }
-    const size = Math.floor(Math.min(byWidth, boxH / (explicit.length * TEXT_LINE_H)));
+    const size = capSize(
+      Math.floor(Math.min(byWidth, boxH / (explicit.length * TEXT_LINE_H))), boxH
+    );  // v76: the slash-separated branch solves for size on its own and needs the same ceiling
     if (size >= TEXT_MIN_SIZE) {
       console.log(`[reimagine] caption: honouring ${explicit.length} slash-separated lines`);
       return { lines: explicit, size };
@@ -3734,7 +3766,7 @@ function layoutText(font, text, boxW, boxH) {
       byWidth = Math.min(byWidth, boxW / Math.max(unit, 0.001));
     }
     const byHeight = boxH / (lines.length * TEXT_LINE_H);
-    const size = Math.floor(Math.min(byWidth, byHeight));
+    const size = capSize(Math.floor(Math.min(byWidth, byHeight)), boxH);  // v76
     if (!best || size > best.size) best = { lines, size };
   }
   return best && best.size >= TEXT_MIN_SIZE ? best : null;
@@ -3768,6 +3800,7 @@ function layoutStyled(lines, boxW, boxH, typography) {
      the band by exactly the gap and the accent line gets clipped. */
   const totalH = parts.reduce((a, p) => a + p.scale * TEXT_LINE_H, 0) + TIER_GAP * (parts.length - 1);
   size = Math.floor(Math.min(size, boxH / totalH));
+  size = capSize(size, boxH);            // v76: and never taller than the canvas allows
   if (!(size >= TEXT_MIN_SIZE)) return null;
 
   console.log(
