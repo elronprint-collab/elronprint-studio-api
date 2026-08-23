@@ -1,5 +1,30 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v75
+// v75 change: THE CAPTION WAS SET LIKE A FILE NAME UNDER A PHOTO. Three geometry fixes, no model asked.
+// v72's typefaces landed and are proven — "ALWAYS FINISH" in sans caps over "Eat Complete" in script.
+// He put his own design next to the reference and said his looked ugly, and he was right about WHY even
+// though the fault was not the fonts:
+//   - the reference sets "NEVER WASTE" small and letter-spaced ABOVE the apple, with "Stay Fresh" in
+//     script running INTO the fruit. Lettering and artwork are one composition.
+//   - ours takes a fixed band at the bottom, fills it edge to edge at the largest size that fits, and
+//     centres it. Two heavy lines jammed against each other with no air. It reads like a heading typed
+//     underneath a picture, because that is literally what the geometry does.
+// Three things, all measurable, none of them a request to a model:
+//   1. WIDTH. The caption box was 97% of the canvas — the same safe area as the artwork — so the type
+//      always grew until it spanned the whole width. It is now 72%, which is what gives lettering its
+//      proportion: a line that stops well short of the edges reads as designed, one that touches both
+//      edges reads as stretched.
+//   2. AIR. The layer filled its band completely and the two tiers sat on top of each other at the line
+//      height. The band now renders into 76% of its own height (so there is space above and below), and
+//      a real gap is inserted BETWEEN the headline and the accent line.
+//   3. POSITION. The caption could only ever go underneath. When the analyser says the lettering sits
+//      above the artwork — which is exactly what this reference does — it now goes above, and the
+//      artwork moves down.
+// ⚠️ WHAT THIS STILL CANNOT DO, said to him before building it: lettering woven INTO the artwork, like
+// "Stay Fresh" running across the apple. Code does not know where the fruit ends or where there is room.
+// Only the generator does that, and it does it well (STREET SOUL, the comic block caps). This narrows
+// the gap; it does not close it.
 // api/reimagine.js — "עיצוב מחדש" v74
 // v74 change: ONE BUTTON. Upload a design, get a design — no form, no English fields, no chips.
 // His words: "מערכת אוטומטית — מעלה עיצוב, הופך אותו לעיצוב דומה אבל שונה", and the same for a design
@@ -2928,7 +2953,12 @@ function needsServerText(text) {
 function prepareForFlux(spec) {
   const wanted = needsServerText(spec.text)
     /* v72: the typography sentence travels with the caption - it is what chooses the faces. */
-    ? { text: spec.text, colour: chosenTextColour(spec), typography: spec.typography || "" }
+    ? {
+        text: spec.text,
+        colour: chosenTextColour(spec),
+        typography: spec.typography || "",
+        above: captionGoesAbove(spec),        // v75: which side of the artwork it belongs on
+      }
     : null;
 
   if (wanted) {
@@ -3372,6 +3402,8 @@ const SERIF_RE     = /\b(serif|display\s+serif|elegant|classic|editorial|roman)\
 /* "tall" was in here and it broke "tall display serif headline" — the analyser uses tall to describe a
    display SERIF far more often than a condensed sans. Keywords have to be unambiguous to be useful. */
 const CONDENSED_RE = /\b(condensed|narrow|compressed|athletic|varsity|block\s+caps)\b/i;
+/* v75: sans is the default FACE but it still has to be findable for the ordering above. */
+const SANS_RE = /\b(sans[- ]serif|sans|grotesque|upright\s+caps|geometric)\b/i;
 const LOWER_BIG_RE = /\b(large|big|bold|main|dominant)\b[^,;]{0,40}\b(lower|bottom|below|beneath|under)\b|\b(lower|bottom)\b[^,;]{0,40}\b(large|big|dominant)\b/i;
 
 /* v72: reads the analyser's own typography sentence and returns how to set the caption.
@@ -3388,11 +3420,17 @@ function readTypography(typography) {
      flowing script accent below", "bold brush script for the main word, smaller upright sans for the
      accent phrase". Ranking script above serif got "ROOTED in faith" backwards, setting the headline
      in the accent face. */
+  /* v75: SANS has to take part in the ORDERING even though it is the default face. Without it,
+     "small sans caps headline, flowing script accent below" named only the script, so the script became
+     the headline and the pair came out upside down — the accent face set large on top. Order is only
+     meaningful if every face that is mentioned is in the list. */
+  const hasSans = SANS_RE.test(t);
   const at = (re, on) => (on ? t.search(re) : -1);
   const named = [
     { key: "script", i: at(SCRIPT_RE, hasScript) },
     { key: "serif", i: at(SERIF_RE, hasSerif) },
     { key: "condensed", i: at(CONDENSED_RE, hasCondensed) },
+    { key: "sans", i: at(SANS_RE, hasSans) },
   ].filter((x) => x.i >= 0).sort((a, b) => a.i - b.i);
 
   const primary = named.length ? named[0].key : "sans";
@@ -3606,6 +3644,34 @@ const TEXT_TRACK = 0.02;       // letter-spacing as a fraction of the font size
 const TEXT_MAX_LINES = 3;
 const TEXT_MIN_SIZE = 24;
 
+/* ---- v75: caption proportion ----
+   The caption box is deliberately NARROWER than the artwork's safe area. Type that stops short of the
+   edges reads as designed; type that touches both edges reads as stretched to fit, which is exactly
+   what his side-by-side showed. */
+/* v75: the reference decides which side the caption goes. "NEVER WASTE" sits ABOVE the apple; until
+   now the caption could only ever be bolted underneath. Read from the analyser's own composition and
+   typography wording, and deliberately narrow — an unclear description keeps the old behaviour. */
+const CAPTION_ABOVE_RE = new RegExp(
+  "\\b(lettering|wording|text|type|typography|headline|caption|title|words)\\b[^.;]{0,50}" +
+  "\\b(above|over|atop|top of|upper)\\b" +
+  "|\\b(above|across the top|along the top|upper)\\b[^.;]{0,50}" +
+  "\\b(artwork|illustration|image|graphic|subject|apple|fruit|figure|animal)\\b",
+  "i"
+);
+
+function captionGoesAbove(spec) {
+  const t = [spec && spec.composition, spec && spec.typography].filter(Boolean).join(" ");
+  if (!t) return false;
+  /* a description that says BOTH keeps the safe default - it is a two-part design and the code cannot
+     tell which half it is being told about */
+  if (/\b(below|beneath|under|underneath|lower)\b/i.test(t) && CAPTION_ABOVE_RE.test(t)) return false;
+  return CAPTION_ABOVE_RE.test(t);
+}
+
+const CAPTION_W    = 0.72;   // caption box width as a fraction of the canvas (artwork still uses SAFE)
+const CAPTION_FILL = 0.76;   // how much of its own band the type may occupy, leaving air above/below
+const TIER_GAP     = 0.20;   // gap between the headline and the accent line, in font sizes
+
 /* Splits into n lines by character count with the word order preserved. The v44 version split any
    line over 18 characters into its individual words and then kept the first three, which silently
    threw away the rest of the caption. */
@@ -3698,7 +3764,9 @@ function layoutStyled(lines, boxW, boxH, typography) {
     const unit = runWidth(p.face.font, glyphsFor(p.face.font, p.text), 1, TEXT_TRACK);
     size = Math.min(size, boxW / Math.max(unit * p.scale, 0.001));
   }
-  const totalH = parts.reduce((a, p) => a + p.scale * TEXT_LINE_H, 0);
+  /* v75: TIER_GAP is part of the height now, so solve for it here too — otherwise the block overflows
+     the band by exactly the gap and the accent line gets clipped. */
+  const totalH = parts.reduce((a, p) => a + p.scale * TEXT_LINE_H, 0) + TIER_GAP * (parts.length - 1);
   size = Math.floor(Math.min(size, boxH / totalH));
   if (!(size >= TEXT_MIN_SIZE)) return null;
 
@@ -3711,18 +3779,22 @@ function layoutStyled(lines, boxW, boxH, typography) {
 
 function styledSvg(layout, boxW, boxH, colour) {
   const { parts, size } = layout;
-  const totalH = parts.reduce((a, p) => a + p.scale * size * TEXT_LINE_H, 0);
+  /* v75: the two tiers used to sit directly on top of each other at the line height, which is what made
+     the pair look jammed together. A real gap goes between them — and it is counted in the total so the
+     block still centres correctly. */
+  const gap = size * TIER_GAP;
+  const totalH = parts.reduce((a, p) => a + p.scale * size * TEXT_LINE_H, 0) + gap * (parts.length - 1);
   let y = (boxH - totalH) / 2;
 
   let body = "";
-  for (const p of parts) {
+  parts.forEach((p, i) => {
     const s = p.scale * size;
     const gs = glyphsFor(p.face.font, p.text);
     const w = runWidth(p.face.font, gs, s, s * TEXT_TRACK);
     const baseline = y + (p.face.font.ascender / p.face.font.unitsPerEm) * s;
     body += `<path d="${runPath(p.face.font, gs, (boxW - w) / 2, baseline, s, s * TEXT_TRACK)}" fill="${colour}"/>`;
-    y += s * TEXT_LINE_H;
-  }
+    y += s * TEXT_LINE_H + (i < parts.length - 1 ? gap : 0);
+  });
   return Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
   );
@@ -3793,11 +3865,16 @@ async function renderTextLayer(text, boxW, boxH, colour, typography) {
 }
 
 /* Places the wordless artwork in the upper area and the lettering beneath it. */
-async function composeWithText(artBuf, text, colour, typography) {
+async function composeWithText(artBuf, text, colour, typography, above) {
   const TEXT_H = Math.round(CANVAS_H * 0.22);
   const ART_H = CANVAS_H - TEXT_H;
 
-  const layer = await renderTextLayer(text, Math.round(CANVAS_W * SAFE), TEXT_H, colour, typography);
+  /* v75: the caption box is NARROWER than the artwork and shorter than its own band, so the type stops
+     short of the edges and has air above and below it instead of filling the strip. */
+  const capW = Math.round(CANVAS_W * CAPTION_W);
+  const capH = Math.round(TEXT_H * CAPTION_FILL);
+
+  const layer = await renderTextLayer(text, capW, capH, colour, typography);
   if (!layer) return null;                       // caller falls back to the wordless design
 
   const art = await sharp(artBuf)
@@ -3813,6 +3890,16 @@ async function composeWithText(artBuf, text, colour, typography) {
 
   const am = await sharp(art).metadata();
 
+  /* v75: above or below. The bands simply swap — the artwork keeps its own band either way, so nothing
+     is squeezed and the print canvas is unchanged. */
+  const artTop = above
+    ? TEXT_H + Math.round((ART_H - am.height) / 2)
+    : Math.round((ART_H - am.height) / 2);
+  const capTop = above
+    ? Math.round((TEXT_H - capH) / 2)
+    : ART_H + Math.round((TEXT_H - capH) / 2);
+  console.log(`[reimagine] caption placed ${above ? "ABOVE" : "below"} the artwork`);
+
   return await sharp({
     create: {
       width: CANVAS_W, height: CANVAS_H, channels: 4,
@@ -3820,8 +3907,8 @@ async function composeWithText(artBuf, text, colour, typography) {
     },
   })
     .composite([
-      { input: art, left: Math.round((CANVAS_W - am.width) / 2), top: Math.round((ART_H - am.height) / 2) },
-      { input: layer, left: Math.round((CANVAS_W - Math.round(CANVAS_W * SAFE)) / 2), top: ART_H },
+      { input: art, left: Math.round((CANVAS_W - am.width) / 2), top: artTop },
+      { input: layer, left: Math.round((CANVAS_W - capW) / 2), top: capTop },
     ])
     .png({ compressionLevel: 6 })
     .withMetadata({ density: DPI })
@@ -3930,7 +4017,9 @@ async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalet
   let canvas = null;
   let textDrawn = false;
   if (serverText && !preview) {
-    canvas = await composeWithText(cutBuf, serverText.text, serverText.colour, serverText.typography);
+    canvas = await composeWithText(
+      cutBuf, serverText.text, serverText.colour, serverText.typography, !!serverText.above
+    );
     textDrawn = !!canvas;
     if (!canvas) console.error("[reimagine] falling back to wordless artwork");
   }
