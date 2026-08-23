@@ -5,6 +5,9 @@
   "dependencies": {
     "sharp": "^0.33.5",
     "opentype.js": "^2.0.0",
-    "dejavu-fonts-ttf": "^2.37.3"
+    "dejavu-fonts-ttf": "^2.37.3",
+    "@expo-google-fonts/playfair-display": "^0.4.2",
+    "@expo-google-fonts/dancing-script": "^0.4.2",
+    "@expo-google-fonts/oswald": "^0.4.2"
   }
 }
