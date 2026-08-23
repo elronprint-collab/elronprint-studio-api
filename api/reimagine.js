@@ -1,5 +1,22 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v78
+// v78 change: THE fal ENDPOINT IS RIGHT, THE MODEL NAME WAS NOT. Stop guessing it — try and remember.
+// v77's first live call came back:
+//   fal fal-ai/any-llm/vision failed: 400 {"detail":"Error code: 404 … 'No endpoints found for
+//   anthropic/claude-3.5-sonnet, meta-llama/llama-3.2-11b-vision-instruct,
+//   meta-llama/llama-3.2-90b-vision-instruct.'"}
+// That is good news read carefully: the ENDPOINT exists and accepted the request, and the router even
+// listed what it tried. Only the model id is wrong, and I cannot check fal's catalogue from the build
+// environment — the network here does not reach it.
+// So the fix is not another guess. `askFal` now walks a LIST of candidate ids, stops at the first one
+// that answers, and REMEMBERS it for the rest of the lambda's life so the failures are paid for once,
+// not on every call. The winner is logged by name, so after the first successful run the right id is
+// known and can be pinned in `FAL_LLM_MODEL` if you want to skip the search entirely.
+// It only walks on when the error is specifically "no endpoints found" / 404 — a real failure (bad key,
+// rate limit, malformed request) still stops immediately instead of burning through the whole list.
+// Text-only and vision keep separate lists and separate memories, because a model that reads images is
+// not necessarily the same one that rewrites a slogan.
 // api/reimagine.js — "עיצוב מחדש" v77
 // v77 change: ONE BILL. Every language/vision call moves from the Anthropic API to fal.
 // He ran out of Anthropic credit mid-session and asked to be charged by fal only. Two accounts, two
@@ -936,9 +953,38 @@ async function fal(model, input) {
    is a settings change, not a deploy. */
 const LLM_PROVIDER = (process.env.LLM_PROVIDER || "fal").toLowerCase();
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-/* Through fal, a Claude model keeps the analysis identical and moves only the bill. Override with
-   FAL_LLM_MODEL if you deliberately want a different one. */
-const FAL_LLM_MODEL = process.env.FAL_LLM_MODEL || "anthropic/claude-3.5-sonnet";
+/* v78: fal's router rejected the id I guessed and named what it had tried, so the id is discovered
+   rather than assumed. Set FAL_LLM_MODEL to pin one and skip the search. */
+const FAL_MODEL_PIN = process.env.FAL_LLM_MODEL || "";
+
+/* Ordered by preference: the same model family as before first, so a success keeps the analysis
+   identical and only moves the bill; capable general vision models after that. */
+const FAL_VISION_CANDIDATES = [
+  "anthropic/claude-3.5-sonnet",
+  "anthropic/claude-3-5-sonnet",
+  "google/gemini-flash-1.5",
+  "google/gemini-pro-1.5",
+  "openai/gpt-4o",
+  "meta-llama/llama-3.2-90b-vision-instruct",
+];
+const FAL_TEXT_CANDIDATES = [
+  "anthropic/claude-3.5-sonnet",
+  "anthropic/claude-3-5-sonnet",
+  "google/gemini-flash-1.5",
+  "openai/gpt-4o-mini",
+  "meta-llama/llama-3.1-8b-instruct",
+];
+
+/* Remembered per lambda: the search runs once, not on every call. */
+let _falVisionModel = null;
+let _falTextModel = null;
+
+/* Only an unknown-model answer is worth trying the next candidate for. A bad key, a rate limit or a
+   malformed request means every candidate will fail the same way, and walking the list would just turn
+   one clear error into six. */
+function looksLikeUnknownModel(status, body) {
+  return status === 404 || /no endpoints found|model not found|unknown model|404/i.test(body || "");
+}
 
 async function askAnthropic({ system, ask, image, mediaType, maxTokens }) {
   const content = image
@@ -991,28 +1037,51 @@ function readFalText(d) {
 }
 
 async function askFal({ system, ask, image, mediaType, maxTokens }) {
-  const model = image ? "fal-ai/any-llm/vision" : "fal-ai/any-llm";
-  const input = {
-    model: FAL_LLM_MODEL,
-    prompt: ask,
-    system_prompt: system,
-    max_tokens: maxTokens || 200,
-  };
-  if (image) input.image_url = `data:${mediaType};base64,${image}`;
+  const endpoint = image ? "fal-ai/any-llm/vision" : "fal-ai/any-llm";
+  const remembered = image ? _falVisionModel : _falTextModel;
+  const list = FAL_MODEL_PIN
+    ? [FAL_MODEL_PIN]
+    : remembered
+      ? [remembered]
+      : (image ? FAL_VISION_CANDIDATES : FAL_TEXT_CANDIDATES);
 
-  const r = await fetch(`https://fal.run/${model}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Key ${process.env.FAL_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(input),
-  });
-  if (!r.ok) {
-    console.error(`[reimagine] fal ${model} failed:`, r.status, (await r.text()).slice(0, 400));
-    return null;
+  let lastBody = "";
+  for (const model of list) {
+    const input = { model, prompt: ask, system_prompt: system, max_tokens: maxTokens || 200 };
+    if (image) input.image_url = `data:${mediaType};base64,${image}`;
+
+    const r = await fetch(`https://fal.run/${endpoint}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Key ${process.env.FAL_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    });
+
+    if (r.ok) {
+      const text = readFalText(await r.json());
+      if (text) {
+        if (!remembered && !FAL_MODEL_PIN) {
+          if (image) _falVisionModel = model; else _falTextModel = model;
+          console.log(`[reimagine] fal ${endpoint}: using "${model}" (pin it in FAL_LLM_MODEL to skip the search)`);
+        }
+        return text;
+      }
+      lastBody = "answered but no readable text";
+      continue;                                   // shape problem, not a model problem - readFalText logged the keys
+    }
+
+    lastBody = (await r.text()).slice(0, 400);
+    if (!looksLikeUnknownModel(r.status, lastBody)) {
+      console.error(`[reimagine] fal ${endpoint} failed on "${model}":`, r.status, lastBody);
+      return null;                                // a real failure - do not burn the rest of the list
+    }
+    console.warn(`[reimagine] fal ${endpoint}: "${model}" is not available here, trying the next one`);
   }
-  return readFalText(await r.json());
+
+  console.error(`[reimagine] fal ${endpoint}: no candidate model worked. Last response:`, lastBody);
+  return null;
 }
 
 /* The single entry point. Returns trimmed text, or null - every caller already handles null. */
