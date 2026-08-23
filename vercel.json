@@ -2,7 +2,7 @@
   "functions": {
     "api/*.js": {
       "maxDuration": 60,
-      "includeFiles": "{node_modules/dejavu-fonts-ttf/ttf/DejaVuSans-Bold.ttf,node_modules/@expo-google-fonts/playfair-display/700Bold/PlayfairDisplay_700Bold.ttf,node_modules/@expo-google-fonts/dancing-script/700Bold/DancingScript_700Bold.ttf,node_modules/@expo-google-fonts/oswald/700Bold/Oswald_700Bold.ttf}"
+      "includeFiles": "node_modules/**/{DejaVuSans-Bold,PlayfairDisplay_700Bold,DancingScript_700Bold,Oswald_700Bold}.ttf"
     }
   }
 }
