@@ -1,3 +1,36 @@
+// api/reimagine.js — "עיצוב מחדש" v83
+// v83 change: THE LETTERING GOES BACK INTO THE DESIGN, AND CODE CHECKS IT.
+// His complaint, and he was right: "גם בכתב יש עיצוב לא יכול להיות שאצלנו זה יהיה כל הזמן למטה
+// בצורה משעממת". On the Fall 7 Times reference the wording sits ON the numeral with the figure
+// pushing it; ours put the numeral on top and the words in a band underneath. v80-v82 all improved
+// how that band LOOKS, which was work on the wrong axis — on those designs the band should not exist.
+//
+// 🔑 THE FINDING THAT CHANGED THE DECISION: nothing has verified the generator's lettering on this
+// path since v73. `inspectArtwork` and `fixLettering` both live inside the `reference && USE_EDIT_PATH`
+// branch, and USE_EDIT_PATH has been false since 20 Aug. So the choice was never really "model type
+// vs server type" — it was "unchecked model type vs server type", and against THAT the server won on
+// the merits. With a check in place the trade is a different one.
+//
+// v70's lesson still stands and is not being repeated: a vision model ANSWERING "is this lettering
+// correct?" is not a foundation — it said "ok" to plainly shredded type three times. But asking it
+// "what letters do you see?" is a TRANSCRIPTION, which is the thing these models are reliable at, and
+// the verdict then happens in `letteringMatches` — a string comparison that returns the same answer
+// every time and names the words at fault. That is the difference between this and v66.
+// Flow: draw with the wording -> transcribe -> compare in code -> one `fixLettering` repair on the
+// attempt itself (built in v67, proven live) -> transcribe again -> keep whichever attempt has fewer
+// words at fault, and say so plainly when neither is clean. Every failure delivers the design.
+//
+// SERVER_TEXT_MAX 14 -> 24, on a real distinction rather than a safety margin: a few words is a
+// SLOGAN and part of the artwork, which only the generator can place because only it can see where
+// the artwork ends; a full sentence is a CAPTION and genuinely belongs in its own band, which v82 now
+// sets properly. "Rise 10 Fold Keep Going" is 19; "the first step reaching your goals is starting
+// today" is 44. Hebrew still always goes to the server — flux cannot draw it at all.
+// ⚠️ Costs, stated rather than discovered: a repair adds about twenty seconds (guarded by a budget so
+// it can never time out a run), and the transcription is the one soft spot — models like to silently
+// correct what they read, which the prompt spends most of its words forbidding. The log prints the
+// raw transcription beside the wording asked for, so that can be checked instead of guessed at.
+// TO REVERT: SERVER_TEXT_MAX back to 14. Nothing else needs touching.
+//
 // api/reimagine.js — "עיצוב מחדש" v82
 // v82 change: A THREE-LINE CAPTION IS NOW SET AS A BLOCK INSTEAD OF A PARAGRAPH.
 // v72's two-tier layout solves for exactly TWO lines — a headline over an accent — so a three-line
@@ -3254,7 +3287,20 @@ async function prepareSpec(spec) {
 /* flux draws short Latin lettering beautifully and weaves it into the design. It only fails on
    Hebrew (cannot draw it at all) and on long strings (misspells). Hand those two cases to the
    server and leave the rest alone — a plain caption underneath is worse than good integrated type. */
-const SERVER_TEXT_MAX = 14;
+/* 🔄 v83: 14 -> 24. The number was set when nothing checked the generator's spelling, so it had to be
+   low enough that spelling never had to be checked. v83 transcribes the drawn lettering and compares
+   it here in code, so the threshold no longer has to carry that job alone and can be set on what the
+   wording actually IS.
+   And there is a real line to draw there. A slogan of a few words is PART of the design — it arches,
+   it sits inside the artwork, it wraps around the subject, and only the generator can place it that
+   way because only the generator can see where the artwork ends. A full sentence is a CAPTION, and a
+   caption genuinely belongs in its own band, which is what the v82 block layout now sets properly.
+   24 characters is about where one becomes the other: "Rise 10 Fold Keep Going" is a slogan at 19,
+   "the first step reaching your goals is starting today" is a sentence at 44.
+   ⚠️ This reverses part of his 08:00 v70 decision, deliberately and with his agreement — but only
+   because the verification below now exists, which it did not then. Setting this back to 14 returns
+   the old behaviour without touching anything else. */
+const SERVER_TEXT_MAX = 24;
 
 /* v70: the second half of his decision. Turning EDIT_LETTERING_ENABLED off is NOT enough on its own —
    the caption only moves to the server when needsServerText() says so, and under the old rule a short
@@ -4400,6 +4446,113 @@ async function composeWithText(artBuf, text, colour, typography, above) {
 
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
 /* v48: a pure-typography design. No generator call, no cut-out — the lettering fills the canvas. */
+/* ---- v83: the generator draws the lettering, and CODE decides whether it is right ----
+   v70 took the lettering away from the generator because a vision model kept answering "ok" about
+   plainly broken type, and that judgement is genuinely not something to build on. But the conclusion
+   drawn from it was too wide. Asking a model "is this lettering correct?" is a judgement. Asking it
+   "what letters do you see?" is a TRANSCRIPTION — the thing vision models are actually reliable at —
+   and the judgement then happens here, in a string comparison that gives the same answer every time.
+   That is the difference between this and v66, which is the version this would otherwise repeat.
+   ⚠️ The one real risk, and it is worth knowing: models like to silently correct what they read, so
+   the prompt below spends most of its words forbidding exactly that. If a run reports "ok" on
+   lettering that is visibly wrong, this is the first thing to suspect — and the log prints the raw
+   transcription next to the wording asked for, so it can be checked rather than guessed at. */
+const LETTERING_READ_SYSTEM = `You are transcribing the lettering in a t-shirt artwork.
+
+Write out every letter and digit you can see, in reading order, top to bottom.
+
+CRITICAL: transcribe what is ACTUALLY DRAWN, not what it was probably meant to say.
+- Do NOT correct spelling. If the artwork shows "FOCISED", write FOCISED, not FOCUSED.
+- Do NOT drop a group of letters because it is not a real word. Write the letters you see.
+- Do NOT add a word that is not drawn, even if the phrase seems incomplete.
+- If the same word appears twice on the canvas, write it twice.
+
+If there is no lettering at all, answer with: (none)
+
+Answer with ONLY the transcription. No quotes, no explanation, no JSON.`;
+
+async function readLettering(artUrl) {
+  const buf = Buffer.from(await (await fetch(artUrl)).arrayBuffer());
+  const small = await sharp(buf).flatten({ background: "#ffffff" })
+    .resize(768, 768, { fit: "inside" }).jpeg({ quality: 82 }).toBuffer();
+  const raw = await claudeVision(
+    LETTERING_READ_SYSTEM, small.toString("base64"), "image/jpeg",
+    "Transcribe the lettering in this artwork.", 200
+  );
+  const t = String(raw || "").trim();
+  return /^\(?none\)?$/i.test(t) ? "" : t;
+}
+
+/* Deterministic. Returns { note, score } — an empty note means the lettering is right, and `score`
+   counts the words at fault so a repair can be compared against the attempt it came from. */
+function letteringMatches(seen, wanted) {
+  const want = wordingWords(wanted);
+  const got = wordingWords(seen);
+  if (!want.length) return { note: "", score: 0 };
+
+  const count = (arr, x) => arr.reduce((a, y) => a + (y === x ? 1 : 0), 0);
+  const missing = want.filter((x) => !got.includes(x));
+  const doubled = want.filter((x) => count(got, x) > 1);
+  /* Words on the canvas that were never asked for. This is the failure that keeps appearing as the
+     reference's own wording bleeding back in, and as invented filler when the layout has more room
+     for lettering than the wording fills. */
+  const extra = [...new Set(got.filter((x) => !want.includes(x)))];
+
+  const bits = [];
+  if (missing.length) bits.push(`missing or misspelled: ${JSON.stringify(missing.join(" "))}`);
+  if (doubled.length) bits.push(`drawn more than once: ${JSON.stringify(doubled.join(" "))}`);
+  if (extra.length) bits.push(`words that were never asked for: ${JSON.stringify(extra.join(" "))}`);
+  return { note: bits.join("; "), score: missing.length + doubled.length + extra.length };
+}
+
+/* One repair attempt, then the truth either way. Never throws: a verification that fails must not
+   cost a design that may well be fine. */
+const LETTERING_FIX_BUDGET = 38000;   // no repair once the run is this far into its 60s ceiling
+const LETTERING_NOTICE =
+  "הכיתוב בעיצוב לא יצא מדויק. נסו ליצור שוב — בכל הרצה המנוע מצייר את האותיות מחדש.";
+
+async function verifyDrawnLettering(art, specUsed, refWording, t0) {
+  const wantedText = String(specUsed.text || "").trim();
+  if (!wantedText) return { art, notice: "" };
+
+  let first;
+  try {
+    const seen = await readLettering(art);
+    first = letteringMatches(seen, wantedText);
+    console.log(
+      `[reimagine] lettering read: wanted=${JSON.stringify(wantedText)} seen=${JSON.stringify(seen.slice(0, 80))}` +
+      ` -> ${first.note || "ok"}`
+    );
+  } catch (e) {
+    console.warn("[reimagine] lettering read failed, delivering as drawn:", e.message);
+    return { art, notice: "" };
+  }
+  if (!first.note) return { art, notice: "" };
+
+  if (Date.now() - t0 > LETTERING_FIX_BUDGET) {
+    console.warn("[reimagine] no time left for a lettering repair - delivering with a notice");
+    return { art, notice: LETTERING_NOTICE };
+  }
+
+  try {
+    const repaired = await fixLettering(art, specUsed, first.note, refWording);
+    const seen2 = await readLettering(repaired);
+    const second = letteringMatches(seen2, wantedText);
+    console.log(
+      `[reimagine] lettering after repair: seen=${JSON.stringify(seen2.slice(0, 80))} -> ${second.note || "ok"}`
+    );
+    if (!second.note) return { art: repaired, notice: "" };
+    /* Take whichever attempt has fewer words at fault. A repair that made things worse is not an
+       improvement just because it came second. */
+    return second.score < first.score
+      ? { art: repaired, notice: LETTERING_NOTICE }
+      : { art, notice: LETTERING_NOTICE };
+  } catch (e) {
+    console.warn("[reimagine] lettering repair failed, delivering the first attempt:", e.message);
+    return { art, notice: LETTERING_NOTICE };
+  }
+}
+
 async function finishTextOnly(serverText, t0, preview, invert) {
   const W = preview ? PREVIEW_W : CANVAS_W;
   const H = preview ? PREVIEW_H : CANVAS_H;
@@ -4926,6 +5079,17 @@ export default async function handler(req, res) {
         /* v80: only the flux path can be redrawn from the spec alone. If the edit path produced this
            artwork, regenerating with flux would swap engines mid-run, so it is left without one. */
         regenerate = () => generateFromSpec(specUsed);
+
+        /* v83: verify the lettering the generator just drew. 🔑 Nothing has checked it on this path
+           since v73 moved the tool back to flux — inspectArtwork and fixLettering both sit inside the
+           edit-path branch above, which has been dead ever since. That absence is the whole reason
+           the lettering had to be taken away from the generator in the first place; with the check
+           running, it can be given back and still not ship broken. */
+        if (!wanted && specUsed.text && !isPreview) {
+          const checked = await verifyDrawnLettering(art, specUsed, refWording, t0);
+          art = checked.art;
+          if (checked.notice) letteringNotice = checked.notice;
+        }
       }
 
       const chosen = presetFor(specUsed);
