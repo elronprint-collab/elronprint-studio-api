@@ -1,3 +1,31 @@
+// api/reimagine.js — "עיצוב מחדש" v84
+// v84 change: A WORD DRAWN TWICE IS ERASED, NOT ARGUED WITH.
+// v83 worked exactly as designed and the log proves every step: the transcription reported
+// "RISE KEEP KEEP GOING 9" — it did NOT quietly correct what it saw, which was the risk I flagged —
+// `letteringMatches` caught the repeat and named it, `fixLettering` was told in plain words not to
+// draw "keep" twice, and it came back twice again in two different sizes. Two failures in one run.
+// 🔑 And the cause is in the spec, not in the wording of the instruction: `typography` said "stacked
+// vertical layout" and the reference carried three lines of lettering, so a three-line layout was
+// filled with two words by repeating one. The generator is doing what it was asked. A third phrasing
+// of "do not repeat it" would have been the eighth wording of the disc ban all over again.
+// So the extra copy is deleted from the picture instead. The model is asked only WHERE the word
+// appears — a location question, not a judgement — and the deletion is geometry: the connected
+// strokes lying inside that box are painted out and nothing else is touched.
+// ⚠️ This is the first code in the pipeline that removes ink from a finished design, which is the
+// most expensive kind of mistake here, so every rail is a refusal and the default is to change
+// nothing: at least two plausible boxes; the largest occurrence is kept; only strokes lying ENTIRELY
+// inside a target box are eligible; never the main piece nor anything approaching its size; a hard
+// ceiling on total ink removed; and the result is discarded unless the transcription afterwards is
+// measurably better than before. It runs BEFORE fixLettering, since asking has already failed on
+// this exact case and a redraw risks the whole design where deleting one word does not.
+// 🐞 Found while testing, and worth keeping: a bogus enormous box became the LARGEST, so
+// keep-the-largest kept the bogus one and marked the REAL occurrences for deletion. The size rails
+// held and only four strokes went, but the logic was inverted and would not always be so lucky.
+// Implausible boxes are now discarded before the keep/delete decision is made rather than after.
+// ⏳ STILL OWED, and it is a THEME change rather than this file: the run knew the lettering was wrong
+// and returned a Hebrew notice in `notice`, and the page never showed it to him. Needs a fresh theme
+// duplicate.
+//
 // api/reimagine.js — "עיצוב מחדש" v83
 // v83 change: THE LETTERING GOES BACK INTO THE DESIGN, AND CODE CHECKS IT.
 // His complaint, and he was right: "גם בכתב יש עיצוב לא יכול להיות שאצלנו זה יהיה כל הזמן למטה
@@ -4515,12 +4543,12 @@ async function verifyDrawnLettering(art, specUsed, refWording, t0) {
   const wantedText = String(specUsed.text || "").trim();
   if (!wantedText) return { art, notice: "" };
 
-  let first;
+  let first, seenFirst = "";
   try {
-    const seen = await readLettering(art);
-    first = letteringMatches(seen, wantedText);
+    seenFirst = await readLettering(art);
+    first = letteringMatches(seenFirst, wantedText);
     console.log(
-      `[reimagine] lettering read: wanted=${JSON.stringify(wantedText)} seen=${JSON.stringify(seen.slice(0, 80))}` +
+      `[reimagine] lettering read: wanted=${JSON.stringify(wantedText)} seen=${JSON.stringify(seenFirst.slice(0, 80))}` +
       ` -> ${first.note || "ok"}`
     );
   } catch (e) {
@@ -4532,6 +4560,39 @@ async function verifyDrawnLettering(art, specUsed, refWording, t0) {
   if (Date.now() - t0 > LETTERING_FIX_BUDGET) {
     console.warn("[reimagine] no time left for a lettering repair - delivering with a notice");
     return { art, notice: LETTERING_NOTICE };
+  }
+
+  /* v84: a duplicate is the one complaint that has a deterministic answer, so try that BEFORE asking
+     a model to redraw. Asking failed twice inside a single run on exactly this case, and a redraw
+     also risks the rest of the design, which deleting one repeated word does not. */
+  const dupes = repeatedWords(seenFirst, wantedText);
+  if (dupes.length) {
+    for (const word of dupes) {
+      try {
+        const cleaned = await dropRepeatedWord(art, word);
+        if (!cleaned) continue;
+        const seenAfter = await readLettering(cleaned);
+        const after = letteringMatches(seenAfter, wantedText);
+        console.log(
+          `[reimagine] lettering after removing the extra ${JSON.stringify(word)}: ` +
+          `seen=${JSON.stringify(seenAfter.slice(0, 80))} -> ${after.note || "ok"}`
+        );
+        /* Only keep it if it genuinely helped. Erasing ink and ending up no better is worse than
+           having left it alone. */
+        if (after.score < first.score) {
+          if (!after.note) return { art: cleaned, notice: "" };
+          art = cleaned;
+          first = after;
+        }
+      } catch (e) {
+        console.warn(`[reimagine] duplicate removal failed for ${JSON.stringify(word)}:`, e.message);
+      }
+      if (Date.now() - t0 > LETTERING_FIX_BUDGET) break;
+    }
+    if (!first.note) return { art, notice: "" };
+    if (Date.now() - t0 > LETTERING_FIX_BUDGET) {
+      return { art, notice: LETTERING_NOTICE };
+    }
   }
 
   try {
@@ -4551,6 +4612,166 @@ async function verifyDrawnLettering(art, specUsed, refWording, t0) {
     console.warn("[reimagine] lettering repair failed, delivering the first attempt:", e.message);
     return { art, notice: LETTERING_NOTICE };
   }
+}
+
+/* ---- v84: a word drawn twice is REMOVED, not argued about ----
+   The 18:5x run proved asking does not work here: the transcription correctly reported "keep" twice,
+   fixLettering was told in plain words not to draw it twice, and it came back twice again — in two
+   different sizes. Two failures inside one run, and the cause is visible in the spec: `typography`
+   said "stacked vertical layout" and the reference had three lines of lettering, so the generator
+   filled a three-line layout with two words by repeating one. It is doing what it was asked.
+   So the extra copy is deleted from the picture. The model is asked only WHERE the word appears,
+   which is a location question rather than a judgement, and the deletion itself is geometry: the
+   connected strokes that sit inside that box are painted out, nothing else is touched.
+   ⚠️ This code removes ink from a finished design, which is the most expensive kind of mistake in
+   this pipeline, so every rail below is a refusal and the default is always to change nothing:
+     - at least two boxes, or there is no duplicate to resolve;
+     - the LARGEST occurrence is kept, since the filler repeat is the odd one out;
+     - only strokes lying ENTIRELY inside a target box are eligible;
+     - never the main piece of the artwork, and never a piece approaching its size;
+     - a hard ceiling on the total ink removed.
+   Any rail that trips abandons the whole attempt and delivers the artwork exactly as it was. */
+const DUP_BOX_SYSTEM = `You are locating a word in a t-shirt artwork.
+
+You will be given one word. Find EVERY place that word is drawn on the canvas, including places where
+it is drawn in a different size or a different style.
+
+For each one, give its bounding box as percentages of the image, where 0,0 is the top-left corner and
+100,100 is the bottom-right. Report only the word itself, tightly — not the line or block it sits in.
+
+Report a box for every occurrence, even if there is only one. Do not report other words.
+
+Answer with ONLY a JSON object, no prose, no markdown fences:
+{"boxes":[{"x0":0,"y0":0,"x1":0,"y1":0}]}`;
+
+const DUP_MAX_PIECE_FRAC = 0.25;   // never delete a piece this close to the size of the main artwork
+const DUP_MAX_TOTAL_FRAC = 0.12;   // nor more than this much of the total ink, all told
+const DUP_BOX_MARGIN     = 1.5;    // percent of the canvas, to forgive a slightly tight box
+/* A single word does not cover a third of the canvas. Found while testing: a bogus huge box became
+   the LARGEST, so the keep-the-largest rule kept the bogus one and marked the real occurrences for
+   deletion — the safety rails held and only four strokes went, but the logic was inverted and would
+   not always be so lucky. An implausible box is discarded before any of that. */
+const DUP_MAX_BOX_FRAC   = 0.35;
+
+async function wordBoxes(artUrl, word) {
+  const buf = Buffer.from(await (await fetch(artUrl)).arrayBuffer());
+  const small = await sharp(buf).flatten({ background: "#ffffff" })
+    .resize(768, 768, { fit: "inside" }).jpeg({ quality: 82 }).toBuffer();
+  const j = parseJsonish(await claudeVision(
+    DUP_BOX_SYSTEM, small.toString("base64"), "image/jpeg",
+    `Locate every place the word ${JSON.stringify(word)} is drawn. JSON only.`, 300
+  ));
+  const raw = j && Array.isArray(j.boxes) ? j.boxes : [];
+  return raw
+    .map((b) => ({ x0: +b.x0, y0: +b.y0, x1: +b.x1, y1: +b.y1 }))
+    .filter((b) => [b.x0, b.y0, b.x1, b.y1].every((v) => isFinite(v) && v >= 0 && v <= 100))
+    .filter((b) => b.x1 > b.x0 && b.y1 > b.y0);
+}
+
+async function dropRepeatedWord(artUrl, word) {
+  /* Implausible boxes are discarded before the keep/delete decision, not after — this filter is
+     what stops that decision from being made against a bogus box. */
+  const boxes = (await wordBoxes(artUrl, word))
+    .filter((b) => ((b.x1 - b.x0) * (b.y1 - b.y0)) / 10000 <= DUP_MAX_BOX_FRAC);
+  if (boxes.length < 2) {
+    console.log(`[reimagine] duplicate removal: only ${boxes.length} box(es) for ${JSON.stringify(word)} - nothing to do`);
+    return null;
+  }
+  /* Keep the biggest. On this reference the repeat came back smaller than the real one, and in
+     general the intended occurrence is the prominent one. */
+  const area = (b) => (b.x1 - b.x0) * (b.y1 - b.y0);
+  const keep = boxes.reduce((a, b) => (area(b) > area(a) ? b : a), boxes[0]);
+  const targets = boxes.filter((b) => b !== keep);
+
+  const src = Buffer.from(await (await fetch(artUrl)).arrayBuffer());
+  const { data, info } = await sharp(src).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+  const n = w * h;
+
+  /* Ink is anything that is neither transparent nor near-white, so this works on a colour design as
+     well as a black one. */
+  const on = new Uint8Array(n);
+  let inkTotal = 0;
+  for (let p = 0, i = 0; p < n; p++, i += ch) {
+    const a = data[i + 3];
+    const light = data[i] > 238 && data[i + 1] > 238 && data[i + 2] > 238;
+    if (a > 128 && !light) { on[p] = 1; inkTotal++; }
+  }
+  if (!inkTotal) return null;
+
+  const label = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  const pieces = [];
+  for (let s = 0; s < n; s++) {
+    if (!on[s] || label[s] !== -1) continue;
+    const id = pieces.length;
+    let sp = 0, count = 0;
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    label[s] = id; stack[sp++] = s;
+    while (sp > 0) {
+      const q = stack[--sp];
+      count++;
+      const x = q % w, y = (q / w) | 0;
+      if (x < x0) x0 = x; if (x > x1) x1 = x;
+      if (y < y0) y0 = y; if (y > y1) y1 = y;
+      if (x > 0     && on[q - 1] && label[q - 1] === -1) { label[q - 1] = id; stack[sp++] = q - 1; }
+      if (x < w - 1 && on[q + 1] && label[q + 1] === -1) { label[q + 1] = id; stack[sp++] = q + 1; }
+      if (y > 0     && on[q - w] && label[q - w] === -1) { label[q - w] = id; stack[sp++] = q - w; }
+      if (y < h - 1 && on[q + w] && label[q + w] === -1) { label[q + w] = id; stack[sp++] = q + w; }
+    }
+    pieces.push({ count, x0, y0, x1, y1 });
+  }
+  if (!pieces.length) return null;
+  const main = pieces.reduce((a, b) => (b.count > a.count ? b : a), pieces[0]);
+
+  const doomed = new Set();
+  let removed = 0;
+  for (const t of targets) {
+    const bx0 = ((t.x0 - DUP_BOX_MARGIN) / 100) * w, bx1 = ((t.x1 + DUP_BOX_MARGIN) / 100) * w;
+    const by0 = ((t.y0 - DUP_BOX_MARGIN) / 100) * h, by1 = ((t.y1 + DUP_BOX_MARGIN) / 100) * h;
+    for (let i = 0; i < pieces.length; i++) {
+      const p = pieces[i];
+      if (p === main) continue;                                   // never the artwork itself
+      if (p.count >= main.count * DUP_MAX_PIECE_FRAC) continue;   // nor anything near its size
+      if (p.x0 < bx0 || p.x1 > bx1 || p.y0 < by0 || p.y1 > by1) continue;  // must be wholly inside
+      if (doomed.has(i)) continue;
+      doomed.add(i);
+      removed += p.count;
+    }
+  }
+  if (!doomed.size) {
+    console.log("[reimagine] duplicate removal: no strokes sat wholly inside the extra box - left alone");
+    return null;
+  }
+  if (removed > inkTotal * DUP_MAX_TOTAL_FRAC) {
+    console.warn(
+      `[reimagine] duplicate removal REFUSED: would erase ${((removed / inkTotal) * 100).toFixed(1)}% of the ink`
+    );
+    return null;
+  }
+
+  for (let p = 0; p < n; p++) {
+    const l = label[p];
+    if (l >= 0 && doomed.has(l)) {
+      const i = p * ch;
+      data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = 0;
+    }
+  }
+  console.log(
+    `[reimagine] duplicate removal: erased ${doomed.size} strokes ` +
+    `(${((removed / inkTotal) * 100).toFixed(1)}% of the ink) for the extra ${JSON.stringify(word)}`
+  );
+  const out = await sharp(data, { raw: { width: w, height: h, channels: ch } })
+    .png({ compressionLevel: 6 }).toBuffer();
+  return await uploadCloudinary(out);
+}
+
+/* Just the words the transcription found more than once, so the duplicate path can be tried on its
+   own before anything is asked of a model. */
+function repeatedWords(seen, wanted) {
+  const want = wordingWords(wanted);
+  const got = wordingWords(seen);
+  return want.filter((x) => got.reduce((a, y) => a + (y === x ? 1 : 0), 0) > 1);
 }
 
 async function finishTextOnly(serverText, t0, preview, invert) {
