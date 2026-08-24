@@ -1,5 +1,34 @@
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
+// api/reimagine.js — "עיצוב מחדש" v80
+// v80 change: TWO FIXES, both read off one bad pair rather than guessed.
+//
+// 1. A TEXT-ONLY REFERENCE WENT TO THE GENERATOR NO MATTER HOW LONG THE WORDING WAS.
+//    "Modern Streetwear Stay Positive" -> asked for "Keep Feeling Focused" (18 characters) and came
+//    back as "Keep Freenel FOCOTED" — two of the three words shredded. needsServerText() had already
+//    routed that wording to the server, correctly; the v74 text-only branch then handed it straight
+//    back to flux, because it tested only "is there a subject?" and never "can the generator spell
+//    this?". So the one rule that exists to stop misspellings was cancelled by the branch below it.
+//    `generatorCanSpell()` now gates that branch. Short Latin wording still goes to the generator —
+//    that is what v74 was for, and ALWAYS RISE proved it works — while long wording and Hebrew stay
+//    with the server fonts, which since v72/v75/v76 set real two-tier typography rather than a
+//    file-name caption. ⚠️ HEBREW WAS ALSO AFFECTED and this may be the missing-Hebrew bug: on a
+//    text-only Hebrew design the old branch handed the words to a model that cannot draw Hebrew.
+//
+// 2. THE INVENTED BACKDROP DISC — NINE SIGHTINGS — IS NOW MEASURED, NOT ASKED ABOUT.
+//    The re-run of that same design (with the wording shortened to "Keep Focused", which did spell
+//    correctly) came back on a huge coral disc, with a dog nobody asked for standing on it and white
+//    stripes inside it that the cut-out tears into real holes. That disc has been banned in the
+//    negative prompt in seven different wordings since v40 and the ban has never once held.
+//    🔑 It is not disobedience. Streetwear and outdoor print art in the model's training almost
+//    always carries a sun or a circle behind the subject, so it draws one by habit. An eighth wording
+//    would not have helped either. `looksLikeDisc()` measures the cut-out geometrically and
+//    `finishArtwork` regenerates ONCE when it fires — the same shape as every fix that has actually
+//    held this month (forceSolidInk, dropEdgeStrays, sharedWording): make it survive by construction,
+//    do not ask a model to behave.
+//    The retry is kept ONLY if it comes back clean, so a false positive costs one generation and
+//    about twenty seconds, never the design.
+//
 // api/reimagine.js — "עיצוב מחדש" v79
 // v79 change: fal PRINTED THE ALLOWED LIST. Use it, and stop treating 422 as fatal.
 // The v78 search walked one step and stopped. Two things came out of that run, both useful:
@@ -2306,6 +2335,139 @@ async function dropEdgeStrays(buf) {
   return sharp(data, { raw: { width: w, height: h, channels: ch } }).png({ compressionLevel: 1 }).toBuffer();
 }
 
+/* ---------------- v80: the invented backdrop disc ----------------
+   Nine sightings since v40, banned in the negative prompt in seven different wordings, and the ban
+   has never held. It is not disobedience: streetwear and outdoor print art in the model's training
+   almost always carries a sun or a circle behind the subject, so it draws one by habit. An eighth
+   wording would not fix that either. This measures the cut-out instead.
+
+   🔑 THE SHAPE OF THE TEST, and why the obvious version does not work. My first attempt compared the
+   artwork with an ideal ellipse inscribed in its BOUNDING BOX. It caught a bare disc and missed the
+   real case outright, because in the live result the script word ran well below and past the disc:
+   the bounding box grew to take the lettering in, and the ideal circle drawn inside that box no
+   longer matched the disc at all. The bounding box is a property of everything drawn, so it cannot
+   be the reference for finding one thing among them.
+   So the disc is found DIRECTLY, as the largest circle that fits inside the artwork — a distance
+   transform, whose maximum is the centre of that circle and whose value there is its radius. That is
+   immune to anything sticking out of it, which is the whole difficulty.
+
+   Three measurements then decide, and each rejects a specific thing that is NOT this defect:
+     1. `circleFrac` — the circle must cover a real share of the canvas. Rejects thin artwork
+        (lettering has no room for a circle at all) and a small round badge inside a composition.
+     2. `agreement` — inside that circle's own square box, the artwork and the ideal circle must
+        agree pixel for pixel. Rejects a solid RECTANGLE, which contains just as big a circle but
+        disagrees at all four corners. That is a different defect and not one to regenerate over.
+     3. `insideShare` — the circle must account for most of the ink. Rejects a real design that
+        merely contains a dense round area.
+
+   Returns the measurements when it fires, so a wrong call can be argued with from the log, or null.
+   Read at 320px: only the shape matters, which keeps this to a few milliseconds. */
+/* A second drawing plus its cut-out costs roughly twenty-five seconds, and vercel.json gives these
+   functions sixty. Past this point the retry would risk the whole run timing out — and losing a
+   design he would otherwise have received, to avoid a defect he can simply generate away. A disc is
+   worth a retry; it is not worth the design. Same reasoning as the v66 hardened retry's own clock. */
+const DISC_RETRY_BUDGET = 30000;
+
+const DISC_MIN_CIRCLE_FRAC = 0.30;   // inscribed circle vs the whole canvas
+const DISC_AGREE_MIN       = 0.88;   // circle vs artwork inside the circle's box
+const DISC_INSIDE_MIN      = 0.55;   // share of the artwork that lies inside the circle
+
+async function looksLikeDisc(buf) {
+  const { data, info } = await sharp(buf)
+    .ensureAlpha()
+    .resize(320, 320, { fit: "inside", kernel: "nearest" })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width: w, height: h, channels: ch } = info;
+  const n = w * h;
+
+  const on = new Uint8Array(n);
+  for (let p = 0, i = 3; p < n; p++, i += ch) on[p] = data[i] > 128 ? 1 : 0;
+
+  /* The disc is the biggest connected thing on the canvas: whatever is drawn on top of it is joined
+     to it, so they are one component. Same flood fill dropEdgeStrays uses. */
+  const label = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  let best = null;
+  for (let s = 0; s < n; s++) {
+    if (!on[s] || label[s] !== -1) continue;
+    let sp = 0, count = 0;
+    label[s] = s; stack[sp++] = s;
+    while (sp > 0) {
+      const q = stack[--sp];
+      count++;
+      const x = q % w, y = (q / w) | 0;
+      if (x > 0     && on[q - 1] && label[q - 1] === -1) { label[q - 1] = s; stack[sp++] = q - 1; }
+      if (x < w - 1 && on[q + 1] && label[q + 1] === -1) { label[q + 1] = s; stack[sp++] = q + 1; }
+      if (y > 0     && on[q - w] && label[q - w] === -1) { label[q - w] = s; stack[sp++] = q - w; }
+      if (y < h - 1 && on[q + w] && label[q + w] === -1) { label[q + w] = s; stack[sp++] = q + w; }
+    }
+    if (!best || count > best.count) best = { id: s, count };
+  }
+  if (!best) return null;
+
+  /* Chamfer 3-4 distance transform over that component. Neighbours outside the canvas are simply
+     skipped rather than counted as background, so a disc running off the edge still measures as the
+     circle it is instead of being cut in half by the frame. */
+  const D = new Float32Array(n);
+  for (let p = 0; p < n; p++) D[p] = label[p] === best.id ? 1e9 : 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (D[p] === 0) continue;
+      let d = D[p];
+      if (y > 0)                d = Math.min(d, D[p - w] + 3);
+      if (x > 0)                d = Math.min(d, D[p - 1] + 3);
+      if (y > 0 && x > 0)       d = Math.min(d, D[p - w - 1] + 4);
+      if (y > 0 && x < w - 1)   d = Math.min(d, D[p - w + 1] + 4);
+      D[p] = d;
+    }
+  }
+  let maxD = 0, centre = 0;
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const p = y * w + x;
+      if (D[p] === 0) continue;
+      let d = D[p];
+      if (y < h - 1)              d = Math.min(d, D[p + w] + 3);
+      if (x < w - 1)              d = Math.min(d, D[p + 1] + 3);
+      if (y < h - 1 && x < w - 1) d = Math.min(d, D[p + w + 1] + 4);
+      if (y < h - 1 && x > 0)     d = Math.min(d, D[p + w - 1] + 4);
+      D[p] = d;
+      if (d > maxD) { maxD = d; centre = p; }
+    }
+  }
+
+  const R = maxD / 3;                     // chamfer counts a straight step as 3
+  const circleFrac = (Math.PI * R * R) / n;
+  if (circleFrac < DISC_MIN_CIRCLE_FRAC) return null;
+
+  const cx = centre % w, cy = (centre / w) | 0;
+  let boxPx = 0, agree = 0, litInside = 0;
+  const x0 = Math.round(cx - R), x1 = Math.round(cx + R);
+  const y0 = Math.round(cy - R), y1 = Math.round(cy + R);
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      boxPx++;
+      const within = (x - cx) * (x - cx) + (y - cy) * (y - cy) <= R * R;
+      const lit = label[y * w + x] === best.id;
+      if (within && lit) litInside++;
+      if (within === lit) agree++;
+    }
+  }
+  const agreement = agree / Math.max(1, boxPx);
+  const insideShare = litInside / Math.max(1, best.count);
+  if (agreement < DISC_AGREE_MIN || insideShare < DISC_INSIDE_MIN) return null;
+
+  return {
+    radius: Math.round(R),
+    circleFrac: +circleFrac.toFixed(3),
+    agreement: +agreement.toFixed(3),
+    insideShare: +insideShare.toFixed(3),
+  };
+}
+
 /* ---------------- print canvas ---------------- */
 async function toPrintCanvas(buf) {
   const stats = await sharp(buf).ensureAlpha().stats();
@@ -3061,6 +3223,21 @@ function needsServerText(text) {
   if (SERVER_DRAWS_ALL_LETTERING) return true;     // v70: every caption, not just the hard cases
   if (HEBREW_RE.test(t)) return true;              // flux cannot draw Hebrew at all
   return t.replace(/\s+/g, "").length > SERVER_TEXT_MAX;
+}
+
+/* v80: the missing half of the v74 text-only rule. That rule says a pure-typography reference is
+   better drawn by the generator than set in a font — true, and STREET SOUL, AW YEAH! and ALWAYS RISE
+   all prove it. But it was applied to ANY wording, so an 18-character slogan that needsServerText()
+   had already routed away came straight back to flux and was misspelled ("Keep Freenel FOCOTED").
+   The generator gets the wording only when it can be trusted to spell it: Latin, and short.
+   Deliberately the mirror of needsServerText rather than a second opinion — if SERVER_DRAWS_ALL_LETTERING
+   is ever turned back on, text-only designs follow it too instead of quietly opting out. */
+function generatorCanSpell(text) {
+  const t = String(text || "").trim();
+  if (!t) return false;
+  if (SERVER_DRAWS_ALL_LETTERING) return false;    // the server owns every caption in that mode
+  if (HEBREW_RE.test(t)) return false;             // flux cannot draw Hebrew at all
+  return t.replace(/\s+/g, "").length <= SERVER_TEXT_MAX;
 }
 
 /* v53: everything the FLUX path needs done to the spec before it is drawn, in one place.
@@ -4091,30 +4268,74 @@ async function finishTextOnly(serverText, t0, preview) {
   };
 }
 
-async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalette) {
+async function finishArtwork(art, t0, preview, invert, serverText, solidInkPalette, regenerate) {
   const elapsed = () => Date.now() - t0;
 
-  let cutout = await fal("fal-ai/birefnet", { image_url: art });
-  let qc = await inspect(cutout);
-  console.log(`[reimagine] cutout+qc: ${elapsed()}ms`);
+  /* Everything between the generator and the ink passes, in one place so the v80 disc retry can run
+     it a second time on a fresh drawing without duplicating any of it. */
+  const cutAndCheck = async (artUrl) => {
+    const cutout = await fal("fal-ai/birefnet", { image_url: artUrl });
+    const qc = await inspect(cutout);
+    console.log(`[reimagine] cutout+qc: ${elapsed()}ms`);
 
-  /* v48: refuse to ship a blank print file. One run delivered an empty canvas with only the caption
-     on it and nothing said why — an error he can read beats a PNG with nothing in it. */
-  if (qc.empty) {
-    console.error(`[reimagine] artwork came back EMPTY (ink=${qc.inkRatio.toFixed(4)}) - refusing to deliver`);
-    throw new Error(
-      "היצירה חזרה ריקה — ייתכן שהנושא נחסם או שהאיור היה בהיר מדי והוסר עם הרקע. " +
-      "נסו שוב, או תארו את הנושא המרכזי בצבעים כהים יותר."
-    );
-  }
+    /* v48: refuse to ship a blank print file. One run delivered an empty canvas with only the caption
+       on it and nothing said why — an error he can read beats a PNG with nothing in it. */
+    if (qc.empty) {
+      console.error(`[reimagine] artwork came back EMPTY (ink=${qc.inkRatio.toFixed(4)}) - refusing to deliver`);
+      throw new Error(
+        "היצירה חזרה ריקה — ייתכן שהנושא נחסם או שהאיור היה בהיר מדי והוסר עם הרקע. " +
+        "נסו שוב, או תארו את הנושא המרכזי בצבעים כהים יותר."
+      );
+    }
 
-  let cutBuf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
-  if (qc.cropped) {
-    console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+    let buf = Buffer.from(await (await fetch(cutout)).arrayBuffer());
+    if (qc.cropped) {
+      console.log("[reimagine] edges still opaque after birefnet - running flood fill");
+      try {
+        buf = await stripLeftoverBackground(buf);
+      } catch (e) {
+        console.warn("flood fill failed, keeping birefnet output:", e.message);
+      }
+    }
+    return { qc, buf };
+  };
+
+  let { qc, buf: cutBuf } = await cutAndCheck(art);
+
+  /* v80: the invented backdrop disc, regenerated rather than argued with.
+     Every guard here is about never making a run WORSE than it already was: the check itself cannot
+     throw, the retry is only taken when it comes back clean, and any failure along the way delivers
+     the drawing we already have. A false positive therefore costs one generation and about twenty
+     seconds — never the design. Skipped on previews, which are not the file he prints. */
+  if (typeof regenerate === "function" && !preview && elapsed() < DISC_RETRY_BUDGET) {
+    let disc = null;
     try {
-      cutBuf = await stripLeftoverBackground(cutBuf);
+      disc = await looksLikeDisc(cutBuf);
     } catch (e) {
-      console.warn("flood fill failed, keeping birefnet output:", e.message);
+      console.warn("[reimagine] disc check failed, keeping the artwork as it is:", e.message);
+    }
+    if (disc) {
+      console.warn(
+        `[reimagine] backdrop disc detected (radius=${disc.radius} circle=${disc.circleFrac} ` +
+        `agreement=${disc.agreement} inside=${disc.insideShare}) - drawing it once more`
+      );
+      try {
+        const again = await regenerate();
+        if (!again) throw new Error("the generator returned nothing");
+        const second = await cutAndCheck(again);
+        const stillDisc = await looksLikeDisc(second.buf).catch(() => null);
+        if (stillDisc) {
+          /* Neither attempt is clean, and swapping one disc for another buys nothing — keep the one
+             already measured rather than adding variance for its own sake. */
+          console.warn("[reimagine] the disc came back on the retry too - delivering the first attempt");
+        } else {
+          console.log("[reimagine] retry came back clean - using it");
+          qc = second.qc;
+          cutBuf = second.buf;
+        }
+      } catch (e) {
+        console.warn("[reimagine] disc retry failed, delivering the first attempt:", e.message);
+      }
     }
   }
 
@@ -4302,6 +4523,7 @@ export default async function handler(req, res) {
       }
 
       let art = null;
+      let regenerate = null;             // v80: how to redraw, if the disc check asks for one
       let wanted = null;                 // non-null => the SERVER draws the caption (flux path only)
       let specUsed = prepared.spec;
       let fluxPrepared = false;
@@ -4452,7 +4674,9 @@ export default async function handler(req, res) {
            lettering with real texture, and the server font is the weakest thing this tool produces on
            exactly the designs where the typography IS the design. So try the generator first and keep
            finishTextOnly as the fallback. */
-        if (wanted && !specUsed.subject && TEXT_ONLY_USES_GENERATOR) {
+        /* v80: ...but only when it can spell the wording. Without this gate the branch cancelled
+           needsServerText() outright and every long text-only slogan came back mangled. */
+        if (wanted && !specUsed.subject && TEXT_ONLY_USES_GENERATOR && generatorCanSpell(wanted.text)) {
           console.log("[reimagine] text-only reference: letting the generator draw the lettering");
           specUsed.text = wanted.text;
           specUsed.typography = wanted.typography || specUsed.typography || "";
@@ -4461,7 +4685,11 @@ export default async function handler(req, res) {
         }
 
         if (wanted && !specUsed.subject) {
-          console.log("[reimagine] text-only reference: skipping the generator, lettering only");
+          console.log(
+            "[reimagine] text-only reference: skipping the generator, lettering only" +
+            ` (${HEBREW_RE.test(wanted.text) ? "Hebrew" : `${wanted.text.replace(/\s+/g, "").length} chars`}` +
+            ` - the generator cannot spell it reliably)`
+          );
           const out = await finishTextOnly(wanted, t0, isPreview);
           const left = owner
             ? { freeLeft: null, credits: null, owner: true }
@@ -4496,12 +4724,16 @@ export default async function handler(req, res) {
         }
 
         art = await generateFromSpec(specUsed);
+        /* v80: only the flux path can be redrawn from the spec alone. If the edit path produced this
+           artwork, regenerating with flux would swap engines mid-run, so it is left without one. */
+        regenerate = () => generateFromSpec(specUsed);
       }
 
       const chosen = presetFor(specUsed);
       const out = await finishArtwork(
         art, t0, isPreview, !!(chosen && chosen.invert), wanted,
-        paletteIsMonochrome(specUsed.palette) && !inkTextureWanted(specUsed) ? specUsed.palette : null
+        paletteIsMonochrome(specUsed.palette) && !inkTextureWanted(specUsed) ? specUsed.palette : null,
+        regenerate
       );
 
       // charged only now, after a design actually exists
