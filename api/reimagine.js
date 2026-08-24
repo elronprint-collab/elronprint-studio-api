@@ -1,3 +1,28 @@
+// api/reimagine.js — "עיצוב מחדש" v82
+// v82 change: A THREE-LINE CAPTION IS NOW SET AS A BLOCK INSTEAD OF A PARAGRAPH.
+// v72's two-tier layout solves for exactly TWO lines — a headline over an accent — so a three-line
+// caption fell all the way through to the plain path: one face, one size, three centred lines with
+// ragged edges. That is a paragraph typed under a picture, which is the same complaint v75 fixed for
+// two lines and never reached three.
+// 🔑 The fix takes the treatment from the references themselves, and it is entirely geometric:
+// EVERY LINE IS SET TO THE SAME WIDTH. Lines with fewer characters come out in larger type, so the
+// varied sizes are a CONSEQUENCE of the text rather than a decision about it. That matters, because
+// the obvious alternative — promote one of the three lines to a headline — has no honest basis:
+// splitting one sentence across three lines leaves no line that IS a headline, and picking one
+// anyway emphasises a word at random. This needed no new judgement from the analyser and no new
+// wording in any prompt.
+// Two details that took a second pass each, both found by looking at the rendered proof:
+//   1. THE GAPS. First version spaced lines by the FONT's ascender and descender. DejaVu's ascender
+//      is 0.93em while a line of lowercase reaches about 0.76, so both large lines paid for empty
+//      space no letter occupied and the first gap came out half again as wide as the second.
+//      `inkExtent` now measures the glyphs actually used.
+//   2. And the gap itself is ONE distance for the whole block, not one per pair. Scaling it to each
+//      pair's smaller line reintroduced the same unevenness from the other direction — when the
+//      sizes vary by design, anything derived from them varies with them.
+// Declines safely to the plain path on fewer than three lines, a face that will not fit, or a size
+// under the minimum — so it only ever replaces the flattest result, never a better one. Two-line
+// captions keep the proven v72 path untouched, verified.
+//
 // api/reimagine.js — "עיצוב מחדש" v81
 // v81 change: ON THE TEXT-ONLY PATH, A WHITE PRINT CAME BACK BLACK.
 // A dense white-on-black typographic reference was detected as light-on-dark correctly — v74's
@@ -4112,6 +4137,115 @@ function layoutStyled(lines, boxW, boxH, typography) {
   return { parts, size };
 }
 
+/* ---- v82: a caption of three or more lines is SET AS A BLOCK ----
+   The two-tier layout above solves for exactly two lines, so a three-line caption fell all the way
+   back to the plain path: one face, one size, every line centred. That reads as a paragraph typed
+   under a picture, which is the same complaint v75 fixed for two lines and never reached three.
+   The reference designs do something specific and entirely geometric: EVERY LINE IS SET TO THE SAME
+   WIDTH. Lines with fewer characters therefore come out in larger type, and the varied sizes are a
+   consequence of the text rather than a decision about it. That is what makes those blocks look
+   designed, and it needs no judgement about which words matter — which is the whole reason not to
+   attempt line-level emphasis here. Splitting one sentence into three lines leaves no line that is
+   a headline, and picking one anyway would emphasise a word at random.
+   Two things keep it honest:
+     - `BLOCK_SPREAD` caps how much bigger the largest line may be than the smallest, so a two-letter
+       line cannot balloon to fill the width.
+     - the baselines are computed from the real ascender and descender of each line's own size, not
+       from a fixed multiple of it. With sizes that differ line to line, a fixed line height either
+       collides descenders into the next line's caps or leaves a gap that undoes the block. */
+const BLOCK_SPREAD = 1.85;   // largest line size relative to the smallest
+const BLOCK_GAP    = 0.16;   // breathing space between lines, as a fraction of the smaller size
+
+/* How far the actual INK of a line reaches above and below its baseline, in ems.
+   The font's own ascender and descender are the wrong measure here: DejaVu's ascender is 0.93em
+   while a line of lowercase reaches about 0.76, and a line with no descenders reaches 0 below. Using
+   the font metrics spaced the first pair of lines noticeably wider than the second, because both
+   were large and both paid for empty space that no letter occupied. Measuring the glyphs actually
+   used makes every gap optically equal, which is the entire point of setting it as a block. */
+function inkExtent(font, glyphs) {
+  let above = 0, below = 0;
+  for (const g of glyphs) {
+    let bb;
+    try { bb = g.getBoundingBox(); } catch { bb = null; }
+    if (!bb || !isFinite(bb.y1) || !isFinite(bb.y2)) continue;
+    above = Math.max(above, bb.y2 / font.unitsPerEm);
+    below = Math.max(below, -bb.y1 / font.unitsPerEm);
+  }
+  /* A line of spaces or unmapped glyphs would measure zero and collapse the block. */
+  if (above <= 0) above = font.ascender / font.unitsPerEm * 0.78;
+  return { above, below: Math.max(below, 0) };
+}
+
+function blockMetrics(font, sizes, lines) {
+  const ink = (lines || []).map((l) => inkExtent(font, glyphsFor(font, l)));
+  const at = (i) => ink[i] || { above: font.ascender / font.unitsPerEm * 0.78, below: 0.2 };
+  /* ONE gap for the whole block, not one per pair. Scaling it to each pair's smaller line made the
+     space between two large lines half again as wide as the space below them — the sizes vary by
+     design here, so anything derived from them varies with them. Even spacing is what holds a block
+     together, so it is measured once, off the smallest line. */
+  const gap = Math.min(...sizes) * BLOCK_GAP;
+  const baselines = [];
+  let y = sizes[0] * at(0).above;
+  for (let i = 0; i < sizes.length; i++) {
+    if (i > 0) y += sizes[i - 1] * at(i - 1).below + gap + sizes[i] * at(i).above;
+    baselines.push(y);
+  }
+  return { baselines, height: y + sizes[sizes.length - 1] * at(sizes.length - 1).below };
+}
+
+function layoutBlock(lines, boxW, boxH, typography) {
+  if (lines.length < 3) return null;               // two lines already have the two-tier path
+  const style = readTypography(typography);
+  const face = faceFor(style.primary, lines.join(" "));
+  const font = face.font;
+  if (!font) return null;
+
+  // every line set to the full box width: the size falls out of the line's own length
+  let sizes = lines.map((l) => {
+    const unit = runWidth(font, glyphsFor(font, l), 1, TEXT_TRACK);
+    return boxW / Math.max(unit, 0.001);
+  });
+  const smallest = Math.min(...sizes);
+  sizes = sizes.map((s) => Math.min(s, smallest * BLOCK_SPREAD));
+
+  const fit = () => blockMetrics(font, sizes, lines).height;
+  if (fit() > boxH) {
+    const k = boxH / fit();
+    sizes = sizes.map((s) => s * k);
+  }
+  const ceiling = Math.floor(boxH * CAP_HEADLINE);   // v76: the same ceiling the other paths obey
+  const tallest = Math.max(...sizes);
+  if (tallest > ceiling) {
+    const k = ceiling / tallest;
+    sizes = sizes.map((s) => s * k);
+  }
+  sizes = sizes.map((s) => Math.floor(s));
+  if (Math.min(...sizes) < TEXT_MIN_SIZE) return null;
+
+  console.log(
+    `[reimagine] caption set as a ${lines.length}-line block in ${face.key}: ` +
+    sizes.map((s) => Math.round(s)).join(" / ")
+  );
+  return { lines, sizes, font, faceKey: face.key };
+}
+
+function blockSvg(layout, boxW, boxH, colour) {
+  const { lines, sizes, font } = layout;
+  const { baselines, height } = blockMetrics(font, sizes, lines);
+  const top = (boxH - height) / 2;
+
+  let body = "";
+  lines.forEach((l, i) => {
+    const s = sizes[i];
+    const gs = glyphsFor(font, l);
+    const w = runWidth(font, gs, s, s * TEXT_TRACK);
+    body += `<path d="${runPath(font, gs, (boxW - w) / 2, top + baselines[i], s, s * TEXT_TRACK)}" fill="${colour}"/>`;
+  });
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${boxW}" height="${boxH}">${body}</svg>`
+  );
+}
+
 function styledSvg(layout, boxW, boxH, colour) {
   const { parts, size } = layout;
   /* v75: the two tiers used to sit directly on top of each other at the line height, which is what made
@@ -4173,10 +4307,24 @@ async function renderTextLayer(text, boxW, boxH, colour, typography) {
     console.warn("[reimagine] two-tier caption failed, using the plain one:", e.message);
   }
 
+  /* v82: three or more lines have no two-tier form, so they are set as a fill-width block instead of
+     dropping all the way to one face at one size. Any reason to decline falls through to the plain
+     path exactly as before — this only ever replaces the flattest result, never a better one. */
+  let block = null;
+  if (!styled) {
+    try {
+      block = layoutBlock(layout.lines, boxW, boxH, typography);
+    } catch (e) {
+      console.warn("[reimagine] block caption failed, using the plain one:", e.message);
+    }
+  }
+
   try {
     const svg = styled
       ? styledSvg(styled, boxW, boxH, colour || "#111111")
-      : textSvg(font, layout, boxW, boxH, colour || "#111111");
+      : block
+        ? blockSvg(block, boxW, boxH, colour || "#111111")
+        : textSvg(font, layout, boxW, boxH, colour || "#111111");
     /* v56 belt and braces: a single non-finite coordinate makes librsvg abandon the rest of a
        <path>, and the result is a caption missing half its words — which ships silently and looks
        like a design decision. If one ever appears again, drop the caption and say so in the log. */
