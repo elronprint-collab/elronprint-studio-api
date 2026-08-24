@@ -1,3 +1,27 @@
+// api/reimagine.js — "עיצוב מחדש" v81
+// v81 change: ON THE TEXT-ONLY PATH, A WHITE PRINT CAME BACK BLACK.
+// A dense white-on-black typographic reference was detected as light-on-dark correctly — v74's
+// referenceIsLightOnDark did its job and set monolight — and the caption still arrived in black.
+// 🔑 The decision was made and then dropped on the floor. `monolight` works by drawing in black and
+// NEGATING afterwards, and that negation lives in `finishArtwork`. The text-only path does not go
+// through finishArtwork at all: it has no generator call and no cut-out, so it never reached the
+// inversion, and it reported `forDark: false` hardcoded on top of that — so the page could not even
+// show it against the dark board.
+// This is not a model failure and not a threshold to tune. It is a branch that was added later
+// (v48, then v74) and never wired to a step that already existed, which is why it fails the same way
+// every single time rather than intermittently.
+// Two details worth keeping:
+//   - the colour is forced to near-black BEFORE drawing when inverting. chosenTextColour can
+//     legitimately return navy or maroon off the palette, and negating navy yields a cream — the v42
+//     near-white trap, which prints washed out and gets eaten by any later cut-out. Black negates to
+//     near-white, which is the only thing a light print should be.
+//   - negating leaves the transparent ground transparent: alpha is untouched, and a clear pixel stays
+//     clear whatever its RGB happens to say.
+// Failing the inversion delivers the dark version rather than an error — a design in the wrong colour
+// can be regenerated, an error cannot.
+// NOT touched, deliberately, and he chose the order: a three-line caption still declines to the plain
+// single-face layout, because v72's two-tier layout only solves for TWO lines. That is the next one.
+//
 import crypto from "crypto";
 import { checkRateLimit } from "./_ratelimit.js";
 // api/reimagine.js — "עיצוב מחדש" v80
@@ -4228,12 +4252,19 @@ async function composeWithText(artBuf, text, colour, typography, above) {
 
 /* Everything after generation is shared with the legacy path: cut out, QC, print canvas, upload. */
 /* v48: a pure-typography design. No generator call, no cut-out — the lettering fills the canvas. */
-async function finishTextOnly(serverText, t0, preview) {
+async function finishTextOnly(serverText, t0, preview, invert) {
   const W = preview ? PREVIEW_W : CANVAS_W;
   const H = preview ? PREVIEW_H : CANVAS_H;
 
+  /* v81: a monolight design is drawn in BLACK and negated afterwards, exactly as the artwork path
+     does — never asked for as pale ink, which v42 proved gets cut away or prints washed out.
+     The colour is forced to near-black first: chosenTextColour may legitimately return navy or
+     maroon off the palette, and negating navy gives a cream, which is the near-white trap all over
+     again. Black negates to near-white, which is the only thing a light print should ever be. */
+  const colour = invert ? "#111111" : serverText.colour;
+
   const layer = await renderTextLayer(
-    serverText.text, Math.round(W * SAFE), Math.round(H * 0.55), serverText.colour,
+    serverText.text, Math.round(W * SAFE), Math.round(H * 0.55), colour,
     serverText.typography
   );
   if (!layer) throw new Error("לא הצלחנו לצייר את הכיתוב. נסו שוב או קצרו את הטקסט.");
@@ -4252,6 +4283,22 @@ async function finishTextOnly(serverText, t0, preview) {
     .withMetadata({ density: preview ? 72 : DPI })
     .toBuffer();
 
+  /* Negating leaves the transparent ground transparent — alpha is untouched, and a fully clear pixel
+     stays clear whatever its RGB says. Failing here delivers the dark version rather than nothing:
+     a design in the wrong colour can still be regenerated, an error cannot. */
+  if (invert) {
+    try {
+      canvas = await sharp(await invertArtwork(canvas))
+        .png({ compressionLevel: 6 })
+        .withMetadata({ density: preview ? 72 : DPI })
+        .toBuffer();
+      console.log("[reimagine] text-only: inverted to white lettering for dark garments");
+    } catch (e) {
+      console.error("[reimagine] text-only invert failed, delivering the dark version:", e.message);
+      invert = false;
+    }
+  }
+
   if (!preview) canvas = await fitUploadSize(canvas);
   const imageUrl = await uploadCloudinary(canvas);
   console.log(`[reimagine] done (text only): ${Date.now() - t0}ms`);
@@ -4261,6 +4308,7 @@ async function finishTextOnly(serverText, t0, preview) {
     url: imageUrl,
     preview: !!preview,
     textDrawn: true,
+    forDark: !!invert,
     width: W,
     height: H,
     dpi: preview ? 72 : DPI,
@@ -4690,7 +4738,11 @@ export default async function handler(req, res) {
             ` (${HEBREW_RE.test(wanted.text) ? "Hebrew" : `${wanted.text.replace(/\s+/g, "").length} chars`}` +
             ` - the generator cannot spell it reliably)`
           );
-          const out = await finishTextOnly(wanted, t0, isPreview);
+          /* v81: the dark-garment decision reaches this path too. It was made — by the chip or by
+             v74's automatic detection — and then thrown away here, because forDark was hardcoded
+             false and the inversion lives in finishArtwork, which this path never enters. */
+          const textPreset = presetFor(specUsed);
+          const out = await finishTextOnly(wanted, t0, isPreview, !!(textPreset && textPreset.invert));
           const left = owner
             ? { freeLeft: null, credits: null, owner: true }
             : await chargeRun(student, quota).catch((e) => {
@@ -4706,7 +4758,6 @@ export default async function handler(req, res) {
                 freeLeft: left.freeLeft,
                 credits: left.credits,
                 owner: !!owner,
-                forDark: false,
                 textOnly: true,
               },
               out
