@@ -10,6 +10,8 @@
 //   POST {action:"logout",  token}        -> מוחק את הסשן
 //   POST {action:"balance", token}        -> {loggedIn, email, freeLeft, credits}
 //   POST {action:"grant", secret, email, credits, reference} -> מוסיף קרדיטים לכלי העיצוב
+//   POST {action:"adminList",    token}                -> רשימת נרשמים (בעלים בלבד)
+//   POST {action:"adminCredits", token, email, amount} -> שינוי קרדיטים (בעלים בלבד)
 //
 // balance/grant משרתים את כלי "עיצוב מחדש", שחולק את אותן טבלאות students/sessions —
 // מי שנרשם לאקדמיה מזוהה גם בכלי, ולהפך. grant מוגן בסוד נפרד (DESIGN_GRANT_SECRET)
@@ -322,6 +324,84 @@ async function doGrant(body) {
 
 /* ---------- handler ---------- */
 
+/* ---------- לוח בקרה לבעלים ----------
+   נוסף לכאן ולא כ-endpoint נפרד בגלל מגבלת מספר הפונקציות בתוכנית Hobby.
+   ההרשאה נבדקת בשרת בלבד: הטוקן -> חשבון -> המייל מול OWNER_EMAILS.
+   שום דגל שמגיע מהדפדפן לא נלקח בחשבון. */
+
+async function requireOwner(token) {
+  const s = await studentByToken(token);
+  if (!s) return { err: { status: 401, body: { error: "צריך להתחבר.", needLogin: true } } };
+  if (!isOwnerEmail(s.email)) {
+    return { err: { status: 403, body: { error: "אין הרשאה לדף הזה." } } };
+  }
+  return { session: s };
+}
+
+async function doAdminList(body) {
+  const gate = await requireOwner(body.token);
+  if (gate.err) return gate.err;
+
+  const students = await sbGet("students?select=*&order=id.desc&limit=500");
+  const runs = await sbGet("design_runs?select=student_id,charged&limit=5000");
+
+  const byStudent = {};
+  for (const r of runs) {
+    const k = String(r.student_id);
+    if (!byStudent[k]) byStudent[k] = { total: 0, charged: 0 };
+    byStudent[k].total += 1;
+    if (r.charged) byStudent[k].charged += 1;
+  }
+
+  const list = students.map(function (st) {
+    const stats = byStudent[String(st.id)] || { total: 0, charged: 0 };
+    return {
+      email: st.email || "",
+      credits: st.design_credits || 0,
+      runs: stats.total,
+      paidRuns: stats.charged,
+      createdAt: st.created_at || st.inserted_at || null,
+      owner: isOwnerEmail(st.email)
+    };
+  });
+
+  return {
+    status: 200,
+    body: {
+      students: list,
+      totals: {
+        students: list.length,
+        runs: runs.length,
+        paidRuns: runs.filter(function (r) { return r.charged; }).length
+      }
+    }
+  };
+}
+
+async function doAdminCredits(body) {
+  const gate = await requireOwner(body.token);
+  if (gate.err) return gate.err;
+
+  const target = normEmail(body.email);
+  const amount = parseInt(body.amount, 10);
+
+  if (!validEmail(target)) return { status: 400, body: { error: "מייל לא תקין." } };
+  if (!Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 1000) {
+    return { status: 400, body: { error: "כמות לא תקינה." } };
+  }
+
+  const rows = await sbGet(
+    "students?email=eq." + enc(target) + "&select=id,email,design_credits&limit=1"
+  );
+  const st = rows[0];
+  if (!st) return { status: 404, body: { error: "לא נמצא לקוח עם המייל הזה." } };
+
+  const next = Math.max(0, (st.design_credits || 0) + amount);
+  await sbPatch("students?id=eq." + enc(st.id), { design_credits: next });
+
+  return { status: 200, body: { email: st.email, credits: next } };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -370,6 +450,16 @@ export default async function handler(req, res) {
       }
       const bal = await designBalance(s.studentId, rows[0] && rows[0].design_credits);
       return res.status(200).json(Object.assign({ loggedIn: true, email: s.email }, bal));
+    }
+
+    if (action === "adminList") {
+      const out = await doAdminList(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "adminCredits") {
+      const out = await doAdminCredits(body);
+      return res.status(out.status).json(out.body);
     }
 
     if (action === "grant") {
