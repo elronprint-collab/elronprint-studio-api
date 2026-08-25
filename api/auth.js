@@ -9,6 +9,7 @@
 //   POST {action:"session", token}        -> {loggedIn, email}
 //   POST {action:"logout",  token}        -> מוחק את הסשן
 //   POST {action:"balance", token}        -> {loggedIn, email, freeLeft, credits}
+//   POST {action:"consume", token, tool}  -> מחייב שימוש אחד בכלי (חינם/קרדיט/בעלים)
 //   POST {action:"grant", secret, email, credits, reference} -> מוסיף קרדיטים לכלי העיצוב
 //   POST {action:"adminList",    token}                -> רשימת נרשמים (בעלים בלבד)
 //   POST {action:"adminCredits", token, email, amount} -> שינוי קרדיטים (בעלים בלבד)
@@ -277,6 +278,52 @@ async function designBalance(studentId, credits) {
   };
 }
 
+/* חיוב שימוש אחד בכלי דפדפן (הסרת רקע, עורך תמונות, ברכות וכו').
+   אותו מונה בדיוק כמו "עיצוב מחדש": ריצה חינם אחת לחשבון, אחר כך קרדיט לשימוש.
+   הבעלים לא מחויב אף פעם, אבל השימוש נרשם ל-design_runs לצורך היסטוריה. */
+async function doConsume(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 401, body: { error: "צריך להתחבר.", needLogin: true } };
+
+  const tool = String(body.tool || "").slice(0, 40);
+
+  if (isOwnerEmail(s.email)) {
+    await sbPost("design_runs", { student_id: s.studentId, charged: false }, "return=minimal")
+      .catch(function (e) { console.error("owner run log failed:", e); });
+    return { status: 200, body: { ok: true, owner: true, tool: tool, freeLeft: null, credits: null } };
+  }
+
+  const rows = await sbGet(
+    "students?id=eq." + enc(s.studentId) + "&select=design_credits&limit=1"
+  );
+  const credits = (rows[0] && rows[0].design_credits) || 0;
+  const bal = await designBalance(s.studentId, credits);
+
+  if (bal.freeLeft > 0) {
+    await sbPost("design_runs", { student_id: s.studentId, charged: false }, "return=minimal");
+    return {
+      status: 200,
+      body: { ok: true, owner: false, tool: tool, freeLeft: bal.freeLeft - 1, credits: credits }
+    };
+  }
+
+  if (credits > 0) {
+    await sbPost("design_runs", { student_id: s.studentId, charged: true }, "return=minimal");
+    await sbPatch("students?id=eq." + enc(s.studentId), {
+      design_credits: Math.max(0, credits - 1)
+    });
+    return {
+      status: 200,
+      body: { ok: true, owner: false, tool: tool, freeLeft: 0, credits: credits - 1 }
+    };
+  }
+
+  return {
+    status: 402,
+    body: { error: "נגמרו הקרדיטים.", needCredits: true, freeLeft: 0, credits: 0 }
+  };
+}
+
 async function doGrant(body) {
   const secret = process.env.DESIGN_GRANT_SECRET;
   if (!secret || String(body.secret || "") !== secret) {
@@ -450,6 +497,11 @@ export default async function handler(req, res) {
       }
       const bal = await designBalance(s.studentId, rows[0] && rows[0].design_credits);
       return res.status(200).json(Object.assign({ loggedIn: true, email: s.email }, bal));
+    }
+
+    if (action === "consume") {
+      const out = await doConsume(body);
+      return res.status(out.status).json(out.body);
     }
 
     if (action === "adminList") {
