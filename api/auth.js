@@ -324,6 +324,115 @@ async function doConsume(body) {
   };
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+   קרדיטים של כלי האווטר — בריכה נפרדת לגמרי מ"עיצוב מחדש".
+   נוסף 2026-08-27.
+
+   למה נפרד: סרטון אווטר עולה ~35 אגורות ונמכר ב-~10 ש"ח,
+   בעוד שעיצוב עולה אגורות בודדות. בריכה משותפת הייתה מאפשרת ללקוח
+   לקנות קרדיטים בזול בכלי אחד ולהוציא אותם ביקר בכלי השני.
+
+   עמודה: students.avatar_credits    טבלאות: avatar_runs, avatar_grants
+   כל הפעולות כאן נוגעות רק בהן, ולעולם לא ב-design_credits.
+   ═══════════════════════════════════════════════════════════════════ */
+
+const AVATAR_FREE_RUNS = 1;   // סרטון חינם אחד לחשבון, כדי שלקוח יראה תוצאה לפני שהוא משלם
+
+async function avatarBalance(studentId, credits) {
+  const runs = await sbGet(
+    "avatar_runs?student_id=eq." + enc(studentId) + "&charged=is.false&select=id"
+  );
+  return {
+    freeLeft: Math.max(0, AVATAR_FREE_RUNS - runs.length),
+    credits: credits || 0
+  };
+}
+
+async function doAvatarConsume(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 401, body: { error: "צריך להתחבר.", needLogin: true } };
+
+  if (isOwnerEmail(s.email)) {
+    await sbPost("avatar_runs", { student_id: s.studentId, charged: false }, "return=minimal")
+      .catch(function (e) { console.error("owner avatar run log failed:", e); });
+    return { status: 200, body: { ok: true, owner: true, freeLeft: null, credits: null } };
+  }
+
+  const rows = await sbGet(
+    "students?id=eq." + enc(s.studentId) + "&select=avatar_credits&limit=1"
+  );
+  const credits = (rows[0] && rows[0].avatar_credits) || 0;
+  const bal = await avatarBalance(s.studentId, credits);
+
+  if (bal.freeLeft > 0) {
+    await sbPost("avatar_runs", { student_id: s.studentId, charged: false }, "return=minimal");
+    return {
+      status: 200,
+      body: { ok: true, owner: false, freeLeft: bal.freeLeft - 1, credits: credits }
+    };
+  }
+
+  if (credits > 0) {
+    await sbPost("avatar_runs", { student_id: s.studentId, charged: true }, "return=minimal");
+    await sbPatch("students?id=eq." + enc(s.studentId), {
+      avatar_credits: Math.max(0, credits - 1)
+    });
+    return {
+      status: 200,
+      body: { ok: true, owner: false, freeLeft: 0, credits: credits - 1 }
+    };
+  }
+
+  return {
+    status: 402,
+    body: { error: "נגמרו הקרדיטים.", needCredits: true, freeLeft: 0, credits: 0 }
+  };
+}
+
+async function doAvatarGrant(body) {
+  const secret = process.env.DESIGN_GRANT_SECRET;
+  if (!secret || String(body.secret || "") !== secret) {
+    return { status: 401, body: { error: "לא מורשה" } };
+  }
+
+  const email = normEmail(body.email);
+  if (!validEmail(email)) {
+    return { status: 400, body: { error: "כתובת המייל לא תקינה." } };
+  }
+
+  const credits = parseInt(body.credits, 10);
+  if (!Number.isFinite(credits) || credits < 1 || credits > 1000) {
+    return { status: 400, body: { error: "מספר קרדיטים לא תקין." } };
+  }
+
+  // אותה הזמנה לא מזוכה פעמיים
+  const reference = body.reference ? String(body.reference).slice(0, 200) : null;
+  if (reference) {
+    const seen = await sbGet("avatar_grants?reference=eq." + enc(reference) + "&select=id&limit=1");
+    if (seen.length) {
+      return { status: 200, body: { granted: false, already: true } };
+    }
+  }
+
+  let found = await sbGet("students?email=eq." + enc(email) + "&select=id,avatar_credits&limit=1");
+  let student = found[0];
+  if (!student) {
+    const created = await sbPost("students", { email: email });
+    student = created[0];
+  }
+  if (!student) return { status: 500, body: { error: "לא הצלחנו ליצור את החשבון." } };
+
+  const next = (student.avatar_credits || 0) + credits;
+  await sbPatch("students?id=eq." + enc(student.id), { avatar_credits: next });
+  await sbPost(
+    "avatar_grants",
+    { student_id: student.id, credits: credits, reference: reference },
+    "return=minimal"
+  );
+
+  return { status: 200, body: { granted: true, credits: next } };
+}
+
 async function doGrant(body) {
   const secret = process.env.DESIGN_GRANT_SECRET;
   if (!secret || String(body.secret || "") !== secret) {
@@ -501,6 +610,27 @@ export default async function handler(req, res) {
 
     if (action === "consume") {
       const out = await doConsume(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "avatarBalance") {
+      const s = await studentByToken(body.token);
+      if (!s) return res.status(200).json({ loggedIn: false });
+      if (isOwnerEmail(s.email)) {
+        return res.status(200).json({ loggedIn: true, email: s.email, owner: true });
+      }
+      const rows = await sbGet("students?id=eq." + enc(s.studentId) + "&select=avatar_credits&limit=1");
+      const bal = await avatarBalance(s.studentId, rows[0] && rows[0].avatar_credits);
+      return res.status(200).json(Object.assign({ loggedIn: true, email: s.email }, bal));
+    }
+
+    if (action === "avatarConsume") {
+      const out = await doAvatarConsume(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "avatarGrant") {
+      const out = await doAvatarGrant(body);
       return res.status(out.status).json(out.body);
     }
 
