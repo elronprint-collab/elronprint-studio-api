@@ -28,7 +28,7 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const APP_SECRET   = process.env.SHOPIFY_APP_SECRET;
 const RESEND_KEY   = process.env.RESEND_API_KEY;
 
-const FROM             = "ElronPrint Academy <academy@elronprint.co.il>";
+const FROM             = "אלרון פרינט <academy@elronprint.co.il>";
 const CODE_TTL_MIN     = 10;   // תוקף הקוד בדקות
 const SESSION_TTL_DAYS = 30;   // כמה זמן התלמיד נשאר מחובר
 const MAX_ATTEMPTS     = 5;    // ניחושים לקוד לפני שהוא נפסל
@@ -141,7 +141,8 @@ async function sendCodeEmail(email, code) {
   const html =
     '<div dir="rtl" style="font-family:Arial,Helvetica,sans-serif;background:#f6f7f9;padding:32px">' +
       '<div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;text-align:center">' +
-        '<h1 style="margin:0 0 8px;font-size:22px;color:#111">האקדמיה ל-AI של ElronPrint</h1>' +
+        '<h1 style="margin:0 0 4px;font-size:22px;color:#111">אלרון פרינט</h1>' +
+        '<p style="margin:0 0 20px;color:#888;font-size:14px">כלי ה-AI של אלרון פרינט</p>' +
         '<p style="margin:0 0 24px;color:#555;font-size:15px">זה קוד הכניסה שלך:</p>' +
         '<div style="font-size:38px;font-weight:700;letter-spacing:10px;color:#2f6fed;' +
              'background:#f0f4ff;border-radius:10px;padding:18px 0;margin-bottom:24px">' + code + '</div>' +
@@ -160,7 +161,7 @@ async function sendCodeEmail(email, code) {
     body: JSON.stringify({
       from: FROM,
       to: [email],
-      subject: "קוד הכניסה לאקדמיה: " + code,
+      subject: "קוד הכניסה שלך לאלרון פרינט: " + code,
       html: html
     })
   });
