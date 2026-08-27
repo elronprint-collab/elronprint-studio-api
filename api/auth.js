@@ -390,6 +390,42 @@ async function doAvatarConsume(body) {
   };
 }
 
+/* שמירת סרטון מוגמר לחשבון הלקוח.
+   נקראת אחרי שהסרטון כבר הועבר ל-Cloudinary, כך שהכתובת קבועה.
+   לא מחייבת כלום — החיוב כבר קרה ב-avatarConsume לפני היצירה. */
+async function doAvatarSave(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 401, body: { error: "\u05e6\u05e8\u05d9\u05da \u05dc\u05d4\u05ea\u05d7\u05d1\u05e8.", needLogin: true } };
+
+  const url = String(body.url || "").trim();
+  if (!/^https:\/\//.test(url)) {
+    return { status: 400, body: { error: "\u05db\u05ea\u05d5\u05d1\u05ea \u05dc\u05d0 \u05ea\u05e7\u05d9\u05e0\u05d4." } };
+  }
+
+  const seconds = Number(body.seconds);
+  await sbPost("avatar_videos", {
+    student_id: s.studentId,
+    url: url.slice(0, 500),
+    avatar_name: body.avatarName ? String(body.avatarName).slice(0, 80) : null,
+    seconds: Number.isFinite(seconds) ? Math.round(seconds) : null
+  }, "return=minimal");
+
+  return { status: 200, body: { saved: true } };
+}
+
+/* רשימת הסרטונים של הלקוח, החדש ראשון.
+   יושבת בשרת ולא בדפדפן — לכן היא זהה בנייד ובמחשב. */
+async function doAvatarVideos(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 200, body: { loggedIn: false, videos: [] } };
+
+  const rows = await sbGet(
+    "avatar_videos?student_id=eq." + enc(s.studentId) +
+    "&select=url,avatar_name,seconds,created_at&order=created_at.desc&limit=100"
+  );
+  return { status: 200, body: { loggedIn: true, videos: rows || [] } };
+}
+
 async function doAvatarGrant(body) {
   const secret = process.env.DESIGN_GRANT_SECRET;
   if (!secret || String(body.secret || "") !== secret) {
@@ -627,6 +663,16 @@ export default async function handler(req, res) {
 
     if (action === "avatarConsume") {
       const out = await doAvatarConsume(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "avatarSave") {
+      const out = await doAvatarSave(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "avatarVideos") {
+      const out = await doAvatarVideos(body);
       return res.status(out.status).json(out.body);
     }
 
