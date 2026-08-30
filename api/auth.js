@@ -634,23 +634,67 @@ async function doAdminDelete(body) {
     if (!st) return { status: 404, body: { error: "לא נמצא לקוח עם המייל הזה." } };
   }
 
-  let runsDeleted = true;
-  try {
-    await sbDelete("design_runs?student_id=eq." + enc(st.id));
-  } catch (e) {
-    /* אם אין טבלה כזו או אין הרשאה, ממשיכים — המחיקה עצמה עדיין עשויה להצליח. */
-    runsDeleted = false;
-    console.warn("[auth] adminDelete: design_runs cleanup failed:", e.message);
-  }
-  try {
-    await sbDelete("sessions?student_id=eq." + enc(st.id));
-  } catch (e) {
-    console.warn("[auth] adminDelete: session cleanup failed:", e.message);
+  /* Every table that references students must be cleared first, or Postgres refuses the delete with
+     a foreign-key error. avatar_runs was found the hard way, from a real 23503 telling us the row
+     was "still referenced from table avatar_runs". Rather than wait for the next failure, the rest
+     of this list was read off the tables this same file writes to with a student_id. login_codes is
+     keyed by e-mail rather than student in some builds, which is why an unknown-column response is
+     tolerated below instead of failing the delete.
+     Unknown tables are tolerated (a 404 from PostgREST is fine); a real FK failure is not, and is
+     reported below with the table named so the next one takes minutes instead of a debugging round. */
+  const DEPENDENTS = [
+    "design_runs", "design_grants",
+    "avatar_runs", "avatar_grants", "avatar_videos",
+    "login_codes", "sessions"
+  ];
+  const stuck = [];
+  for (const table of DEPENDENTS) {
+    try {
+      await sbDelete(table + "?student_id=eq." + enc(st.id));
+    } catch (e) {
+      const msg = String(e.message || "");
+      /* A table that does not exist in this project is not a problem worth failing over. */
+      if (/-> 40[04]\b/.test(msg) && !/23503/.test(msg)) {
+        console.warn("[auth] adminDelete: skipping " + table + " (" + msg.slice(0, 80) + ")");
+        continue;
+      }
+      stuck.push(table);
+      console.error("[auth] adminDelete: could not clear " + table + ":", msg.slice(0, 200));
+    }
   }
 
-  await sbDelete("students?id=eq." + enc(st.id));
+  /* Stop before touching students. Deleting the dependants and then failing leaves the account
+     present but stripped of its history — which is what happened here on the first attempt, and is
+     worse than not starting, because a retry looks like it changed nothing. */
+  if (stuck.length) {
+    return {
+      status: 409,
+      body: {
+        error: "לא ניתן למחוק — נשארו רשומות מקושרות בטבלאות: " + stuck.join(", ") + ".",
+        blockedBy: stuck
+      }
+    };
+  }
+
+  try {
+    await sbDelete("students?id=eq." + enc(st.id));
+  } catch (e) {
+    const msg = String(e.message || "");
+    /* Name the table in the message so the next unknown dependant is a one-line fix. */
+    const m = msg.match(/referenced from table \\?"([^"\\]+)/);
+    console.error("[auth] adminDelete: students delete failed:", msg.slice(0, 300));
+    return {
+      status: 409,
+      body: {
+        error: m
+          ? ("לא ניתן למחוק — יש רשומות מקושרות בטבלה \"" + m[1] + "\". צריך להוסיף אותה לרשימת התלויות.")
+          : "לא ניתן למחוק את הלקוח. בדקו את הלוג.",
+        blockedBy: m ? [m[1]] : []
+      }
+    };
+  }
   const label = st.email || ("\u05dc\u05e7\u05d5\u05d7 #" + st.id);
-  console.log("[auth] adminDelete: removed " + label + " (runs cleaned: " + runsDeleted + ")");
+  console.log("[auth] adminDelete: removed " + label);
 
   return { status: 200, body: { deleted: true, email: st.email || "", label: label } };
 }
