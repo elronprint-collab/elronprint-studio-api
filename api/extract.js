@@ -139,7 +139,12 @@ async function fal(model, input) {
    The response reports what the call actually cost, so it is logged rather than estimated. The
    failure path logs status AND body — the previous version threw away the body, which is exactly
    why a dead account looked like a generic "operation failed" for so long. */
-const VISION_MODEL = "google/gemini-2.5-flash";
+/* Back on the model these prompts were written and tuned against. The first fal run used Gemini and
+   the boxes were visibly wrong — a collar returned as "front logo", an empty black rectangle as
+   "bottom logo", and the same number listed three times despite an explicit rule against duplicates.
+   Same prompt, different model, worse reading. The transport stays on fal, so billing is unaffected;
+   only the slug changed. Any OpenRouter vision slug works here if this ever needs revisiting. */
+const VISION_MODEL = "anthropic/claude-sonnet-4.6";
 
 async function visionJson(systemPrompt, userPrompt, base64Data, mediaType, maxTokens, tag) {
   const r = await fetch("https://fal.run/openrouter/router/vision", {
