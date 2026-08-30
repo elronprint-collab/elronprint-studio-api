@@ -1,5 +1,11 @@
 import { checkRateLimit } from "./_ratelimit.js";
-// api/eraser.js v2 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+import { gate, settle } from "./_account.js";
+// api/eraser.js v3 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+//
+// v3 (2026-08-30): הכלי עבר לחיוב קרדיטים.
+// עד כה הוא היה פתוח לגמרי — כל קריאה הפעילה מודל בתשלום בפאל על חשבון החנות,
+// בלי התחברות ובלי תקרה מלבד הגבלת הקצב לפי IP. עכשיו: התחברות, יתרה, וחיוב
+// אחרי הצלחה בלבד. כישלון של כל שלושת המודלים לא גובה קרדיט.
 
 const ALLOWED = [
   "https://elronprint.co.il",
@@ -21,7 +27,7 @@ function cors(req, res) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-epai-token");
 }
 function isAllowedUrl(url) {
   if (!url || typeof url !== "string" || !url.startsWith("https://")) return false;
@@ -50,10 +56,21 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many requests", retryAfter });
   }
 
-  const { imageUrl, maskUrl } = req.body || {};
+  const body = req.body || {};
+  const { imageUrl, maskUrl } = body;
   if (!isAllowedUrl(imageUrl) || !isAllowedUrl(maskUrl)) {
     return res.status(400).json({ error: "Invalid imageUrl or maskUrl" });
   }
+
+  /* השער לפני כל קריאה לפאל, אחרי בדיקת הקלט — כדי שבקשה פגומה תיפסל בזול. */
+  let acct;
+  try {
+    acct = await gate(req, body);
+  } catch (e) {
+    console.error("[eraser] account check failed:", e.message);
+    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
+  }
+  if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
 
   let lastErr = "";
   for (const model of MODELS) {
@@ -79,12 +96,18 @@ export default async function handler(req, res) {
         continue;
       }
       console.log("eraser success with model:", model);
-      return res.status(200).json({ imageUrl: outUrl, model });
+      const left = await settle(acct.student, acct.quota, acct.owner);
+      return res.status(200).json({
+        imageUrl: outUrl, model,
+        freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
+      });
     } catch (err) {
       lastErr = `${model}: ${err.message}`;
       console.error("fal eraser exception:", lastErr);
     }
   }
 
+  /* כל המודלים נכשלו — הלקוח לא קיבל דבר, ולכן גם לא חויב. */
+  console.error("[eraser] all models failed - NOT charging the run");
   return res.status(502).json({ error: "Eraser failed", detail: lastErr.slice(0, 300) });
 }
