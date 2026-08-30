@@ -209,6 +209,12 @@ Answer two questions.
    real published book, film, song or band; an artist's signature, watermark or studio mark.
    Say none for: generic animals, objects, scenery, ordinary slogans and made-up phrases.
 
+SCREENSHOTS: if this is a screen capture rather than a photo or a design file — you can tell from
+status bars, battery and wifi icons, browser address bars, tab strips, app toolbars, menu rows,
+sliders, or a row of small thumbnail choices — answer {"graphics":"none","screenshot":"yes"} and stop.
+Do NOT return a box around part of the interface. A design shown inside an app is far too small to
+print, and the row of thumbnails at the bottom of an app is a menu, not artwork.
+
 Answer with ONLY a JSON object, no prose, no markdown fences:
 {"graphics":["x0,y0,x1,y1", ...] or "full" or "none","protected":"..." or "none"}
 
@@ -267,6 +273,10 @@ async function findGraphics(base64Data, mediaType, harden) {
   }
 
   const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
+  if (/^\s*(yes|true)\s*$/i.test(String(j.screenshot || ""))) {
+    console.log("[extract] refused: the upload is a screen capture, not a design file");
+    return { boxes: null, protected: prot, whole: false, screenshot: true };
+  }
   const g = j.graphics;
 
   if (typeof g === "string" && /^full$/i.test(g.trim())) {
@@ -488,6 +498,23 @@ async function upscale(buf) {
    fills inside a design are cut away with the background and leave holes; they read as large pockets
    of trapped emptiness. Cannot be fixed here — white and transparent are the same thing to a remover
    — so it is measured and reported. */
+/* How much of the frame actually survived background removal, 0..1.
+   Added after a run delivered a COMPLETELY EMPTY transparent PNG as a finished print file — the
+   customer could have ordered from it. holeRatio measures transparency INSIDE artwork and returns 0
+   when there is no artwork at all, so it could never have caught this, and nothing else in the
+   pipeline ever asked whether the output contained anything. Measured on the cutout BEFORE the print
+   canvas is built, since that canvas pads with transparency and would skew the reading. */
+const MIN_INK = 0.004;           // below this the cutout is empty or a few stray pixels
+
+async function inkRatio(buf) {
+  const { data, info } = await sharp(buf)
+    .ensureAlpha().resize(220, 220, { fit: "inside" }).raw().toBuffer({ resolveWithObject: true });
+  const n = info.width * info.height;
+  let ink = 0;
+  for (let p = 0, i = 3; p < n; p++, i += info.channels) if (data[i] >= 128) ink++;
+  return ink / n;
+}
+
 async function holeRatio(buf) {
   const { data, info } = await sharp(buf)
     .ensureAlpha().resize(220, 220, { fit: "inside" }).raw().toBuffer({ resolveWithObject: true });
@@ -600,6 +627,14 @@ async function processOne(buf, msLeft) {
     console.log("[extract] upload is already transparent - skipping background removal");
   } else {
     work = await removeBackground(work);
+  }
+
+  /* Refuse rather than deliver. An empty file that looks finished is the one failure the user
+     cannot see before ordering from it, so it throws instead of returning. */
+  const ink = await inkRatio(work);
+  if (ink < MIN_INK) {
+    console.error(`[extract] cutout is empty (ink ${(ink * 100).toFixed(2)}%) - refusing to deliver it`);
+    throw new Error("EMPTY_CUTOUT");
   }
 
   let holes = 0;
@@ -733,6 +768,10 @@ const IP_ERROR =
   "התמונה כוללת לוגו מסחרי, סימן מסחרי או דמות מוגנת. " +
   "הכלי מפיק קבצי הדפסה, ולכן אינו מעבד חומר כזה — העלו עיצוב מקורי או כזה שיש לכם רישיון עליו.";
 
+const SCREENSHOT_ERROR =
+  "זה צילום מסך, לא קובץ עיצוב. העיצוב בתוך צילום מסך קטן מדי לקובץ הדפסה — " +
+  "בקשו מהלקוח לייצא את הקובץ מהאפליקציה ולשלוח אותו.";
+
 const NO_ART_ERROR =
   "לא זוהה עיצוב מודפס בתמונה. העלו תמונה של חולצה מודפסת, או את קובץ העיצוב עצמו.";
 
@@ -793,6 +832,12 @@ export default async function handler(req, res) {
       console.warn("[extract] REFUSED - protected material:", found.protected);
       return res.status(422).json({ error: IP_ERROR, blocked: "ip", reason: found.protected });
     }
+    /* Must come BEFORE the fallback below. A screenshot returns no boxes, and `!found.boxes` is the
+       condition for "the upload IS the artwork" — so without this the whole screen capture, browser
+       chrome and all, would be processed into a print file. */
+    if (found.screenshot) {
+      return res.status(422).json({ error: SCREENSHOT_ERROR, blocked: "screenshot" });
+    }
     if (Array.isArray(found.boxes) && found.boxes.length === 0) {
       return res.status(422).json({ error: NO_ART_ERROR, blocked: "no-art" });
     }
@@ -817,6 +862,7 @@ export default async function handler(req, res) {
 
     // ---- step 3: run each one through, stopping early rather than timing out ----
     const files = [];
+    const errs = [];
     let skipped = 0;
     for (let i = 0; i < pieces.length; i++) {
       if (i > 0 && msLeft() < 15000) { skipped = pieces.length - i; break; }
@@ -825,10 +871,22 @@ export default async function handler(req, res) {
         files.push(out);
         console.log(`[extract] graphic ${i + 1}/${pieces.length} done at ${Date.now() - t0}ms (${out.quality})`);
       } catch (e) {
+        errs.push(e.message);
         console.error(`[extract] graphic ${i + 1} failed:`, e.message);
       }
     }
-    if (!files.length) return res.status(502).json({ error: "החילוץ נכשל. נסו שוב או העלו תמונה אחרת." });
+    if (!files.length) {
+      /* When every attempt came back empty the cause is known, so name it instead of offering a
+         retry that will fail identically. */
+      const allEmpty = errs.length > 0 && errs.every((e) => e === "EMPTY_CUTOUT");
+      return res.status(502).json({
+        error: allEmpty
+          ? "הסרת הרקע לא מצאה את העיצוב והקובץ יצא ריק. זה קורה כשהעיצוב כהה על רקע כהה, " +
+            "או כשהוא חלק קטן בתוך תמונה גדולה. נסו תמונה שבה העיצוב בולט מהרקע."
+          : "החילוץ נכשל. נסו שוב או העלו תמונה אחרת.",
+        emptyCutout: allEmpty,
+      });
+    }
 
     // ---- charged once per run, after files exist, never per graphic ----
     let left = { freeLeft: quota.freeLeft, credits: quota.credits };
