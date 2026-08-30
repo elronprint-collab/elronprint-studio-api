@@ -549,6 +549,7 @@ async function doAdminList(body) {
   const list = students.map(function (st) {
     const stats = byStudent[String(st.id)] || { total: 0, charged: 0 };
     return {
+      id: st.id,
       email: st.email || "",
       credits: st.design_credits || 0,
       runs: stats.total,
@@ -609,16 +610,29 @@ async function doAdminDelete(body) {
   const gate = await requireOwner(body.token);
   if (gate.err) return gate.err;
 
-  const target = normEmail(body.email);
-  if (!validEmail(target)) return { status: 400, body: { error: "מייל לא תקין." } };
+  /* Identify by id first. A row can exist with a blank e-mail — one did — and such a row can never
+     be addressed by e-mail at all, so it was undeletable from the dashboard. The id always exists. */
+  const rawId = body.id;
+  const hasId = rawId !== undefined && rawId !== null && String(rawId).trim() !== "";
 
-  if (isOwnerEmail(target)) {
-    return { status: 400, body: { error: "אי אפשר למחוק חשבון בעלים." } };
+  let st;
+  if (hasId) {
+    const rows = await sbGet("students?id=eq." + enc(String(rawId).trim()) + "&select=id,email&limit=1");
+    st = rows[0];
+    if (!st) return { status: 404, body: { error: "הלקוח כבר לא קיים. רעננו את הרשימה." } };
+    if (st.email && isOwnerEmail(st.email)) {
+      return { status: 400, body: { error: "אי אפשר למחוק חשבון בעלים." } };
+    }
+  } else {
+    const target = normEmail(body.email);
+    if (!validEmail(target)) return { status: 400, body: { error: "מייל לא תקין." } };
+    if (isOwnerEmail(target)) {
+      return { status: 400, body: { error: "אי אפשר למחוק חשבון בעלים." } };
+    }
+    const rows = await sbGet("students?email=eq." + enc(target) + "&select=id,email&limit=1");
+    st = rows[0];
+    if (!st) return { status: 404, body: { error: "לא נמצא לקוח עם המייל הזה." } };
   }
-
-  const rows = await sbGet("students?email=eq." + enc(target) + "&select=id,email&limit=1");
-  const st = rows[0];
-  if (!st) return { status: 404, body: { error: "לא נמצא לקוח עם המייל הזה." } };
 
   let runsDeleted = true;
   try {
@@ -635,9 +649,10 @@ async function doAdminDelete(body) {
   }
 
   await sbDelete("students?id=eq." + enc(st.id));
-  console.log("[auth] adminDelete: removed " + st.email + " (runs cleaned: " + runsDeleted + ")");
+  const label = st.email || ("\u05dc\u05e7\u05d5\u05d7 #" + st.id);
+  console.log("[auth] adminDelete: removed " + label + " (runs cleaned: " + runsDeleted + ")");
 
-  return { status: 200, body: { deleted: true, email: st.email } };
+  return { status: 200, body: { deleted: true, email: st.email || "", label: label } };
 }
 
 export default async function handler(req, res) {
