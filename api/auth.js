@@ -595,6 +595,51 @@ async function doAdminCredits(body) {
   return { status: 200, body: { email: st.email, credits: next } };
 }
 
+/* מחיקת לקוח מלוח הבקרה.
+   הרשאה נבדקת בשרת בלבד, כמו בשאר פעולות הלוח — הטוקן מול OWNER_EMAILS.
+
+   שתי הגנות שקיימות כאן ולא בשאר הפעולות:
+   1. חשבון בעלים לא ניתן למחיקה. מחיקה בטעות של חשבון הבעלים מנתקת את הגישה ללוח עצמו, ואז אין
+      דרך לתקן מהממשק.
+   2. מחיקת השורות התלויות קודמת למחיקת הלקוח. ל-design_runs יש student_id, ואם מוגדר עליו מפתח זר
+      מחיקת הלקוח לבדו תיחסם. סדר כזה עובד בשני המקרים — עם מפתח זר ובלעדיו.
+
+   הטוקנים של אותו לקוח נמחקים גם הם, אחרת טוקן שכבר בדפדפן שלו ממשיך להיות תקף אחרי המחיקה. */
+async function doAdminDelete(body) {
+  const gate = await requireOwner(body.token);
+  if (gate.err) return gate.err;
+
+  const target = normEmail(body.email);
+  if (!validEmail(target)) return { status: 400, body: { error: "מייל לא תקין." } };
+
+  if (isOwnerEmail(target)) {
+    return { status: 400, body: { error: "אי אפשר למחוק חשבון בעלים." } };
+  }
+
+  const rows = await sbGet("students?email=eq." + enc(target) + "&select=id,email&limit=1");
+  const st = rows[0];
+  if (!st) return { status: 404, body: { error: "לא נמצא לקוח עם המייל הזה." } };
+
+  let runsDeleted = true;
+  try {
+    await sbDelete("design_runs?student_id=eq." + enc(st.id));
+  } catch (e) {
+    /* אם אין טבלה כזו או אין הרשאה, ממשיכים — המחיקה עצמה עדיין עשויה להצליח. */
+    runsDeleted = false;
+    console.warn("[auth] adminDelete: design_runs cleanup failed:", e.message);
+  }
+  try {
+    await sbDelete("sessions?student_id=eq." + enc(st.id));
+  } catch (e) {
+    console.warn("[auth] adminDelete: session cleanup failed:", e.message);
+  }
+
+  await sbDelete("students?id=eq." + enc(st.id));
+  console.log("[auth] adminDelete: removed " + st.email + " (runs cleaned: " + runsDeleted + ")");
+
+  return { status: 200, body: { deleted: true, email: st.email } };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -688,6 +733,11 @@ export default async function handler(req, res) {
 
     if (action === "adminCredits") {
       const out = await doAdminCredits(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "adminDelete") {
+      const out = await doAdminDelete(body);
       return res.status(out.status).json(out.body);
     }
 
