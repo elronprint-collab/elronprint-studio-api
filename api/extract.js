@@ -123,6 +123,48 @@ async function fal(model, input) {
 /* ---------------- step 1: find the graphics, and check what they are ----------------
    One vision call answers everything we need about the upload, so a run costs one call whether the
    mockup shows one shirt or three. It never invents pixels — it only reports where to cut. */
+/* ---------------- vision: one VLM call, billed through fal ----------------
+   Was api.anthropic.com. Moved because the Anthropic account is no longer the one being billed —
+   every call to it now fails, which took BOTH tools down at once. fal already carries the FAL_KEY
+   this file uses for upscaling and background removal, so routing the vision call through fal's
+   OpenRouter endpoint puts the whole pipeline on a single account.
+
+   The prompts below are UNCHANGED. Only the transport moved: system_prompt carries what was `system`,
+   prompt carries the user turn, and the image goes in as the same base64 data URI, which this
+   endpoint accepts directly — no upload step, so nothing else in the pipeline had to change.
+
+   temperature 0 because these prompts ask for a JSON object, not prose; the default of 1 would make
+   the same sheet return different boxes on different runs.
+
+   The response reports what the call actually cost, so it is logged rather than estimated. The
+   failure path logs status AND body — the previous version threw away the body, which is exactly
+   why a dead account looked like a generic "operation failed" for so long. */
+const VISION_MODEL = "google/gemini-2.5-flash";
+
+async function visionJson(systemPrompt, userPrompt, base64Data, mediaType, maxTokens, tag) {
+  const r = await fetch("https://fal.run/openrouter/router/vision", {
+    method: "POST",
+    headers: { Authorization: `Key ${process.env.FAL_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      system_prompt: systemPrompt,
+      prompt: userPrompt,
+      image_urls: [`data:${mediaType};base64,${base64Data}`],
+      temperature: 0,
+      max_tokens: maxTokens,
+    }),
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`vision ${tag} failed: ${r.status} ${body.slice(0, 300)}`);
+  }
+  const d = await r.json();
+  if (typeof d?.usage?.cost === "number") {
+    console.log(`[vision] ${tag}: $${d.usage.cost.toFixed(6)} (${d.usage.total_tokens} tokens)`);
+  }
+  return d?.output || "";
+}
+
 const FIND_SYSTEM = `You inspect an image before its printed artwork is extracted for printing.
 
 The image is one of:
@@ -201,31 +243,18 @@ const RETRY_NOTE =
   "mark, with no skin, no denim, no waistband and no overlay text.";
 
 async function findGraphics(base64Data, mediaType, harden) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 300,
-      system: FIND_SYSTEM + (harden ? RETRY_NOTE : ""),
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "Locate the printed artwork. JSON only." },
-        ],
-      }],
-    }),
-  });
-  if (!r.ok) {
-    console.error("[extract] find call failed:", r.status);
+  let raw;
+  try {
+    raw = await visionJson(
+      FIND_SYSTEM + (harden ? RETRY_NOTE : ""),
+      "Locate the printed artwork. JSON only.",
+      base64Data, mediaType, 300, "find"
+    );
+  } catch (err) {
+    /* Unchanged fallback: treat the whole image as the artwork rather than failing the run. */
+    console.error("[extract] find call failed:", err.message);
     return { boxes: null, protected: "", whole: true };
   }
-  const raw = (await r.json())?.content?.filter((b) => b.type === "text").map((b) => b.text).join(" ");
   const j = parseJsonish(raw);
   if (!j) {
     console.warn("[extract] find unreadable, treating the upload as the artwork:", String(raw).slice(0, 80));
