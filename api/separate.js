@@ -133,6 +133,48 @@ const NONE_RE = /^\s*(none|no|n\/a|-)\s*$/i;
 const MAX_BOX_FRAC = 55;                 // percent of the image area
 function boxArea(b) { return ((b.x1 - b.x0) * (b.y1 - b.y0)) / 100; }
 
+/* ---------------- vision: one VLM call, billed through fal ----------------
+   Was api.anthropic.com. Moved because the Anthropic account is no longer the one being billed —
+   every call to it now fails, which took BOTH tools down at once. fal already carries the FAL_KEY
+   this file uses for upscaling and background removal, so routing the vision call through fal's
+   OpenRouter endpoint puts the whole pipeline on a single account.
+
+   The prompts below are UNCHANGED. Only the transport moved: system_prompt carries what was `system`,
+   prompt carries the user turn, and the image goes in as the same base64 data URI, which this
+   endpoint accepts directly — no upload step, so nothing else in the pipeline had to change.
+
+   temperature 0 because these prompts ask for a JSON object, not prose; the default of 1 would make
+   the same sheet return different boxes on different runs.
+
+   The response reports what the call actually cost, so it is logged rather than estimated. The
+   failure path logs status AND body — the previous version threw away the body, which is exactly
+   why a dead account looked like a generic "operation failed" for so long. */
+const VISION_MODEL = "google/gemini-2.5-flash";
+
+async function visionJson(systemPrompt, userPrompt, base64Data, mediaType, maxTokens, tag) {
+  const r = await fetch("https://fal.run/openrouter/router/vision", {
+    method: "POST",
+    headers: { Authorization: `Key ${process.env.FAL_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      system_prompt: systemPrompt,
+      prompt: userPrompt,
+      image_urls: [`data:${mediaType};base64,${base64Data}`],
+      temperature: 0,
+      max_tokens: maxTokens,
+    }),
+  });
+  if (!r.ok) {
+    const body = await r.text().catch(() => "");
+    throw new Error(`vision ${tag} failed: ${r.status} ${body.slice(0, 300)}`);
+  }
+  const d = await r.json();
+  if (typeof d?.usage?.cost === "number") {
+    console.log(`[vision] ${tag}: $${d.usage.cost.toFixed(6)} (${d.usage.total_tokens} tokens)`);
+  }
+  return d?.output || "";
+}
+
 /* ---------------- step 1: what pieces is this made of ----------------
    Two rules here earn their place:
    - a piece must be separable ON ITS OWN. Half a stripe or one letter out of a word is not an
@@ -188,31 +230,11 @@ Box values are whole numbers 0-100, percentages of the image width or height, x0
 x1,y1 bottom-right. If there are no separable elements answer {"elements":[],"protected":"..."}.`;
 
 async function findElements(base64Data, mediaType) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 1200,
-      system: ELEMENTS_SYSTEM,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "List the separable elements. JSON only." },
-        ],
-      }],
-    }),
-  });
-  if (!r.ok) {
-    console.error("[separate] elements call failed:", r.status);
-    throw new Error("detect failed");
-  }
-  const raw = (await r.json())?.content?.filter((b) => b.type === "text").map((b) => b.text).join(" ");
+  const raw = await visionJson(
+    ELEMENTS_SYSTEM,
+    "List the separable elements. JSON only.",
+    base64Data, mediaType, 1200, "elements"
+  );
   const j = parseJsonish(raw);
   if (!j) {
     console.warn("[separate] elements unreadable:", String(raw).slice(0, 120));
@@ -258,28 +280,9 @@ Say none for: generic animals, objects, scenery, ordinary slogans and invented n
 Answer with ONLY a JSON object: {"protected":"the specific reason" or "none"}`;
 
 async function checkProtected(base64Data, mediaType) {
-  const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": process.env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 120,
-      system: PROTECTED_SYSTEM,
-      messages: [{
-        role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: mediaType, data: base64Data } },
-          { type: "text", text: "JSON only." },
-        ],
-      }],
-    }),
-  });
-  if (!r.ok) throw new Error("protected check failed: " + r.status);
-  const raw = (await r.json())?.content?.filter((b) => b.type === "text").map((b) => b.text).join(" ");
+  const raw = await visionJson(
+    PROTECTED_SYSTEM, "JSON only.", base64Data, mediaType, 120, "protected"
+  );
   const j = parseJsonish(raw);
   if (!j) throw new Error("protected check unreadable");
   return NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
