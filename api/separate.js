@@ -243,6 +243,12 @@ NBA, a real football club's crest); a recognisable copyrighted character; the ti
 real published book, film, song or band; an artist's signature, watermark or studio mark.
 Say none for: generic animals, objects, scenery, ordinary slogans and invented names.
 
+SCREENSHOTS: if this is a screen capture rather than a photo or a design file — you can tell from
+status bars, battery and wifi icons, browser address bars, tab strips, app toolbars, menu rows,
+sliders, or a row of small thumbnail choices — answer {"elements":[],"screenshot":"yes"} and stop.
+Do NOT box part of the interface, and do NOT box the row of small thumbnails at the bottom of an
+app: that is a menu, not a set of items. An item shown inside an app is far too small to print.
+
 Answer with ONLY a JSON object, no prose, no markdown fences:
 {"elements":[{"label":"...","box":"x0,y0,x1,y1"}, ...],"protected":"..." or "none"}
 
@@ -262,6 +268,10 @@ async function findElements(base64Data, mediaType) {
   }
 
   const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
+  if (/^\s*(yes|true)\s*$/i.test(String(j.screenshot || ""))) {
+    console.log("[separate] refused: the upload is a screen capture, not a design file");
+    return { elements: [], protected: prot, screenshot: true };
+  }
 
   /* Deduplication has to be fuzzy, not exact. The first real run returned "מספר 10" THREE times with
      slightly different boxes, two of them on blank fabric — an exact-match check let all three
@@ -519,6 +529,23 @@ async function upscale(buf) {
    fills inside a design are cut away with the background and leave holes; they read as large pockets
    of trapped emptiness. Cannot be fixed here — white and transparent are the same thing to a remover
    — so it is measured and reported. */
+/* How much of the frame actually survived background removal, 0..1.
+   Added after a run delivered a COMPLETELY EMPTY transparent PNG as a finished print file — the
+   customer could have ordered from it. holeRatio measures transparency INSIDE artwork and returns 0
+   when there is no artwork at all, so it could never have caught this, and nothing else in the
+   pipeline ever asked whether the output contained anything. Measured on the cutout BEFORE the print
+   canvas is built, since that canvas pads with transparency and would skew the reading. */
+const MIN_INK = 0.004;           // below this the cutout is empty or a few stray pixels
+
+async function inkRatio(buf) {
+  const { data, info } = await sharp(buf)
+    .ensureAlpha().resize(220, 220, { fit: "inside" }).raw().toBuffer({ resolveWithObject: true });
+  const n = info.width * info.height;
+  let ink = 0;
+  for (let p = 0, i = 3; p < n; p++, i += info.channels) if (data[i] >= 128) ink++;
+  return ink / n;
+}
+
 async function holeRatio(buf) {
   const { data, info } = await sharp(buf)
     .ensureAlpha().resize(220, 220, { fit: "inside" }).raw().toBuffer({ resolveWithObject: true });
@@ -631,6 +658,14 @@ async function processOne(buf, msLeft) {
     console.log("[separate] upload is already transparent - skipping background removal");
   } else {
     work = await removeBackground(work);
+  }
+
+  /* Refuse rather than deliver. An empty file that looks finished is the one failure the user
+     cannot see before ordering from it, so it throws instead of returning. */
+  const ink = await inkRatio(work);
+  if (ink < MIN_INK) {
+    console.error(`[separate] cutout is empty (ink ${(ink * 100).toFixed(2)}%) - refusing to deliver it`);
+    throw new Error("EMPTY_CUTOUT");
   }
 
   let holes = 0;
@@ -764,6 +799,10 @@ const IP_ERROR =
   "התמונה כוללת לוגו מסחרי, סימן מסחרי או דמות מוגנת. " +
   "הכלי מפיק קבצי הדפסה, ולכן אינו מעבד חומר כזה — העלו עיצוב מקורי או כזה שיש לכם רישיון עליו.";
 
+const SCREENSHOT_ERROR =
+  "זה צילום מסך, לא קובץ עיצוב. העיצוב בתוך צילום מסך קטן מדי לקובץ הדפסה — " +
+  "בקשו מהלקוח לייצא את הקובץ מהאפליקציה ולשלוח אותו.";
+
 const NO_ELEMENTS_ERROR =
   "לא זוהו פריטים בתמונה. העלו תמונה שרואים בה חולצה, מוצר או דמות בבירור.";
 
@@ -777,6 +816,9 @@ async function runDetect(res, base64Data, mediaType) {
   if (found.protected) {
     console.warn("[separate] REFUSED at detect - protected material:", found.protected);
     return res.status(422).json({ error: IP_ERROR, blocked: "ip", reason: found.protected });
+  }
+  if (found.screenshot) {
+    return res.status(422).json({ error: SCREENSHOT_ERROR, blocked: "screenshot" });
   }
   if (!found.elements.length) {
     return res.status(422).json({ error: NO_ELEMENTS_ERROR, blocked: "no-elements" });
@@ -847,6 +889,7 @@ async function runSeparate(res, body, base64Data, mediaType, msLeft, student, ow
   const original = Buffer.from(base64Data, "base64");
 
   const files = [];
+  const errs = [];
   let skipped = 0;
   for (let i = 0; i < picks.length; i++) {
     /* Finishing three elements and saying so beats timing out at sixty seconds with nothing. */
@@ -859,11 +902,21 @@ async function runSeparate(res, body, base64Data, mediaType, msLeft, student, ow
       files.push(out);
       console.log(`[separate] element ${i + 1}/${picks.length} "${picks[i].label}" done (${out.quality})`);
     } catch (e) {
+      errs.push(e.message);
       console.error(`[separate] element ${i + 1} failed:`, e.message);
     }
   }
   if (!files.length) {
-    return res.status(502).json({ error: "החילוץ נכשל. נסו שוב או בחרו פחות אלמנטים." });
+    /* If every element came back empty the cause is known and specific, so say so instead of
+       offering a retry that will fail the same way. */
+    const allEmpty = errs.length > 0 && errs.every((e) => e === "EMPTY_CUTOUT");
+    return res.status(502).json({
+      error: allEmpty
+        ? "הסרת הרקע לא מצאה את הפריט והקובץ יצא ריק. זה קורה כשהפריט כהה על רקע כהה, " +
+          "או כשמסמנים חלק קטן בתוך תמונה גדולה. נסו תמונה שבה הפריט בולט מהרקע."
+        : "החילוץ נכשל. נסו שוב או בחרו פחות אלמנטים.",
+      emptyCutout: allEmpty,
+    });
   }
 
   /* Charged once per run, after files exist — a failure never costs him or a customer anything. */
