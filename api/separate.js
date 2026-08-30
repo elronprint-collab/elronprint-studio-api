@@ -133,6 +133,18 @@ const NONE_RE = /^\s*(none|no|n\/a|-)\s*$/i;
 const MAX_BOX_FRAC = 55;                 // percent of the image area
 function boxArea(b) { return ((b.x1 - b.x0) * (b.y1 - b.y0)) / 100; }
 
+/* Fraction of the SMALLER box covered by the overlap. Intersection-over-union would let a small box
+   sitting entirely inside a large one score low and survive; here that nests to 1.0 and is caught. */
+function overlapFrac(a, b) {
+  const w = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const h = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  const inter = w * h;
+  if (inter <= 0) return 0;
+  const areaA = (a.x1 - a.x0) * (a.y1 - a.y0);
+  const areaB = (b.x1 - b.x0) * (b.y1 - b.y0);
+  return inter / Math.max(1e-9, Math.min(areaA, areaB));
+}
+
 /* ---------------- vision: one VLM call, billed through fal ----------------
    Was api.anthropic.com. Moved because the Anthropic account is no longer the one being billed —
    every call to it now fails, which took BOTH tools down at once. fal already carries the FAL_KEY
@@ -149,7 +161,12 @@ function boxArea(b) { return ((b.x1 - b.x0) * (b.y1 - b.y0)) / 100; }
    The response reports what the call actually cost, so it is logged rather than estimated. The
    failure path logs status AND body — the previous version threw away the body, which is exactly
    why a dead account looked like a generic "operation failed" for so long. */
-const VISION_MODEL = "google/gemini-2.5-flash";
+/* Back on the model these prompts were written and tuned against. The first fal run used Gemini and
+   the boxes were visibly wrong — a collar returned as "front logo", an empty black rectangle as
+   "bottom logo", and the same number listed three times despite an explicit rule against duplicates.
+   Same prompt, different model, worse reading. The transport stays on fal, so billing is unaffected;
+   only the slug changed. Any OpenRouter vision slug works here if this ever needs revisiting. */
+const VISION_MODEL = "anthropic/claude-sonnet-4.6";
 
 async function visionJson(systemPrompt, userPrompt, base64Data, mediaType, maxTokens, tag) {
   const r = await fetch("https://fal.run/openrouter/router/vision", {
@@ -243,20 +260,22 @@ async function findElements(base64Data, mediaType) {
 
   const prot = NONE_RE.test(String(j.protected || "")) ? "" : String(j.protected || "").trim();
 
-  const seen = new Set();
-  const elements = (Array.isArray(j.elements) ? j.elements : [])
-    .map((e) => {
-      const box = parseBox(e && (e.box || e.bbox || e));
-      if (!box) return null;
-      if (boxArea(box) > MAX_BOX_FRAC) return null;
-      const key = `${box.x0},${box.y0},${box.x1},${box.y1}`;
-      if (seen.has(key)) return null;
-      seen.add(key);
-      const label = String((e && e.label) || "").trim().slice(0, 40) || "אלמנט";
-      return { label, box };
-    })
-    .filter(Boolean)
-    .slice(0, MAX_ELEMENTS);
+  /* Deduplication has to be fuzzy, not exact. The first real run returned "מספר 10" THREE times with
+     slightly different boxes, two of them on blank fabric — an exact-match check let all three
+     through and the pick screen filled with near-identical junk. So: one entry per label, and any
+     box overlapping an accepted one by more than half is treated as the same thing. */
+  const kept = [];
+  for (const e of (Array.isArray(j.elements) ? j.elements : [])) {
+    const box = parseBox(e && (e.box || e.bbox || e));
+    if (!box) continue;
+    if (boxArea(box) > MAX_BOX_FRAC) continue;
+    const label = String((e && e.label) || "").trim().slice(0, 40) || "אלמנט";
+    if (kept.some((k) => k.label === label)) continue;
+    if (kept.some((k) => overlapFrac(k.box, box) > 0.5)) continue;
+    kept.push({ label, box });
+    if (kept.length >= MAX_ELEMENTS) break;
+  }
+  const elements = kept;
 
   console.log(
     `[separate] ${elements.length} element(s): ` +
