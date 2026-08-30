@@ -1,3 +1,77 @@
+import crypto from "crypto";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   שער גישה — נוסף 2026-08-30
+
+   עד היום הקובץ הזה לא בדק כלום. הבדיקה נעשתה בעמוד בדפדפן בלבד: העמוד שאל
+   את auth.js מה היתרה, ואם הייתה — קרא לכאן. כלומר קריאה ישירה ל-/api/ad-video
+   מכלי מפתחים ייצרה סרטונים בלי התחברות ובלי קרדיטים, על חשבון החנות.
+   כל שאר הכלים בתשלום בודקים בשרת; רק זה לא.
+
+   מה שנבדק כאן: הטוקן -> סשן -> חשבון -> יש יתרה (ריצה חינם או קרדיט).
+   מה שלא נעשה כאן: ניכוי. הניכוי ממשיך להתבצע ב-auth.js דרך avatarConsume,
+   ולו הייתי מנכה גם כאן הלקוח היה מחויב פעמיים על אותו סרטון.
+   ────────────────────────────────────────────────────────────────────────── */
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const APP_SECRET   = process.env.APP_SECRET;
+const AVATAR_FREE_RUNS = 1;      // חייב להיות זהה לערך ב-auth.js
+const encq = encodeURIComponent;
+
+/* הפעולות שמוציאות כסף אמיתי. status ו-engines לא, והן נשארות פתוחות כדי
+   שסקר מצב של ג'וב שכבר רץ לא ייפול אם הטוקן פג באמצע. */
+const PAID_ACTIONS = ["script", "voice", "presenter", "avatar", "lipsync", "tryon"];
+
+function gateHash(s) {
+  return crypto.createHmac("sha256", APP_SECRET || "fallback").update(String(s)).digest("hex");
+}
+
+async function gateGet(path) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+    headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY }
+  });
+  if (!r.ok) throw new Error("Supabase GET " + path + " -> " + r.status);
+  return JSON.parse((await r.text()) || "[]");
+}
+
+function isOwnerMail(email) {
+  const list = String(process.env.OWNER_EMAILS || "")
+    .split(",").map(function (x) { return x.trim().toLowerCase(); }).filter(Boolean);
+  return !!email && list.indexOf(String(email).trim().toLowerCase()) !== -1;
+}
+
+/* מחזיר null כשמותר להמשיך, או אובייקט תשובה כשצריך לעצור. */
+async function denyReason(token) {
+  if (!token || String(token).length < 32) {
+    return { status: 401, body: { error: "צריך להתחבר כדי ליצור סרטון.", needLogin: true } };
+  }
+  const rows = await gateGet(
+    "sessions?token_hash=eq." + encq(gateHash(token)) +
+    "&select=student_id,expires_at,students(id,email,avatar_credits)&limit=1"
+  );
+  const sess = rows[0];
+  if (!sess || new Date(sess.expires_at).getTime() < Date.now()) {
+    return { status: 401, body: { error: "ההתחברות פגה. התחברו מחדש.", needLogin: true } };
+  }
+
+  const st = sess.students || {};
+  if (isOwnerMail(st.email)) return null;
+
+  const credits = st.avatar_credits || 0;
+  if (credits > 0) return null;
+
+  const free = await gateGet(
+    "avatar_runs?student_id=eq." + encq(sess.student_id) + "&charged=is.false&select=id"
+  );
+  if (Math.max(0, AVATAR_FREE_RUNS - free.length) > 0) return null;
+
+  return {
+    status: 402,
+    body: { error: "נגמרו הקרדיטים לסרטוני אווטאר.", needCredits: true, freeLeft: 0, credits: 0 }
+  };
+}
+
 // api/ad-video.js  —  גרסה 2
 // ElronPrint — מנוע פרסומות AI (Creatify clone)
 //
@@ -189,13 +263,21 @@ const DEFAULT_AVATAR_PROMPT =
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-epai-token");
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST בלבד" });
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     const { action } = body;
+
+    if (PAID_ACTIONS.indexOf(action) !== -1) {
+      const deny = await denyReason(body.token || req.headers["x-epai-token"]);
+      if (deny) {
+        console.warn("[ad-video] refused", action, "-", JSON.stringify(deny.body.error));
+        return res.status(deny.status).json(deny.body);
+      }
+    }
 
     switch (action) {
       case "product":   return res.json(await getProduct(body));
