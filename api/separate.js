@@ -13,13 +13,17 @@ import { checkRateLimit } from "./_ratelimit.js";
 // ceiling is 12. This uses the last slot. The next new endpoint will require either a Pro upgrade
 // or merging two existing functions. He was told this before choosing and chose it anyway.
 //
-// WHAT THIS DOES, and why extract.js could not:
-// extract.js asks "where is the printed artwork" — its unit is a print AREA on a garment (front
-// print, back print, sleeve print). Feed it a brand sheet (two jerseys, a crest, a wordmark, a
-// number, a colour strip) and it answers `full`, because there is no wearer to cut away, so the
-// whole sheet goes through as ONE artwork and comes back as one transparent picture of two shirts.
-// That is that tool working as written. "Which separable pieces is this made of" is a different
-// question, so it gets its own prompt, its own size floor and its own endpoint.
+// WHAT THIS DOES:
+// Finds each separate ITEM in an image — two jerseys photographed side by side, a front and a back
+// view, a shirt and a pair of shorts — and returns one transparent print file per item.
+//
+// It does NOT break a design into its parts. An earlier version of this file did exactly that, and
+// it was wrong: fed a jersey it returned the crest, the number and the lettering as separate crops.
+// Two things were learned from that run and are worth keeping written down. The detection was
+// excellent — every part was found and labelled correctly. The EXTRACTION was useless, because
+// removeBackground looks for the salient object, and on a photograph of fabric the salient object is
+// the fabric, not the number printed on it. One file came back completely empty. Cutting a whole
+// garment out of its background is the thing this pipeline is actually good at.
 //
 // TWO STEPS, forced by the platform rather than chosen. maxDuration is 60s and the budget below is
 // 57s; processOne costs roughly 10-20s per element, so eight elements in one invocation would time
@@ -128,9 +132,11 @@ function parseBox(v) {
 
 const NONE_RE = /^\s*(none|no|n\/a|-)\s*$/i;
 
-/* An element covering most of the sheet IS the sheet, not a piece of it. Same measurement extract.js
-   uses to catch a box that has swallowed the wearer, reused here for a different failure. */
-const MAX_BOX_FRAC = 55;                 // percent of the image area
+/* Raised from 55 to 92. At 55 this silently dropped the ordinary case: a photo of ONE garment fills
+   most of its frame, so the only correct box would have been rejected and the user would have been
+   told nothing was found. The check still exists to catch a box that is just "the whole picture"
+   when the model failed to isolate anything, which is why it is not removed outright. */
+const MAX_BOX_FRAC = 92;                 // percent of the image area
 function boxArea(b) { return ((b.x1 - b.x0) * (b.y1 - b.y0)) / 100; }
 
 /* Fraction of the SMALLER box covered by the overlap. Intersection-over-union would let a small box
@@ -199,38 +205,35 @@ async function visionJson(systemPrompt, userPrompt, base64Data, mediaType, maxTo
    - the garment is never an element. This is the v36 lesson from reimagine.js: a shirt shape
      reaching the output is the worst failure this family of tools has, and a prompt rule is far
      cheaper than discovering it inside a print file. */
-const ELEMENTS_SYSTEM = `You are looking at a design image — a brand sheet, a mockup, a poster or an
-artwork file. It will be split into separate printable pieces.
+const ELEMENTS_SYSTEM = `You are looking at an image that contains one or more items. Each item will
+be cut out on its own and turned into a separate print file.
 
-List every SEPARABLE ELEMENT: a piece a designer would treat as its own file.
+List every SEPARATE ITEM in the image.
 
-Typical elements: a crest, badge, emblem or logo mark; a wordmark or block of lettering; a number;
-an illustrated figure, animal or character; an icon; a self-contained ornament or motif.
+An item is a complete thing a person would point at and name: a garment (shirt, jersey, hoodie,
+shorts), a product, a character or figure, an animal, or a self-contained graphic. Front and back
+views of the same garment are TWO items, because each becomes its own print file.
 
 RULES
 
-1. An element must stand alone. If cutting it out would leave something meaningless — half a stripe,
-   a single letter of a word, one corner of a pattern — it is NOT an element. A whole word or a whole
-   phrase set in one style IS one element. Do not split a word into letters.
+1. One box per COMPLETE item. Draw the box around the whole thing, edge to edge, including every
+   part of it. Do not cut an item off partway.
 
-2. NEVER list a garment or a mockup as an element. A t-shirt, jersey, hoodie, sleeve, collar, the
-   fabric, a hanger, a mannequin, a model, a flat lay or a product photo is the SURFACE the design
-   sits on, not a piece of the design. If the sheet shows a shirt, list the artwork PRINTED on that
-   shirt, never the shirt.
+2. NEVER break a single item into its parts. A jersey with a crest, a number and lettering on it is
+   ONE item, not four. Do not list logos, numbers, text, patterns, sleeves, collars or panels
+   separately — they travel with the item they sit on. This is the most important rule here.
 
-3. Prefer the cleanest copy. Brand sheets often show the same mark twice — small and warped on a
-   garment, and again large and flat on a plain panel. List the large flat one and ignore the
-   distorted duplicate. Never list the same mark twice.
+3. If the image contains exactly one item, return exactly one box around it. A box covering most of
+   the frame is correct and expected in that case.
 
-4. Ignore: background textures, colour swatches, plain stripes and blocks, specimen alphabets, page
-   headings, spec text, captions describing the design, and any interface or watermark laid over the
-   picture.
+4. Ignore anything that is not an item: background, shadows, floors, walls, hangers, mannequins,
+   arrows, colour swatches, page headings, spec text, captions, watermarks and interface overlays.
+   If an item is worn by a person, box the garment, not the person.
 
-5. At most ${MAX_ELEMENTS} elements, most useful first.
+5. At most ${MAX_ELEMENTS} items, in reading order.
 
-For each element give a tight bounding box around the mark itself and a SHORT HEBREW label (2-3
-words) so a non-designer can recognise it in a list — for example: סמל המועדון, כיתוב ראשי, מספר,
-דמות, אייקון, כיתוב אחורי.
+For each item give a SHORT HEBREW label (2-3 words) so a non-designer can tell them apart in a list —
+for example: חולצה קדמית, חולצה אחורית, מכנסיים, דמות, גרפיקה.
 
 Also answer: is any part of this someone else's property? Answer with the specific reason, or the
 single word none.
@@ -244,12 +247,12 @@ Answer with ONLY a JSON object, no prose, no markdown fences:
 {"elements":[{"label":"...","box":"x0,y0,x1,y1"}, ...],"protected":"..." or "none"}
 
 Box values are whole numbers 0-100, percentages of the image width or height, x0,y0 top-left and
-x1,y1 bottom-right. If there are no separable elements answer {"elements":[],"protected":"..."}.`;
+x1,y1 bottom-right. If there is nothing to cut out answer {"elements":[],"protected":"..."}.`;
 
 async function findElements(base64Data, mediaType) {
   const raw = await visionJson(
     ELEMENTS_SYSTEM,
-    "List the separable elements. JSON only.",
+    "List the separate items. JSON only.",
     base64Data, mediaType, 1200, "elements"
   );
   const j = parseJsonish(raw);
@@ -762,7 +765,7 @@ const IP_ERROR =
   "הכלי מפיק קבצי הדפסה, ולכן אינו מעבד חומר כזה — העלו עיצוב מקורי או כזה שיש לכם רישיון עליו.";
 
 const NO_ELEMENTS_ERROR =
-  "לא נמצאו אלמנטים נפרדים בתמונה. אם זה עיצוב אחד שלם, השתמשו בכלי חילוץ עיצוב במקום בהפרדה.";
+  "לא זוהו פריטים בתמונה. העלו תמונה שרואים בה חולצה, מוצר או דמות בבירור.";
 
 /* ---------------- mode: detect ----------------
    One Claude call plus cheap sharp crops. Nothing is uploaded, nothing is charged. The per-element
