@@ -1,4 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
+import { gate, settle } from "./_account.js";
 // api/removebg.js — שלב 3 (אופציונלי): הסרת רקע → PNG עם רקע שקוף (BiRefNet)
 
 const ALLOWED = [
@@ -21,7 +22,7 @@ function cors(req, res) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-epai-token");
 }
 
 export default async function handler(req, res) {
@@ -35,15 +36,32 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many requests", retryAfter });
   }
 
-  const { imageUrl } = req.body || {};
+  const body = req.body || {};
+  const { imageUrl } = body;
   if (!imageUrl || typeof imageUrl !== "string" || !imageUrl.startsWith("https://")) {
     return res.status(400).json({ error: "Invalid imageUrl" });
   }
   let host;
+
+
+
   try { host = new URL(imageUrl).hostname; } catch { return res.status(400).json({ error: "Invalid imageUrl" }); }
   if (!host.endsWith("fal.media") && !host.endsWith("fal.ai") && !host.endsWith("fal.run")) {
     return res.status(400).json({ error: "URL not allowed" });
   }
+
+  /* 2026-08-30: הכלי עבר לחיוב. כל קריאה דורשת התחברות, אבל קרדיט נגבה פעם אחת
+     לכל שימוש בכלי, ולא לכל פעולה פנימית. כלי שקורא לכאן כשלב ביניים בתוך
+     תהליך אחר שולח step:"inner" — אז מאמתים אותו אבל לא מחייבים פעמיים. */
+  let acct;
+  try {
+    acct = await gate(req, body);
+  } catch (e) {
+    console.error("[removebg] account check failed:", e.message);
+    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
+  }
+  if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
+  const chargeable = String(body.step || "") !== "inner";
 
   try {
     const r = await fetch("https://fal.run/fal-ai/birefnet/v2", {
@@ -69,7 +87,9 @@ export default async function handler(req, res) {
     const outUrl = data?.image?.url;
     if (!outUrl) return res.status(502).json({ error: "No image returned" });
 
-    return res.status(200).json({ imageUrl: outUrl });
+    const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
+      : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
+    return res.status(200).json({ freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner, imageUrl: outUrl });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ error: "Background removal failed" });
