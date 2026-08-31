@@ -1,4 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
+import { gate, settle } from "./_account.js";
 // api/transform.js — עריכת תמונה לפי הוראה (FLUX.1 Kontext)
 // הלקוח מעלה תמונה + הוראה בעברית ("תהפכו את הלוגו לסגנון גרפיטי")
 
@@ -22,7 +23,7 @@ function cors(req, res) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-epai-token");
 }
 
 // תרגום אוטומטי לאנגלית — כמו ב-generate.js
@@ -56,7 +57,8 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many requests", retryAfter });
   }
 
-  const { prompt, image } = req.body || {};
+  const body = req.body || {};
+  const { prompt, image } = body;
   if (!prompt || typeof prompt !== "string" || prompt.length > 1000) {
     return res.status(400).json({ error: "Invalid prompt" });
   }
@@ -71,6 +73,20 @@ export default async function handler(req, res) {
   }
 
   const englishPrompt = await translateToEnglish(prompt);
+
+
+  /* 2026-08-30: הכלי עבר לחיוב. כל קריאה דורשת התחברות, אבל קרדיט נגבה פעם אחת
+     לכל שימוש בכלי, ולא לכל פעולה פנימית. כלי שקורא לכאן כשלב ביניים בתוך
+     תהליך אחר שולח step:"inner" — אז מאמתים אותו אבל לא מחייבים פעמיים. */
+  let acct;
+  try {
+    acct = await gate(req, body);
+  } catch (e) {
+    console.error("[transform] account check failed:", e.message);
+    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
+  }
+  if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
+  const chargeable = String(body.step || "") !== "inner";
 
   try {
     // FLUX.1 Kontext — מודל עריכה לפי הוראה: "תמחק / תחליף / תוסיף / תשנה"
@@ -97,7 +113,9 @@ export default async function handler(req, res) {
     const imageUrl = data?.images?.[0]?.url;
     if (!imageUrl) return res.status(502).json({ error: "No image returned" });
 
-    return res.status(200).json({ imageUrl });
+    const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
+      : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
+    return res.status(200).json({ freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner, imageUrl });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ error: "Transform failed" });
