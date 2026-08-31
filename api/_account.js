@@ -16,7 +16,13 @@ import crypto from "crypto";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
-const APP_SECRET   = process.env.APP_SECRET;
+/* 2026-08-31 — באג שמצאנו בהרצה הראשונה של documents.js:
+   auth.js מגבב את הטוקן עם SHOPIFY_APP_SECRET ושומר אותו כך ב-sessions,
+   ואילו כאן נקרא APP_SECRET — שלא היה מוגדר כלל. שני הגיבובים לא תאמו,
+   ולכן כל לקוח מחובר קיבל 401 מכל כלי שעבר לחיוב ב-30/08.
+   הנפילה חזרה ל-SHOPIFY_APP_SECRET מיישרת את שני הקבצים בלי לגעת בשום דבר אחר.
+   מי שכן יגדיר APP_SECRET בעתיד — הוא עדיין קודם. */
+const APP_SECRET   = process.env.APP_SECRET || process.env.SHOPIFY_APP_SECRET;
 
 /* חייב להישאר זהה ל-FREE_RUNS ב-extract.js, ב-separate.js וב-auth.js.
    שינוי כאן בלבד ייצור חוסר עקביות שלקוח יראה כתקלה. */
