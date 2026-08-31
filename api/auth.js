@@ -282,6 +282,15 @@ async function designBalance(studentId, credits) {
 /* חיוב שימוש אחד בכלי דפדפן (הסרת רקע, עורך תמונות, ברכות וכו').
    אותו מונה בדיוק כמו "עיצוב מחדש": ריצה חינם אחת לחשבון, אחר כך קרדיט לשימוש.
    הבעלים לא מחויב אף פעם, אבל השימוש נרשם ל-design_runs לצורך היסטוריה. */
+/* כלים שרצים כולום בדפדפן ולא פונים לשום שרת בתשלום.
+   הם מאחורי התחברות — כדי לאסוף מייל ולהכיר את הלקוח — אבל לעולם לא
+   נחסמים על חוסר יתרה. לחסום אותם זה לגבות על משהו שלא עולה לחנות דבר,
+   והוא גם מבריח לקוח שהיה יכול לחזור ולקנות אחר כך. הוחלט 2026-08-31. */
+const FREE_TOOLS = [
+  "image-editor", "text-art", "collage", "qr-generator",
+  "video-tool", "greeting-tool", "transparent-tool"
+];
+
 async function doConsume(body) {
   /* 2026-08-31: הפעולה הזו כבר לא מנכה קרדיט.
 
@@ -310,7 +319,15 @@ async function doConsume(body) {
   const credits = (rows[0] && rows[0].design_credits) || 0;
   const bal = await designBalance(s.studentId, credits);
 
-  /* אין יתרה בכלל — עוצרים על השער ומציגים חבילות, כמו קודם. */
+  /* כלי חינמי נפתח תמיד למי שמחובר, גם בלי יתרה. */
+  if (FREE_TOOLS.indexOf(tool) !== -1) {
+    return {
+      status: 200,
+      body: { ok: true, owner: false, tool: tool, free: true, freeLeft: bal.freeLeft, credits: credits }
+    };
+  }
+
+  /* כלי בתשלום בלי יתרה — עוצרים כבר בכניסה, עדיף מלגלות אחרי העלאת קובץ. */
   if (bal.freeLeft <= 0 && credits <= 0) {
     return {
       status: 402,
