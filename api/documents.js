@@ -584,6 +584,75 @@ async function doDelete(req, body) {
   return { status: 200, body: { ok: true } };
 }
 
+/* ---------------- הקובץ עצמו ----------------
+   קבלות הן מסמכים פיננסיים של הלקוח, ולכן הן לא עולות ל-Cloudinary כמו
+   שאר הכלים: העלאה לא-חתומה שם יוצרת כתובת ציבורית שכל מי שמחזיק בה פותח.
+   כאן הדלי ב-Supabase פרטי, ההעלאה נעשית מול כתובת חתומה לזמן קצר,
+   והצפייה דורשת קישור חתום שפג. הנתיב כולל את מזהה הלקוח, כך שגם אם
+   הועבר נתיב זר — הוא לא ייחתם.
+
+   ⚠️ נתיבי ה-Storage של Supabase נכתבו לפי המבנה המתועד ולא הורצו מכאן
+   (הדומיין חסום בסביבה שלי). כשל יחזיר את גוף השגיאה ללוג, לא ניחוש. */
+
+const BUCKET = "documents";
+
+function safeName(name) {
+  const base = String(name || "receipt").split(/[\\/]/).pop();
+  const ext = (base.match(/\.(jpe?g|png|webp|heic|pdf)$/i) || [null, "jpg"])[1].toLowerCase();
+  return Date.now() + "-" + Math.random().toString(36).slice(2, 8) + "." + ext;
+}
+
+async function doUploadUrl(req, body) {
+  const g = await gate(req, body);
+  if (g.deny) return { status: g.deny.status, body: g.deny.body };
+
+  const path = String(g.student.id) + "/" + safeName(body.filename);
+  const r = await fetch(
+    SUPABASE_URL + "/storage/v1/object/upload/sign/" + BUCKET + "/" + path,
+    { method: "POST", headers: sbHeaders(), body: JSON.stringify({}) }
+  );
+  if (!r.ok) {
+    const t = (await r.text()).slice(0, 300);
+    console.error("[documents] signed upload url failed:", r.status, t);
+    return { status: 502, body: { error: "לא ניתן להעלות את הקובץ כרגע.", detail: t } };
+  }
+  const j = JSON.parse((await r.text()) || "{}");
+  const token = j.token || String(j.url || "").split("token=")[1] || "";
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      filePath: path,
+      uploadUrl: SUPABASE_URL + "/storage/v1/object/upload/sign/" + BUCKET + "/" + path +
+                 "?token=" + encodeURIComponent(token),
+    },
+  };
+}
+
+async function doFileLink(req, body) {
+  const g = await gate(req, body);
+  if (g.deny) return { status: g.deny.status, body: g.deny.body };
+
+  const path = str(body.filePath, 400);
+  /* הנתיב חייב להתחיל במזהה הלקוח — אחרת אפשר היה לבקש חתימה על קובץ של אחר. */
+  if (!path || path.indexOf(String(g.student.id) + "/") !== 0) {
+    return { status: 403, body: { error: "אין גישה לקובץ הזה." } };
+  }
+
+  const r = await fetch(SUPABASE_URL + "/storage/v1/object/sign/" + BUCKET + "/" + path, {
+    method: "POST", headers: sbHeaders(),
+    body: JSON.stringify({ expiresIn: Math.min(Number(body.expiresIn) || 3600, 86400) }),
+  });
+  if (!r.ok) {
+    const t = (await r.text()).slice(0, 300);
+    console.error("[documents] sign download failed:", r.status, t);
+    return { status: 502, body: { error: "לא ניתן לפתוח את הקובץ.", detail: t } };
+  }
+  const j = JSON.parse((await r.text()) || "{}");
+  const signed = j.signedURL || j.signedUrl || "";
+  return { status: 200, body: { ok: true, url: signed ? SUPABASE_URL + "/storage/v1" + signed : null } };
+}
+
 /* search — חיפוש חופשי. ILIKE ולא to_tsvector: עברית עובדת בוודאות,
    ובנפח של לקוח בודד אין הבדל מורגש. */
 async function doSearch(req, body) {
@@ -812,6 +881,8 @@ export default async function handler(req, res) {
       case "save":    out = await doSave(req, body);     break;
       case "update":  out = await doUpdate(req, body);   break;
       case "delete":  out = await doDelete(req, body);   break;
+      case "uploadUrl": out = await doUploadUrl(req, body); break;
+      case "fileLink":  out = await doFileLink(req, body);  break;
       case "search":  out = await doSearch(req, body);   break;
       case "chart":   out = await doChart(req, body);    break;
       case "email":   out = await doEmail(req, body);    break;
