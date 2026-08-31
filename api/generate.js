@@ -1,4 +1,5 @@
 import { checkRateLimit } from "./_ratelimit.js";
+import { gate, settle } from "./_account.js";
 // api/generate.js — שלב 1: יצירת העיצוב (FLUX.1 dev)
 //
 // v2 — תיקון התרגום מעברית.
@@ -35,7 +36,7 @@ function cors(req, res) {
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-epai-token");
 }
 
 function hasHebrew(text) {
@@ -125,10 +126,24 @@ export default async function handler(req, res) {
     return res.status(429).json({ error: "Too many requests", retryAfter });
   }
 
-  const { prompt } = req.body || {};
+  const body = req.body || {};
+  const { prompt } = body;
   if (!prompt || typeof prompt !== "string" || prompt.length > 1000) {
     return res.status(400).json({ error: "Invalid prompt" });
   }
+
+  /* 2026-08-30: הכלי עבר לחיוב. כל קריאה דורשת התחברות, אבל קרדיט נגבה פעם אחת
+     לכל שימוש בכלי, ולא לכל פעולה פנימית. כלי שקורא לכאן כשלב ביניים בתוך
+     תהליך אחר שולח step:"inner" — אז מאמתים אותו אבל לא מחייבים פעמיים. */
+  let acct;
+  try {
+    acct = await gate(req, body);
+  } catch (e) {
+    console.error("[generate] account check failed:", e.message);
+    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
+  }
+  if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
+  const chargeable = String(body.step || "") !== "inner";
 
   const { prompt: englishPrompt, via } = await toEnglishPrompt(prompt);
 
@@ -137,6 +152,9 @@ export default async function handler(req, res) {
       error: "התרגום מעברית נכשל. נסו לכתוב את התיאור באנגלית.",
     });
   }
+
+
+
 
   try {
     const r = await fetch("https://fal.run/fal-ai/flux/dev", {
@@ -166,7 +184,12 @@ export default async function handler(req, res) {
     if (!imageUrl) return res.status(502).json({ error: "No image returned" });
 
     // promptUsed נשלח חזרה כדי שתקלות תרגום יהיו גלויות ולא שקטות
-    return res.status(200).json({ imageUrl, promptUsed: englishPrompt, translatedVia: via });
+    const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
+      : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
+    return res.status(200).json({
+      imageUrl, promptUsed: englishPrompt, translatedVia: via,
+      freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
+    });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ error: "Generation failed" });
