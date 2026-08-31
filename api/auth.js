@@ -283,14 +283,24 @@ async function designBalance(studentId, credits) {
    אותו מונה בדיוק כמו "עיצוב מחדש": ריצה חינם אחת לחשבון, אחר כך קרדיט לשימוש.
    הבעלים לא מחויב אף פעם, אבל השימוש נרשם ל-design_runs לצורך היסטוריה. */
 async function doConsume(body) {
+  /* 2026-08-31: הפעולה הזו כבר לא מנכה קרדיט.
+
+     epd-gate קורא לכאן ברגע שלקוח פותח עמוד כלי, לפני שעשה משהו.
+     מאז שהכלים עצמם מחייבים בשרת על הפעולה האמיתית, ניכוי גם כאן גבה
+     פעמיים על אותו שימוש: פעם על פתיחת העמוד ופעם על הלחיצה.
+
+     עכשיו היא בודקת בלבד: מחובר? יש יתרה? — ומחזירה אותה בלי לגעת בה.
+     כך epd-gate נשאר קיר התחברות ומסך חבילות, והחיוב קורה במקום היחיד
+     שבו אפשר לאכוף אותו — בנתיב שמבצע את העבודה בפועל.
+
+     תוצאת לוואי: כלים שרצים רק בדפדפן (עורך תמונות, קולאז, QR, סרטונים, ברכות)
+     כבר לא גובים קרדיט — הם דורשים התחברות אבל חינמיים, כפי שהוחלט 2026-08-31. */
   const s = await studentByToken(body.token);
-  if (!s) return { status: 401, body: { error: "צריך להתחבר.", needLogin: true } };
+  if (!s) return { status: 401, body: { error: "\u05e6\u05e8\u05d9\u05da \u05dc\u05d4\u05ea\u05d7\u05d1\u05e8.", needLogin: true } };
 
   const tool = String(body.tool || "").slice(0, 40);
 
   if (isOwnerEmail(s.email)) {
-    await sbPost("design_runs", { student_id: s.studentId, charged: false }, "return=minimal")
-      .catch(function (e) { console.error("owner run log failed:", e); });
     return { status: 200, body: { ok: true, owner: true, tool: tool, freeLeft: null, credits: null } };
   }
 
@@ -300,28 +310,17 @@ async function doConsume(body) {
   const credits = (rows[0] && rows[0].design_credits) || 0;
   const bal = await designBalance(s.studentId, credits);
 
-  if (bal.freeLeft > 0) {
-    await sbPost("design_runs", { student_id: s.studentId, charged: false }, "return=minimal");
+  /* אין יתרה בכלל — עוצרים על השער ומציגים חבילות, כמו קודם. */
+  if (bal.freeLeft <= 0 && credits <= 0) {
     return {
-      status: 200,
-      body: { ok: true, owner: false, tool: tool, freeLeft: bal.freeLeft - 1, credits: credits }
-    };
-  }
-
-  if (credits > 0) {
-    await sbPost("design_runs", { student_id: s.studentId, charged: true }, "return=minimal");
-    await sbPatch("students?id=eq." + enc(s.studentId), {
-      design_credits: Math.max(0, credits - 1)
-    });
-    return {
-      status: 200,
-      body: { ok: true, owner: false, tool: tool, freeLeft: 0, credits: credits - 1 }
+      status: 402,
+      body: { error: "\u05e0\u05d2\u05de\u05e8\u05d5 \u05d4\u05e7\u05e8\u05d3\u05d9\u05d8\u05d9\u05dd.", needCredits: true, freeLeft: 0, credits: 0 }
     };
   }
 
   return {
-    status: 402,
-    body: { error: "נגמרו הקרדיטים.", needCredits: true, freeLeft: 0, credits: 0 }
+    status: 200,
+    body: { ok: true, owner: false, tool: tool, freeLeft: bal.freeLeft, credits: credits }
   };
 }
 
