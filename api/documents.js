@@ -634,13 +634,21 @@ async function doDelete(req, body) {
   await sbDelete("documents?id=eq." + enc(id) + "&student_id=eq." + enc(g.student.id));
 
   /* כשל במחיקת הקובץ לא מפיל את הפעולה — הרשומה כבר נמחקה, וזה מה
-     שהלקוח ביקש. הקובץ היתום יופיע בלוג. */
+     שהלקוח ביקש. הקובץ היתום יופיע בלוג.
+     2026-09-01: הגרסה הראשונה שלחה DELETE ל-/object/{bucket}/{path} בלי גוף
+     והחזירה 400. Supabase מוחק מול הדלי עצמו עם רשימת נתיבים ב-prefixes —
+     זו הצורה שהספרייה הרשמית משתמשת בה, וזו הצורה כאן. */
   if (path && path.indexOf(String(g.student.id) + "/") === 0) {
     try {
-      const r = await fetch(SUPABASE_URL + "/storage/v1/object/" + BUCKET + "/" + path, {
-        method: "DELETE", headers: sbHeaders(),
+      const r = await fetch(SUPABASE_URL + "/storage/v1/object/" + BUCKET, {
+        method: "DELETE",
+        headers: sbHeaders(),
+        body: JSON.stringify({ prefixes: [path] }),
       });
-      if (!r.ok) console.error("[documents] orphaned file, delete returned", r.status, path);
+      if (!r.ok) {
+        console.error("[documents] orphaned file, delete returned", r.status,
+                      (await r.text()).slice(0, 200), path);
+      }
     } catch (e) {
       console.error("[documents] orphaned file, delete threw:", e.message, path);
     }
