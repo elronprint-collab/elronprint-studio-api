@@ -484,10 +484,46 @@ async function doExtract(req, body) {
   };
 }
 
+/* תקרת מסמכים לחשבון. האחסון מצטבר לנצח — לקוח משלם פעם אחת על החילוץ
+   והקבצים שלו נשארים — ולכן בלי תקרה חשבון אחד יכול למלא את התוכנית.
+   ENV ולא קבוע, כדי לשנות בוורסל בלי לגעת בקוד. */
+const MAX_DOCS = Number(process.env.MAX_DOCS_PER_ACCOUNT || 500);
+
+async function countDocs(studentId) {
+  const r = await fetch(
+    SUPABASE_URL + "/rest/v1/documents?student_id=eq." + enc(studentId) + "&select=id",
+    { headers: sbHeaders({ Prefer: "count=exact", Range: "0-0" }) }
+  );
+  if (!r.ok) throw new Error("Supabase count -> " + r.status);
+  /* content-range נראה כך: "0-0/137". המספר אחרי הלוכסן הוא הסך הכל. */
+  const cr = r.headers.get("content-range") || "";
+  const total = Number(cr.split("/")[1]);
+  return Number.isFinite(total) ? total : 0;
+}
+
 /* save — הלקוח אישר/תיקן. רק סכום חוסם. */
 async function doSave(req, body) {
   const g = await gate(req, body);
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
+
+  /* בעלים לא מוגבל. כשל בספירה לא חוסם שמירה — עדיף לחרוג מהתקרה
+     מאשר לחסום לקוח בגלל תקלה שלנו. */
+  if (!g.owner) {
+    try {
+      const n = await countDocs(g.student.id);
+      if (n >= MAX_DOCS) {
+        return {
+          status: 409,
+          body: {
+            error: "הגעתם לתקרה של " + MAX_DOCS + " מסמכים בחשבון. אפשר למחוק מסמכים ישנים כדי לפנות מקום.",
+            limit: MAX_DOCS, stored: n,
+          },
+        };
+      }
+    } catch (e) {
+      console.error("[documents] count failed, allowing save:", e.message);
+    }
+  }
 
   const d = normalise(body.data || {});
   const direction = body.direction === "income" ? "income" : "expense";
@@ -580,7 +616,36 @@ async function doDelete(req, body) {
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
   const id = str(body.id, 60);
   if (!id) return { status: 400, body: { error: "חסר מזהה מסמך." } };
+
+  /* הקובץ נמחק יחד עם הרשומה. בלי זה כל קבלה שנמחקה משאירה צילום באחסון
+     לנצח — ולכלי שמחזיק מסמכים פיננסיים של לקוחות זו גם בעיית נפח וגם
+     בעיה של שמירת מידע שהלקוח ביקש למחוק.
+     קוראים את file_path לפני המחיקה, אחרת הוא אבוד ואי אפשר למצוא את הקובץ. */
+  let path = null;
+  try {
+    const rows = await sbGet(
+      "documents?id=eq." + enc(id) + "&student_id=eq." + enc(g.student.id) + "&select=file_path&limit=1"
+    );
+    path = rows[0] ? rows[0].file_path : null;
+  } catch (e) {
+    console.error("[documents] could not read file_path before delete:", e.message);
+  }
+
   await sbDelete("documents?id=eq." + enc(id) + "&student_id=eq." + enc(g.student.id));
+
+  /* כשל במחיקת הקובץ לא מפיל את הפעולה — הרשומה כבר נמחקה, וזה מה
+     שהלקוח ביקש. הקובץ היתום יופיע בלוג. */
+  if (path && path.indexOf(String(g.student.id) + "/") === 0) {
+    try {
+      const r = await fetch(SUPABASE_URL + "/storage/v1/object/" + BUCKET + "/" + path, {
+        method: "DELETE", headers: sbHeaders(),
+      });
+      if (!r.ok) console.error("[documents] orphaned file, delete returned", r.status, path);
+    } catch (e) {
+      console.error("[documents] orphaned file, delete threw:", e.message, path);
+    }
+  }
+
   return { status: 200, body: { ok: true } };
 }
 
