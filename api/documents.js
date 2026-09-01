@@ -444,7 +444,7 @@ async function doExtract(req, body) {
   const { image, mediaType } = body;
   if (!image) return { status: 400, body: { error: "לא התקבלה תמונה." } };
 
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   const text = await askVision({
@@ -517,7 +517,7 @@ async function countDocs(studentId) {
 
 /* save — הלקוח אישר/תיקן. רק סכום חוסם. */
 async function doSave(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   /* בעלים לא מוגבל. כשל בספירה לא חוסם שמירה — עדיף לחרוג מהתקרה
@@ -589,7 +589,7 @@ const EDITABLE = [
 ];
 
 async function doUpdate(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
   const id = str(body.id, 60);
   if (!id) return { status: 400, body: { error: "חסר מזהה מסמך." } };
@@ -626,7 +626,7 @@ async function doUpdate(req, body) {
 }
 
 async function doDelete(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
   const id = str(body.id, 60);
   if (!id) return { status: 400, body: { error: "חסר מזהה מסמך." } };
@@ -690,7 +690,7 @@ function safeName(name) {
 }
 
 async function doUploadUrl(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   const path = String(g.student.id) + "/" + safeName(body.filename);
@@ -717,7 +717,7 @@ async function doUploadUrl(req, body) {
 }
 
 async function doFileLink(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   const path = str(body.filePath, 400);
@@ -767,13 +767,13 @@ async function myTaxId(studentId) {
 }
 
 async function doProfile(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
   return { status: 200, body: { ok: true, businessTaxid: await myTaxId(g.student.id) } };
 }
 
 async function doSetTaxid(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   /* מחרוזת ריקה = הסרה. אחרת חייב להיות מספר בן 9 ספרות. */
@@ -793,7 +793,7 @@ async function doSetTaxid(req, body) {
 /* search — חיפוש חופשי. ILIKE ולא to_tsvector: עברית עובדת בוודאות,
    ובנפח של לקוח בודד אין הבדל מורגש. */
 async function doSearch(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   const q = str(body.q, 120);
@@ -842,7 +842,7 @@ async function doSearch(req, body) {
 
 /* chart — סיכום חודשי להכנסות מול הוצאות. */
 async function doChart(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
 
   const months = Math.min(Math.max(Number(body.months) || 12, 1), 60);
@@ -939,7 +939,7 @@ function reportHtml(rows, totals, title) {
 }
 
 async function doEmail(req, body) {
-  const g = await gate(req, body);
+  const g = await gate(req, body, "document");
   if (g.deny) return { status: g.deny.status, body: g.deny.body };
   if (!RESEND_KEY) {
     console.error("[documents] RESEND_API_KEY missing");
