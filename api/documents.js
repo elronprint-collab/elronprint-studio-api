@@ -162,6 +162,10 @@ async function askVision({ system, ask, image, mediaType, maxTokens }) {
         headers: {
           Authorization: `Key ${process.env.FAL_KEY}`,
           "Content-Type": "application/json",
+          /* 2026-09-01: fal שומר את גוף הבקשה 30 יום כברירת מחדל, והוא נצפה
+             בדשבורד שלהם. כאן הגוף מכיל את צילום הקבלה של הלקוח — מסמך פיננסי
+             של אדם אחר. הכותרת הזו מבטלת את השמירה. */
+          "X-Fal-Store-IO": "0",
         },
         body: JSON.stringify(input),
       });
@@ -467,11 +471,21 @@ async function doExtract(req, body) {
   const balance = await settle(g.student, g.quota, g.owner);
   const dup = await findDuplicate(g.student.id, data).catch(() => null);
 
+  /* אם המסמך נושא את מספר העוסק של הלקוח עצמו — הוא זה שהוציא אותו, כלומר
+     הכנסה. זה הופך את הניחוש לוודאות. הלקוח עדיין יכול לשנות. */
+  let certain = false;
+  const mine = await myTaxId(g.student.id);
+  if (mine && digits(data.supplier_taxid) === mine) {
+    data.direction_guess = "income";
+    certain = true;
+  }
+
   return {
     status: 200,
     body: {
       ok: true,
       data,
+      directionCertain: certain,
       missing: missingFields(data),
       warning: allocationWarning(data),
       duplicate: dup ? { id: dup.id, supplier: dup.supplier_name, date: dup.doc_date, amount: dup.amount_total } : null,
@@ -726,6 +740,56 @@ async function doFileLink(req, body) {
   return { status: 200, body: { ok: true, url: signed ? SUPABASE_URL + "/storage/v1" + signed : null } };
 }
 
+/* ---------------- ח.פ של הלקוח (רשות) ----------------
+   אותה חשבונית היא הוצאה אצל הקונה והכנסה אצל המוכר, ושום דבר במסמך לא אומר
+   בצד של מי אתה עומד — ולכן הכיוון נשאר ניחוש שהלקוח מאשר.
+   מי שמזין את מספר העוסק שלו הופך את זה לוודאי: אם המספר על המסמך הוא שלו,
+   הוא הוציא אותו, כלומר זו הכנסה.
+   השדה הוא רשות בכוונה. לא לכל לקוח יש ח.פ (עוסק פטור, אדם פרטי), וחיוב
+   היה חוסם את השימוש הראשון עוד לפני שהלקוח ראה שהכלי עובד. */
+
+function digits(v) {
+  const d = String(v == null ? "" : v).replace(/\D/g, "");
+  return d || null;
+}
+
+async function myTaxId(studentId) {
+  try {
+    const rows = await sbGet(
+      "students?id=eq." + enc(studentId) + "&select=business_taxid&limit=1"
+    );
+    return rows[0] ? digits(rows[0].business_taxid) : null;
+  } catch (e) {
+    /* אם העמודה עוד לא קיימת — הכלי ממשיך לעבוד בדיוק כמו קודם. */
+    console.error("[documents] could not read business_taxid:", e.message);
+    return null;
+  }
+}
+
+async function doProfile(req, body) {
+  const g = await gate(req, body);
+  if (g.deny) return { status: g.deny.status, body: g.deny.body };
+  return { status: 200, body: { ok: true, businessTaxid: await myTaxId(g.student.id) } };
+}
+
+async function doSetTaxid(req, body) {
+  const g = await gate(req, body);
+  if (g.deny) return { status: g.deny.status, body: g.deny.body };
+
+  /* מחרוזת ריקה = הסרה. אחרת חייב להיות מספר בן 9 ספרות. */
+  const raw = String(body.businessTaxid == null ? "" : body.businessTaxid).trim();
+  let value = null;
+  if (raw) {
+    const d = digits(raw);
+    if (!d || d.length !== 9) {
+      return { status: 400, body: { error: "מספר עוסק/ח.פ הוא 9 ספרות." } };
+    }
+    value = d;
+  }
+  await sbPatch("students?id=eq." + enc(g.student.id), { business_taxid: value });
+  return { status: 200, body: { ok: true, businessTaxid: value } };
+}
+
 /* search — חיפוש חופשי. ILIKE ולא to_tsvector: עברית עובדת בוודאות,
    ובנפח של לקוח בודד אין הבדל מורגש. */
 async function doSearch(req, body) {
@@ -956,6 +1020,8 @@ export default async function handler(req, res) {
       case "delete":  out = await doDelete(req, body);   break;
       case "uploadUrl": out = await doUploadUrl(req, body); break;
       case "fileLink":  out = await doFileLink(req, body);  break;
+      case "profile":  out = await doProfile(req, body);  break;
+      case "setTaxid": out = await doSetTaxid(req, body); break;
       case "search":  out = await doSearch(req, body);   break;
       case "chart":   out = await doChart(req, body);    break;
       case "email":   out = await doEmail(req, body);    break;
