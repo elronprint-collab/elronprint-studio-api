@@ -30,6 +30,22 @@ export const FREE_RUNS = 1;
 
 const enc = encodeURIComponent;
 
+/* ---------------- ארנקים ----------------
+   2026-09-01: עד היום היה ארנק אחד — design_credits — וכל כלי משלם גרע ממנו.
+   זה נשבר כשכלי המסמכים נכנס: סריקת קבלה ב-7 אגורות גרעה מאותם קרדיטים
+   שהלקוח קנה לעיצובים, שעולים הרבה יותר. לכן ארנק נפרד לכל משפחת כלים.
+
+   התוספת אדיטיבית בכוונה: מי שלא מעביר wallet מקבל design בדיוק כמו קודם,
+   כך שמחק קסם, חילוץ עיצוב והפרדת אלמנטים לא מרגישים שינוי. */
+const WALLETS = {
+  design:   { column: "design_credits",   runs: "design_runs",   free: 1 },
+  document: { column: "document_credits", runs: "document_runs", free: 1 },
+};
+
+function wallet(name) {
+  return WALLETS[name] || WALLETS.design;
+}
+
 function sbHeaders() {
   return {
     apikey: SUPABASE_KEY,
@@ -78,49 +94,64 @@ export async function studentFromToken(token) {
   if (!token || String(token).length < 32) return null;
   const rows = await sbGet(
     "sessions?token_hash=eq." + enc(hash(token)) +
-    "&select=id,student_id,expires_at,students(id,email,design_credits)&limit=1"
+    "&select=id,student_id,expires_at,students(id,email,design_credits,document_credits)&limit=1"
   );
   const s = rows[0];
   if (!s) return null;
   if (new Date(s.expires_at).getTime() < Date.now()) return null;
   const st = s.students || {};
-  return { id: s.student_id, email: st.email || "", credits: st.design_credits || 0 };
+  /* credits נשאר design_credits כדי לא לשבור קורא קיים; balances מחזיק את הכל. */
+  return {
+    id: s.student_id,
+    email: st.email || "",
+    credits: st.design_credits || 0,
+    balances: {
+      design_credits:   st.design_credits   || 0,
+      document_credits: st.document_credits || 0,
+    },
+  };
 }
 
-export async function quotaFor(student) {
+export async function quotaFor(student, walletName) {
+  const w = wallet(walletName);
   const runs = await sbGet(
-    "design_runs?student_id=eq." + enc(student.id) + "&charged=is.false&select=id"
+    w.runs + "?student_id=eq." + enc(student.id) + "&charged=is.false&select=id"
   );
-  const freeLeft = Math.max(0, FREE_RUNS - runs.length);
-  return { freeLeft, credits: student.credits, canRun: freeLeft > 0 || student.credits > 0 };
+  const freeLeft = Math.max(0, w.free - runs.length);
+  const credits = student.balances ? (student.balances[w.column] || 0) : student.credits;
+  return { freeLeft, credits, canRun: freeLeft > 0 || credits > 0, wallet: w.column };
 }
 
 /* נקרא רק אחרי שהתוצאה קיימת. כישלון של הכלי לא גובה קרדיט — זה ההסכם
    בכל הכלים המשלמים, ולקוח שמחויב על תוצאה שלא קיבל מגיע לוואטסאפ. */
 export async function chargeRun(student, quota) {
+  const w = quota && quota.wallet === "document_credits" ? WALLETS.document : WALLETS.design;
   if (quota.freeLeft > 0) {
-    await sbPost("design_runs", { student_id: student.id, charged: false }, "return=minimal");
+    await sbPost(w.runs, { student_id: student.id, charged: false }, "return=minimal");
     return { freeLeft: quota.freeLeft - 1, credits: quota.credits };
   }
-  await sbPost("design_runs", { student_id: student.id, charged: true }, "return=minimal");
-  await sbPatch("students?id=eq." + enc(student.id), {
-    design_credits: Math.max(0, quota.credits - 1),
-  });
+  await sbPost(w.runs, { student_id: student.id, charged: true }, "return=minimal");
+  const patch = {}; patch[w.column] = Math.max(0, quota.credits - 1);
+  await sbPatch("students?id=eq." + enc(student.id), patch);
   return { freeLeft: 0, credits: Math.max(0, quota.credits - 1) };
 }
 
 /* עוטף את שלושת השלבים. מחזיר { deny } לעצירה, או { student, quota, owner } להמשך.
    הטוקן נלקח גם מהגוף וגם מכותרת, כדי שכלי שכבר שולח אחד מהם לא יצטרך שינוי. */
-export async function gate(req, body) {
+export async function gate(req, body, walletName) {
   const token = (body && body.token) || req.headers["x-epai-token"] || null;
   const student = await studentFromToken(token);
   if (!student) {
     return { deny: { status: 401, body: { error: "צריך להתחבר כדי להשתמש בכלי.", needLogin: true } } };
   }
   const owner = isOwner(student.email);
-  if (owner) return { student, owner: true, quota: { freeLeft: 0, credits: 0, canRun: true } };
+  const w = wallet(walletName);
+  if (owner) {
+    return { student, owner: true,
+             quota: { freeLeft: 0, credits: 0, canRun: true, wallet: w.column } };
+  }
 
-  const quota = await quotaFor(student);
+  const quota = await quotaFor(student, walletName);
   if (!quota.canRun) {
     return {
       deny: {
@@ -139,7 +170,8 @@ export async function gate(req, body) {
    וכשל ברישום החיוב הוא בעיה שלנו ללוג, לא שגיאה שהוא צריך לראות. */
 export async function settle(student, quota, owner) {
   if (owner) {
-    await sbPost("design_runs", { student_id: student.id, charged: false }, "return=minimal")
+    const w = quota && quota.wallet === "document_credits" ? WALLETS.document : WALLETS.design;
+    await sbPost(w.runs, { student_id: student.id, charged: false }, "return=minimal")
       .catch((e) => console.error("[account] owner run log failed:", e.message));
     return { freeLeft: null, credits: null, owner: true };
   }
