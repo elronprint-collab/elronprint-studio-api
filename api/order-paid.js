@@ -31,13 +31,17 @@ const SKU_CREDITS = {
   "AVATAR-10": { kind: "avatar", credits: 10 },
   "AVATAR-25": { kind: "avatar", credits: 25 },
   "DESIGN-20": { kind: "design", credits: 20 },
-  "DESIGN-50": { kind: "design", credits: 50 }
+  "DESIGN-50": { kind: "design", credits: 50 },
+  /* 2026-09-01: ארנק נפרד לכלי המסמכים. סריקת קבלה עולה סנטים בודדים
+     ולכן היא מתומחרת אחרת מעיצוב — ואסור ששתיהן יגרעו מאותו ארנק. */
+  "DOCS-100": { kind: "document", credits: 100 }
 };
 
 /* לאן כל סוג נכתב. שינוי כאן בלי שינוי במסד ישבור זיכויים. */
 const KINDS = {
-  avatar: { column: "avatar_credits", table: "avatar_grants", label: "avatar" },
-  design: { column: "design_credits", table: "design_grants", label: "design" }
+  avatar:   { column: "avatar_credits",   table: "avatar_grants",   label: "avatar" },
+  design:   { column: "design_credits",   table: "design_grants",   label: "design" },
+  document: { column: "document_credits", table: "document_grants", label: "document" }
 };
 
 /* ---------- Supabase ---------- */
@@ -106,7 +110,10 @@ function validSignature(raw, header) {
 /* מחזיר סכום לכל סוג בנפרד. הזמנה אחת יכולה להכיל גם וגם. */
 function creditsInOrder(order) {
   const items = Array.isArray(order.line_items) ? order.line_items : [];
-  const totals = { avatar: 0, design: 0 };
+  /* נבנה מ-KINDS ולא מרשימה קשיחה: הרשימה הקשיחה הייתה מייצרת NaN לכל סוג
+     חדש שנוסף ל-SKU_CREDITS ונשכח כאן, והזיכוי היה נכשל בשקט. */
+  const totals = {};
+  for (const k of Object.keys(KINDS)) totals[k] = 0;
   for (const it of items) {
     const hit = SKU_CREDITS[String(it.sku || "").trim().toUpperCase()];
     if (hit) totals[hit.kind] += hit.credits * (parseInt(it.quantity, 10) || 1);
@@ -171,7 +178,8 @@ export default async function handler(req, res) {
   try {
     /* הלקוח נטען פעם אחת, עם שתי העמודות, כדי לא לפנות למסד לכל סוג בנפרד. */
     let found = await sbGet(
-      "students?email=eq." + enc(email) + "&select=id,avatar_credits,design_credits&limit=1"
+      "students?email=eq." + enc(email) +
+      "&select=id,avatar_credits,design_credits,document_credits&limit=1"
     );
     let student = found[0];
     if (!student) {
