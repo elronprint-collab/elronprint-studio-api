@@ -1,6 +1,12 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
-// api/eraser.js v3 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+// api/eraser.js v4 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+//
+// v4 (2026-09-02): תיקון 422 של fal-ai/lama.
+// כל קריאה ל-lama נכשלה עם 422 {"loc":["body","mask_image_url"],"msg":"Field required"} —
+// שלחנו mask_url, ו-lama מצפה ל-mask_image_url. התוצאה: המחק השמרני שממלא
+// מהסביבה מעולם לא רץ, ותמיד נפלנו ל-bria/eraser שממלא בצורה יצירתית יותר.
+// עכשיו שם שדה המסכה נקבע לכל מודל בנפרד. שום דבר אחר לא שונה.
 //
 // v3 (2026-08-30): הכלי עבר לחיוב קרדיטים.
 // עד כה הוא היה פתוח לגמרי — כל קריאה הפעילה מודל בתשלום בפאל על חשבון החנות,
@@ -39,10 +45,12 @@ function isAllowedUrl(url) {
   return isCloudinary || isFal;
 }
 
+/* שם שדה המסכה שונה בין המודלים. lama דורש mask_image_url; bria ו-inpaint
+   מקבלים mask_url. שליחת השם הלא נכון מוחזרת כ-422 עוד לפני שהמודל רץ. */
 const MODELS = [
-  "fal-ai/lama",
-  "fal-ai/bria/eraser",
-  "fal-ai/inpaint",
+  { id: "fal-ai/lama",         maskField: "mask_image_url" },
+  { id: "fal-ai/bria/eraser",  maskField: "mask_url" },
+  { id: "fal-ai/inpaint",      maskField: "mask_url" },
 ];
 
 export default async function handler(req, res) {
@@ -73,7 +81,8 @@ export default async function handler(req, res) {
   if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
 
   let lastErr = "";
-  for (const model of MODELS) {
+  for (const m of MODELS) {
+    const model = m.id;
     try {
       const r = await fetch(`https://fal.run/${model}`, {
         method: "POST",
@@ -81,7 +90,7 @@ export default async function handler(req, res) {
           "Authorization": `Key ${process.env.FAL_KEY}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ image_url: imageUrl, mask_url: maskUrl }),
+        body: JSON.stringify({ image_url: imageUrl, [m.maskField]: maskUrl }),
       });
       if (!r.ok) {
         lastErr = `${model}: ${r.status} ${await r.text()}`;
