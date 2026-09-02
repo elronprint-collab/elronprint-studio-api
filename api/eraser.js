@@ -1,6 +1,11 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
-// api/eraser.js v4 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+// api/eraser.js v5 — מחק קסם עם ניסיון על כמה מודלים של fal עד שאחד מצליח
+//
+// v5 (2026-09-02): fal-ai/inpaint הוסר מהתור.
+// הוא מודל גנרטיבי שנקרא בלי prompt, כלומר הוא ממציא תוכן חדש במקום למלא
+// מהסביבה. בכלי שמבטיח "מחיקה" זו תוצאה שגויה, ולקוח שילם עליה קרדיט.
+// נשארו שני מחקים אמיתיים בלבד. אם שניהם נכשלים מוחזרת שגיאה ולא נגבה קרדיט.
 //
 // v4 (2026-09-02): תיקון 422 של fal-ai/lama.
 // כל קריאה ל-lama נכשלה עם 422 {"loc":["body","mask_image_url"],"msg":"Field required"} —
@@ -50,7 +55,6 @@ function isAllowedUrl(url) {
 const MODELS = [
   { id: "fal-ai/lama",         maskField: "mask_image_url" },
   { id: "fal-ai/bria/eraser",  maskField: "mask_url" },
-  { id: "fal-ai/inpaint",      maskField: "mask_url" },
 ];
 
 export default async function handler(req, res) {
