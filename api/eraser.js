@@ -1,6 +1,21 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle, studentFromToken, isOwner } from "./_account.js";
-// api/eraser.js v8 — מחק קסם + יצירת רקעים למחולל הברכות
+// api/eraser.js v9 — מחק קסם + יצירת רקעים למחולל הברכות
+//
+// v9 (2026-09-03): v8 לא עבד, ואני מתקן את הטעות שלי.
+// בר מצווה החזיר מסגרת עם ענפי אורן, כדורי זהב ושתי סוכריות מקל — למרות שכל אלה
+// היו כתובים במפורש כאיסור בפרומפט החיובי.
+//
+// זה בדיוק הכלל שכבר שילמנו עליו ב-reimagine v34 ו-v38: מודל תמונה מגיב למה
+// שמתארים לו, לא למה שאוסרים עליו. "no christmas tree" בפרומפט החיובי מכניס את
+// המילה tree לתיאור ומעלה את הסיכוי לעץ. שכחתי את זה כשכתבתי את v8.
+//
+// שני שינויים, שניהם בטקסט בלבד:
+// 1. כל שורות ה"בלי" יצאו מהפרומפט החיובי. הן נשארות רק ב-negative_prompt, שהוא
+//    ערוץ נפרד שהמודל מטפל בו אחרת — שם הן במקומן.
+// 2. המתרגם חייב להחזיר לפחות שלושה חפצים פיזיים. תיאור מופשט ("Torah scroll
+//    motifs, navy and gold") משאיר את הפינות ריקות, ו-flux ממלא אותן בברירת
+//    המחדל שלו. חפצים מוחשיים תופסים את המקום הזה לפני שהוא מגיע לשם.
 //
 // v8 (2026-09-03): שני תיקונים לרקעים, שניהם בפרומפט בלבד. אפס שינוי בלוגיקה.
 //
@@ -116,15 +131,12 @@ const CLOUD_PRESET = process.env.CLOUDINARY_PRESET || "elronprint";
 const BG_HEAD =
   "a decorative background image for a greeting card, portrait orientation, " +
   "elegant and festive, rich colour, soft depth of field, professional photography quality, ";
+/* ⚠ אין כאן ולו "בלי" אחד, וזה מכוון. כל איסור חי ב-BG_NEGATIVE בלבד.
+   הפרומפט החיובי מתאר רק את מה שצריך להופיע בתמונה. */
 const BG_TAIL =
-  ", the centre of the frame is calm and uncluttered so text can be placed over it, " +
-  "detail and ornament kept to the edges and corners, gentle vignette, " +
-  "no text, no letters, no words, no writing, no captions, no logos, no watermarks, " +
-  "no people looking at the camera, no faces in the centre, " +
-  /* קבוע ולא ניתן לכיבוי: חג המולד אינו רלוונטי לחנות הזו לעולם, והוא ברירת המחדל
-     שאליה flux נסוג בכל פעם שהתיאור מופשט מדי. */
-  "not christmas, no christmas tree, no pine or fir branches, no holly, " +
-  "no red winter berries, no candy canes, no baubles, no santa, no nativity";
+  ", the objects sit around the edges and in the corners, " +
+  "the centre of the frame stays open and plain so text can be placed over it, " +
+  "clean empty middle, gentle vignette, decorative border composition";
 const BG_NEGATIVE =
   "christmas, christmas tree, pine branch, fir branch, holly, mistletoe, winter berries, " +
   "candy cane, bauble, santa claus, advent, nativity, " +
@@ -136,6 +148,15 @@ const BG_NEGATIVE =
    הרשימה זהה לזו שב-reimagine.js: fal מנתב מודלים דרך any-llm, ולא כל שם קיים בכל
    רגע, אז עוברים על המועמדים עד שאחד עונה. maxTokens קטן — זו שורה אחת, לא טקסט. */
 const HEBREW_RE = /[\u0590-\u05FF]/;
+
+/* מוריד סעיפי שלילה מהתיאור. פסיק הוא הגבול, כי מחיקת המילה בלבד משאירה
+   "עץ" ערום בתוך המשפט — וזה גרוע יותר מלהשאיר את כל הסעיף. */
+const NEGATION_RE = /(^|,)\s*(without|no|not|avoid|exclude|free of)\b[^,]*/gi;
+function stripNegations(t) {
+  const out = String(t).replace(NEGATION_RE, "$1")
+    .replace(/\s*,\s*,+/g, ",").replace(/^\s*,\s*/, "").replace(/,\s*$/, "").trim();
+  return out.length >= 3 ? out : String(t).trim();
+}
 const BG_TEXT_MODELS = [
   "anthropic/claude-haiku-4.5",
   "google/gemini-flash-1.5",
@@ -147,15 +168,18 @@ async function translateSubject(text) {
     "You turn a Hebrew description of a greeting-card background into an English image prompt.\n\n" +
     "Answer with the English prompt ONLY - no quotes, no preamble, no explanation.\n\n" +
     "RULES\n" +
-    "1. Name OBJECTS, COLOURS and MATERIALS that can actually be drawn. An occasion on its own " +
-    "cannot be drawn: turn it into the things that belong to it. " +
-    "\"a birthday greeting\" becomes \"colourful balloons, falling confetti, paper streamers, " +
-    "soft pink and mint background\".\n" +
-    "2. Keep everything the original asked for. Add objects only where the original named an " +
-    "occasion but no objects.\n" +
-    "3. Use the objects of the occasion the user actually named. Jewish holidays are not " +
-    "Christmas: never add a christmas tree, pine or fir branches, holly or red winter berries.\n" +
-    "4. Under 40 words.";
+    "1. Name AT LEAST THREE physical objects that can be photographed, plus their colours and " +
+    "materials. This is the most important rule: an image model fills empty description with " +
+    "whatever it likes, so every corner of the prompt must be spoken for.\n" +
+    "2. An occasion cannot be drawn - turn it into its objects. \"a birthday greeting\" becomes " +
+    "\"colourful balloons, falling confetti, paper streamers, soft pink and mint background\". " +
+    "\"a bar mitzvah greeting\" becomes \"an open torah scroll, a blue velvet tallit with silver " +
+    "embroidery, a silver kiddush cup, deep navy and gold\".\n" +
+    "3. Use the objects of the occasion the user actually named, and of that culture. A Jewish " +
+    "occasion is described with Jewish objects.\n" +
+    "4. Write ONLY things that should appear. Never write what should be absent - no \"without\", " +
+    "no \"no ...\". Naming a thing in order to exclude it makes the model draw it.\n" +
+    "5. Under 40 words.";
   for (const model of BG_TEXT_MODELS) {
     try {
       const r = await fetch("https://fal.run/fal-ai/any-llm", {
@@ -233,7 +257,11 @@ async function handleBackground(req, res, body) {
     else console.warn("[background] translation failed - sending the Hebrew as it is");
   }
 
-  const prompt = BG_HEAD + english + BG_TAIL;
+  /* גם אם המשתמש כתב "בלי עץ, בלי נרות" — זה יוצא מהפרומפט החיובי. אותה סיבה:
+     שם של חפץ בתיאור מושך אותו לתמונה, גם כשהוא כתוב אחרי "בלי". */
+  const cleaned = stripNegations(english);
+  if (cleaned !== english) console.log(`[background] dropped negations: "${english}" -> "${cleaned}"`);
+  const prompt = BG_HEAD + cleaned + BG_TAIL;
   console.log(`[background] "${english}" x${count}`);
 
   const results = [];
