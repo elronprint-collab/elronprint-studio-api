@@ -1,6 +1,13 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle, studentFromToken, isOwner } from "./_account.js";
-// api/eraser.js v9 — מחק קסם + יצירת רקעים למחולל הברכות
+// api/eraser.js v10 — מחק קסם + יצירת רקעים למחולל הברכות
+//
+// v10 (2026-09-03): אותיות מזויפות. רקע לידה חזר עם כרטיס נייר שעליו כיתוב שנראה
+// כמו עברית אבל הוא ג'יבריש. "text" ברשימה השלילית לא תפס את זה — flux ממלא שטח
+// דקורטיבי בצורות שדומות לאותיות, וזה נחשב אצלו לטקסטורה ולא לטקסט.
+// אותה בעיה בדיוק נפתרה ב-reimagine v39 בעזרת המונחים הספציפיים, ולא בעזרת "text".
+// נוסף גם איסור על הנשא עצמו (כרטיס, פתק, תווית) — בלי משטח לכתוב עליו אין
+// למודל לאן לצייר אותיות מלכתחילה.
 //
 // v9 (2026-09-03): v8 לא עבד, ואני מתקן את הטעות שלי.
 // בר מצווה החזיר מסגרת עם ענפי אורן, כדורי זהב ושתי סוכריות מקל — למרות שכל אלה
@@ -140,6 +147,10 @@ const BG_TAIL =
 const BG_NEGATIVE =
   "christmas, christmas tree, pine branch, fir branch, holly, mistletoe, winter berries, " +
   "candy cane, bauble, santa claus, advent, nativity, " +
+  /* המונחים הספציפיים, לא רק "text" — זה מה שעבד ב-reimagine v39. ואחריהם הנשא
+     עצמו: בלי כרטיס או פתק בתמונה אין שטח שמזמין אותיות. */
+  "gibberish text, fake letters, scribbled letters, garbled writing, letterlike shapes, " +
+  "handwriting, calligraphy, label, tag, note card, greeting card, envelope, paper card, " +
   "text, letters, words, writing, caption, typography, logo, watermark, signature, " +
   "busy centre, cluttered composition, harsh contrast in the middle, " +
   "collage, split frame, borders, picture frame, ui, interface, low quality, blurry, jpeg artifacts";
@@ -179,7 +190,9 @@ async function translateSubject(text) {
     "occasion is described with Jewish objects.\n" +
     "4. Write ONLY things that should appear. Never write what should be absent - no \"without\", " +
     "no \"no ...\". Naming a thing in order to exclude it makes the model draw it.\n" +
-    "5. Under 40 words.";
+    "5. Never include a card, a note, a label, a tag, an envelope or any other surface meant to " +
+    "carry writing. Describe only objects, fabric, flowers, food, light and colour.\n" +
+    "6. Under 40 words.";
   for (const model of BG_TEXT_MODELS) {
     try {
       const r = await fetch("https://fal.run/fal-ai/any-llm", {
