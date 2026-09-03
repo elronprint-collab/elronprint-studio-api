@@ -1,6 +1,18 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle, studentFromToken, isOwner } from "./_account.js";
-// api/eraser.js v7 — מחק קסם + יצירת רקעים למחולל הברכות
+// api/eraser.js v8 — מחק קסם + יצירת רקעים למחולל הברכות
+//
+// v8 (2026-09-03): שני תיקונים לרקעים, שניהם בפרומפט בלבד. אפס שינוי בלוגיקה.
+//
+// 1. חג המולד חוזר בלי שביקשו אותו. "ברכה מעוצבת ליום הולדת" החזיר עץ אשוח ונרות,
+//    ו"ראש השנה" החזיר ענפי אשוח וגרגרים אדומים. הסיבה: זו התמונה החגיגית הנפוצה
+//    ביותר בנתוני האימון, אז flux נופל אליה בכל פעם שהתיאור לא מספיק ספציפי.
+//    הוא לעולם לא רלוונטי לחנות הזו, ולכן החסימה קבועה ולא משהו שהמשתמש צריך לכתוב.
+//
+// 2. תיאור מופשט לא מייצר תמונה. "Designed blessing for a birthday" לא אומר למודל
+//    מה לצייר, ואז הוא ממלא את החלל בעצמו — וזה בדיוק מה שהחזיר את עץ חג המולד.
+//    המתרגם מקבל עכשיו תפקיד נוסף: להפוך שם של אירוע לרשימת חפצים שאפשר לצייר.
+//    התרגום מוחזר לעמוד כמו קודם, אז רואים בדיוק מה נשלח.
 //
 // v7 (2026-09-03): התיאור של הרקע אפשר לכתוב בעברית.
 // flux קורא אנגלית בלבד, ותיאור בעברית היה מיוצר כרעש או מתעלמים ממנו. עכשיו, אם
@@ -108,8 +120,14 @@ const BG_TAIL =
   ", the centre of the frame is calm and uncluttered so text can be placed over it, " +
   "detail and ornament kept to the edges and corners, gentle vignette, " +
   "no text, no letters, no words, no writing, no captions, no logos, no watermarks, " +
-  "no people looking at the camera, no faces in the centre";
+  "no people looking at the camera, no faces in the centre, " +
+  /* קבוע ולא ניתן לכיבוי: חג המולד אינו רלוונטי לחנות הזו לעולם, והוא ברירת המחדל
+     שאליה flux נסוג בכל פעם שהתיאור מופשט מדי. */
+  "not christmas, no christmas tree, no pine or fir branches, no holly, " +
+  "no red winter berries, no candy canes, no baubles, no santa, no nativity";
 const BG_NEGATIVE =
+  "christmas, christmas tree, pine branch, fir branch, holly, mistletoe, winter berries, " +
+  "candy cane, bauble, santa claus, advent, nativity, " +
   "text, letters, words, writing, caption, typography, logo, watermark, signature, " +
   "busy centre, cluttered composition, harsh contrast in the middle, " +
   "collage, split frame, borders, picture frame, ui, interface, low quality, blurry, jpeg artifacts";
@@ -126,9 +144,18 @@ const BG_TEXT_MODELS = [
 
 async function translateSubject(text) {
   const system =
-    "You translate a short description of a greeting-card background from Hebrew into English. " +
-    "Answer with the English description ONLY - no quotes, no preamble, no explanation. " +
-    "Keep it concrete and visual. Do not add ideas that are not in the original.";
+    "You turn a Hebrew description of a greeting-card background into an English image prompt.\n\n" +
+    "Answer with the English prompt ONLY - no quotes, no preamble, no explanation.\n\n" +
+    "RULES\n" +
+    "1. Name OBJECTS, COLOURS and MATERIALS that can actually be drawn. An occasion on its own " +
+    "cannot be drawn: turn it into the things that belong to it. " +
+    "\"a birthday greeting\" becomes \"colourful balloons, falling confetti, paper streamers, " +
+    "soft pink and mint background\".\n" +
+    "2. Keep everything the original asked for. Add objects only where the original named an " +
+    "occasion but no objects.\n" +
+    "3. Use the objects of the occasion the user actually named. Jewish holidays are not " +
+    "Christmas: never add a christmas tree, pine or fir branches, holly or red winter berries.\n" +
+    "4. Under 40 words.";
   for (const model of BG_TEXT_MODELS) {
     try {
       const r = await fetch("https://fal.run/fal-ai/any-llm", {
