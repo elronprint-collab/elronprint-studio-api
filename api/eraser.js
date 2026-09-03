@@ -1,6 +1,12 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle, studentFromToken, isOwner } from "./_account.js";
-// api/eraser.js v6 — מחק קסם + יצירת רקעים למחולל הברכות
+// api/eraser.js v7 — מחק קסם + יצירת רקעים למחולל הברכות
+//
+// v7 (2026-09-03): התיאור של הרקע אפשר לכתוב בעברית.
+// flux קורא אנגלית בלבד, ותיאור בעברית היה מיוצר כרעש או מתעלמים ממנו. עכשיו, אם
+// יש אותיות עבריות בתיאור, קריאה אחת ל-fal מתרגמת אותו לפני היצירה. נכשל-פתוח:
+// אם התרגום נופל, ממשיכים עם המקור במקום לחסום את היצירה. אותו דפוס בדיוק
+// שהוכח ב-reimagine.js v28, כולל רשימת המודלים שכבר נבדקה שם.
 //
 // v6 (2026-09-03): action:"background" נוסף לקובץ הזה.
 // למה כאן ולא בקובץ נפרד: Vercel Hobby מגביל ל-12 פונקציות והיינו על 13, אז
@@ -108,6 +114,39 @@ const BG_NEGATIVE =
   "busy centre, cluttered composition, harsh contrast in the middle, " +
   "collage, split frame, borders, picture frame, ui, interface, low quality, blurry, jpeg artifacts";
 
+/* ---- תרגום התיאור ----
+   הרשימה זהה לזו שב-reimagine.js: fal מנתב מודלים דרך any-llm, ולא כל שם קיים בכל
+   רגע, אז עוברים על המועמדים עד שאחד עונה. maxTokens קטן — זו שורה אחת, לא טקסט. */
+const HEBREW_RE = /[\u0590-\u05FF]/;
+const BG_TEXT_MODELS = [
+  "anthropic/claude-haiku-4.5",
+  "google/gemini-flash-1.5",
+  "anthropic/claude-sonnet-4.5",
+];
+
+async function translateSubject(text) {
+  const system =
+    "You translate a short description of a greeting-card background from Hebrew into English. " +
+    "Answer with the English description ONLY - no quotes, no preamble, no explanation. " +
+    "Keep it concrete and visual. Do not add ideas that are not in the original.";
+  for (const model of BG_TEXT_MODELS) {
+    try {
+      const r = await fetch("https://fal.run/fal-ai/any-llm", {
+        method: "POST",
+        headers: { "Authorization": `Key ${process.env.FAL_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt: text, system_prompt: system, max_tokens: 150 }),
+      });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const out = d?.output || d?.choices?.[0]?.message?.content;
+      if (typeof out === "string" && out.trim()) return out.trim().replace(/^["']|["']$/g, "");
+    } catch (e) {
+      console.warn("[background] translate attempt failed:", e.message);
+    }
+  }
+  return null;
+}
+
 /* fal מחזיק את התמונה זמנית. רקע חייב לשרוד לתמיד — הוא נטען אצל כל לקוח —
    ולכן מעתיקים לקלאודינרי ומחזירים את הכתובת הקבועה. */
 async function bgToCloudinary(imageUrl) {
@@ -155,9 +194,20 @@ async function handleBackground(req, res, body) {
 
   /* 1-4 בבת אחת: רקע נבחר מתוך כמה אפשרויות ולא מתקבל בניסיון אחד. */
   const count = Math.min(4, Math.max(1, parseInt(body.count, 10) || 1));
-  const prompt = BG_HEAD + subject + BG_TAIL;
   const started = Date.now();
-  console.log(`[background] "${subject}" x${count}`);
+
+  /* נכשל-פתוח בכוונה: תרגום שנפל לא שווה חסימת יצירה. במקרה כזה נשלח המקור,
+     והתשובה תראה לו מה באמת נשלח כדי שלא ינחש למה יצא מה שיצא. */
+  let english = subject;
+  let translated = false;
+  if (HEBREW_RE.test(subject)) {
+    const t = await translateSubject(subject);
+    if (t) { english = t; translated = true; console.log(`[background] translated: "${subject}" -> "${t}"`); }
+    else console.warn("[background] translation failed - sending the Hebrew as it is");
+  }
+
+  const prompt = BG_HEAD + english + BG_TAIL;
+  console.log(`[background] "${english}" x${count}`);
 
   const results = [];
   const errors = [];
@@ -201,6 +251,7 @@ async function handleBackground(req, res, body) {
   return res.status(200).json({
     backgrounds: results,
     asked: count, made: results.length, prompt,
+    subject, english, translated,
     seconds: Math.round((Date.now() - started) / 1000),
   });
 }
