@@ -735,7 +735,98 @@ async function dropStrayFragments(buf) {
   return await sharp(buf).composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
 }
 
+/* ---------------- step 1b: the DESIGN, not the garment ----------------
+   Added 2026-09-02. Until now an element crop was delivered as-is, so a shirt came back as a print
+   file containing a picture of a shirt - collar, sleeves, fabric and all - which prints a shirt onto
+   a shirt. What belongs in a print file is only what is PRINTED ON the item.
+   So every element crop goes through one more vision pass that boxes the artwork sitting on it, and
+   the crop is narrowed to that box before anything else happens. Nothing found means nothing to
+   print: the element fails, and because a run is only charged once a file exists, a blank garment
+   never costs a credit. */
+const GRAPHIC_PAD = 2;                   // percent, around the artwork box
+const MAX_GRAPHIC_FRAC = 85;             // a "graphic" filling the whole crop is the garment again
+
+const GRAPHIC_SYSTEM = `You are looking at ONE item - usually a garment such as a t-shirt, and
+usually photographed or mocked up on a plain background.
+
+Find the ARTWORK PRINTED ON IT: the graphic, illustration, character, logo, number or lettering that
+was printed, embroidered or applied onto the item.
+
+Return ONE box around that artwork alone.
+
+RULES
+
+1. The box contains ONLY the printed artwork. It must NOT include the collar, the sleeves, the hem,
+   the seams, or any empty fabric around the artwork. Pull each edge in until it touches the artwork.
+
+2. If the item carries several printed parts that belong together - a picture with a word under it,
+   a character plus a slogan - return ONE box around all of them together.
+
+3. The item itself, its shape, its colour and its fabric are NEVER the artwork. A plain garment with
+   nothing printed on it has no artwork.
+
+4. Ignore anything that is not printed on the item: background, shadows, the surface it lies on,
+   hangers, mannequins, price tags, size labels, care labels, watermarks and captions.
+
+5. A brand label sewn INSIDE the collar is not artwork.
+
+If the item has NOTHING printed on it, answer {"graphic":"none"}.
+
+Answer with ONLY a JSON object, no prose, no markdown fences:
+{"graphic":"x0,y0,x1,y1"}
+
+Box values are whole numbers 0-100, percentages of the image width or height, x0,y0 top-left and
+x1,y1 bottom-right.`;
+
+async function findGraphic(buf) {
+  const jpg = await sharp(buf)
+    .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+    .jpeg({ quality: 88 })
+    .toBuffer();
+  const raw = await visionJson(
+    GRAPHIC_SYSTEM,
+    "Box the artwork printed on this item. JSON only.",
+    jpg.toString("base64"), "image/jpeg", 200, "graphic"
+  );
+  const j = parseJsonish(raw);
+  const v = j?.graphic;
+  if (!v || NONE_RE.test(String(v))) return null;
+  const box = parseBox(v);
+  if (!box) return null;
+  if (boxArea(box) > MAX_GRAPHIC_FRAC) {
+    console.warn(`[separate] graphic box covers ${boxArea(box).toFixed(0)}% of the item - that is the item itself, not artwork`);
+    return null;
+  }
+  return box;
+}
+
+async function cropToGraphic(buf) {
+  const box = await findGraphic(buf);
+  if (!box) throw new Error("NO_GRAPHIC");
+
+  const meta = await sharp(buf).metadata();
+  if (!meta.width || !meta.height) throw new Error("NO_GRAPHIC");
+
+  const pct = (v) => Math.min(100, Math.max(0, v));
+  const padX = Math.min(GRAPHIC_PAD, (box.x1 - box.x0) * 0.15);
+  const padY = Math.min(GRAPHIC_PAD, (box.y1 - box.y0) * 0.15);
+  const x0 = pct(box.x0 - padX), y0 = pct(box.y0 - padY);
+  const x1 = pct(box.x1 + padX), y1 = pct(box.y1 + padY);
+
+  const left = Math.round((x0 / 100) * meta.width);
+  const top = Math.round((y0 / 100) * meta.height);
+  const width = Math.max(1, Math.min(meta.width - left, Math.round(((x1 - x0) / 100) * meta.width)));
+  const height = Math.max(1, Math.min(meta.height - top, Math.round(((y1 - y0) / 100) * meta.height)));
+
+  console.log(`[separate] artwork box ${box.x0},${box.y0},${box.x1},${box.y1} -> ${width}x${height} of ${meta.width}x${meta.height}`);
+  return sharp(buf).extract({ left, top, width, height }).png({ compressionLevel: 3 }).toBuffer();
+}
+
 async function processOne(buf, msLeft) {
+  /* Narrow the item down to the artwork printed on it before anything else. Doing it first also
+     means the upscale works on the artwork rather than on fabric that is about to be thrown away. */
+  buf = await cropToGraphic(buf);
+
   const src = await sharp(buf).metadata();
   const startPx = Math.max(src.width || 0, src.height || 0);
 
@@ -1022,12 +1113,17 @@ async function runSeparate(res, body, base64Data, mediaType, msLeft, student, ow
     /* If every element came back empty the cause is known and specific, so say so instead of
        offering a retry that will fail the same way. */
     const allEmpty = errs.length > 0 && errs.every((e) => e === "EMPTY_CUTOUT");
+    const allBlank = errs.length > 0 && errs.every((e) => e === "NO_GRAPHIC");
     return res.status(502).json({
-      error: allEmpty
+      error: allBlank
+        ? "לא נמצא עיצוב מודפס על מה שסימנתם. הכלי מחלץ את ההדפס עצמו ולא את הפריט, " +
+          "ולכן פריט חלק אין ממנו מה להוציא. לא נגבה קרדיט."
+        : allEmpty
         ? "הסרת הרקע לא מצאה את הפריט והקובץ יצא ריק. זה קורה כשהפריט כהה על רקע כהה, " +
           "או כשמסמנים חלק קטן בתוך תמונה גדולה. נסו תמונה שבה הפריט בולט מהרקע."
         : "החילוץ נכשל. נסו שוב או בחרו פחות אלמנטים.",
       emptyCutout: allEmpty,
+      noGraphic: allBlank,
     });
   }
 
