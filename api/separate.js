@@ -55,7 +55,11 @@ const MAX_PICKS = 6;             // per run, so a pick of twelve cannot silently
 /* An element is FAR smaller than a print area. A crest on a brand sheet is well under 1% of the
    frame, so extract.js's 2% floor would reject every real answer here. */
 const MIN_ELEMENT_FRAC = 0.0004;
-const ELEMENT_PAD = 2;           // percent, tighter than extract.js - elements sit close together
+const ELEMENT_PAD = 0;           // percent. Was 2 until 2026-09-02: on two shirts side by side
+                                 // the outward margin reached into the neighbour, and the strip it
+                                 // dragged in is FABRIC, so background removal keeps it and the
+                                 // stray-fragment cleanup cannot touch it either - it comes back
+                                 // attached to the item, not detached. 0 crops to the box itself.
 const THUMB_PX = 300;            // preview size on the pick screen
 
 const GOOD_PX = 1500;            // at or above this the artwork is left alone
@@ -326,10 +330,10 @@ async function cropTo(buf, box) {
   if (!meta.width || !meta.height) return null;
 
   const pct = (v) => Math.min(100, Math.max(0, v));
-  /* Padding must be PROPORTIONAL here, unlike extract.js. A flat 2% around a print area is nothing;
-     around a 4%-wide crest on a dense brand sheet it doubles the box and drags in whatever sits
-     beside it — which on this kind of sheet is another element. Capped at 15% of the box's own
-     size, so a large element still gets the full margin and a small one gets a small one. */
+  /* Padding is PROPORTIONAL and capped at 15% of the box's own size, so a large element would get
+     the full margin and a small one a small margin. With ELEMENT_PAD at 0 this adds nothing and the
+     crop is exactly the detected box; the arithmetic is kept so raising the constant still behaves
+     the way it always did. */
   const padX = Math.min(ELEMENT_PAD, (box.x1 - box.x0) * 0.15);
   const padY = Math.min(ELEMENT_PAD, (box.y1 - box.y0) * 0.15);
   const x0 = pct(box.x0 - padX), y0 = pct(box.y0 - padY);
