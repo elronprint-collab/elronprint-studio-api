@@ -1,6 +1,24 @@
 import { checkRateLimit } from "./_ratelimit.js";
-import { gate, settle, studentFromToken, isOwner } from "./_account.js";
-// api/eraser.js v10 — מחק קסם + יצירת רקעים למחולל הברכות
+import { gate, settle } from "./_account.js";
+// api/eraser.js v11 — מחק קסם + יצירת רקעים למחולל הברכות
+//
+// v11 (2026-09-03): יצירת הרקעים נפתחת ללקוחות, בתשלום.
+// עד כה זה היה כלי פנימי: כל מי שאינו בעלים קיבל 403. ההחלטה שלו היום — לחבר את
+// היצירה למחולל הברכות, כך שלקוח מייצר רקע וכותב עליו — הופכת את זה למוצר,
+// ולכן הוא עובר לאותו מודל בדיוק כמו שאר הכלים: קרדיט אחד לרקע.
+//
+// שתי החלטות שנובעות מזה ולא כדאי לשנות בלי לחשוב:
+//
+// 1. תמונה אחת לבקשה, לכולם — כולל בעל החנות (החלטה שלו, 2026-09-03).
+//    gate() בודק יתרה פעם אחת ו-settle() מחייב פעם אחת, אז ארבע תמונות בבקשה אחת
+//    היו נגבות כקרדיט אחד. מי שרוצה כמה אפשרויות שולח כמה בקשות — אותו דפוס
+//    שנבחר בהפרדת אלמנטים. השדה count מתקבל ומתעלמים ממנו, כדי שדפדפן ישן
+//    שעדיין שולח 4 לא ייכשל אלא פשוט יקבל אחת.
+//
+// 2. החיוב רק אחרי שהתמונה עלתה לקלאודינרי בהצלחה. כישלון של fal לא גובה כלום.
+//
+// ⚠ מחולל הברכות מבטיח היום בעמוד "הכל בדפדפן — בלי עלות". הבטחה זו נעשית שקרית
+//   ברגע שהיצירה מחוברת אליו, והנוסח חייב להשתנות יחד עם החיבור.
 //
 // v10 (2026-09-03): אותיות מזויפות. רקע לידה חזר עם כרטיס נייר שעליו כיתוב שנראה
 // כמו עברית אבל הוא ג'יבריש. "text" ברשימה השלילית לא תפס את זה — flux ממלא שטח
@@ -236,28 +254,22 @@ async function bgToCloudinary(imageUrl) {
 }
 
 async function handleBackground(req, res, body) {
-  const token = body.token || req.headers["x-epai-token"] || null;
-
-  let student;
-  try {
-    student = await studentFromToken(token);
-  } catch (e) {
-    console.error("[background] account check failed:", e.message);
-    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
-  }
-  if (!student) return res.status(401).json({ error: "צריך להתחבר.", needLogin: true });
-  if (!isOwner(student.email)) {
-    /* מכוון: הודעה סתומה. לקוח לא אמור לדעת שהמסלול הזה קיים. */
-    console.warn(`[background] refused for ${student.email}`);
-    return res.status(403).json({ error: "הפעולה אינה זמינה." });
-  }
-
   const subject = String(body.subject || "").trim();
   if (subject.length < 3) return res.status(400).json({ error: "צריך לתאר את הרקע במילים." });
   if (subject.length > 400) return res.status(400).json({ error: "התיאור ארוך מדי." });
 
-  /* 1-4 בבת אחת: רקע נבחר מתוך כמה אפשרויות ולא מתקבל בניסיון אחד. */
-  const count = Math.min(4, Math.max(1, parseInt(body.count, 10) || 1));
+  /* השער לפני כל קריאה בתשלום, ואחרי בדיקת הקלט — כדי שבקשה פגומה תיפסל בזול. */
+  let acct;
+  try {
+    acct = await gate(req, body);
+  } catch (e) {
+    console.error("[background] account check failed:", e.message);
+    return res.status(503).json({ error: "לא הצלחנו לאמת את החשבון. נסו שוב." });
+  }
+  if (acct.deny) return res.status(acct.deny.status).json(acct.deny.body);
+
+  /* תמיד אחת, לכולם — ראה ההערה בראש הקובץ. */
+  const count = 1;
   const started = Date.now();
 
   /* נכשל-פתוח בכוונה: תרגום שנפל לא שווה חסימת יצירה. במקרה כזה נשלח המקור,
@@ -314,12 +326,17 @@ async function handleBackground(req, res, body) {
   }
 
   if (!results.length) {
+    /* לא נוצר כלום — לא נגבה כלום. */
+    console.error("[background] nothing produced - NOT charging");
     return res.status(502).json({ error: "יצירת הרקע נכשלה. נסו שוב בעוד רגע.", detail: errors[0] || null });
   }
+
+  const left = await settle(acct.student, acct.quota, acct.owner);
   return res.status(200).json({
     backgrounds: results,
     asked: count, made: results.length, prompt,
     subject, english, translated,
+    freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
     seconds: Math.round((Date.now() - started) / 1000),
   });
 }
