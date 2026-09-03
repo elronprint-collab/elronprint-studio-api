@@ -631,6 +631,106 @@ function gradeQuality(px) {
 }
 
 /* One graphic, end to end. Returns the finished file plus what should be said about it. */
+/* ---------------- stray fragments ----------------
+   An element box is a RECTANGLE. When two items sit close together, the rectangle around one of
+   them also catches a slice of its neighbour, and background removal keeps that slice - it is not
+   background, it is fabric. The result is a print file with a detached sleeve floating beside the
+   shirt.
+   The fix keys on what makes those slices different: they were CUT by the crop, so they run into
+   the edge of the frame, while the item itself sits inside the padding. So: label the connected
+   shapes, always keep the largest, and drop any OTHER shape that touches the frame edge. Interior
+   pieces - a dot over an i, a separate letter, a detached ear - never touch the edge, so they are
+   never dropped.
+   Labelling runs on a small copy (STRAY_SCALE); a 4000px file would cost hundreds of MB. The
+   keep-mask is then grown by one pixel INTO BACKGROUND ONLY - never into a dropped shape - so the
+   nearest-neighbour upscale can never clip real artwork, and never resurrects a sliver of what was
+   removed. */
+const STRAY_SCALE = 600;
+const STRAY_ALPHA = 24;
+
+async function dropStrayFragments(buf) {
+  const meta = await sharp(buf).metadata();
+  if (!meta.hasAlpha) return buf;
+  const W = meta.width, H = meta.height;
+  if (!W || !H) return buf;
+
+  const scale = Math.min(1, STRAY_SCALE / Math.max(W, H));
+  const w = Math.max(1, Math.round(W * scale));
+  const h = Math.max(1, Math.round(H * scale));
+
+  const alpha = await sharp(buf)
+    .resize(w, h, { fit: "fill" })
+    .extractChannel("alpha")
+    .raw()
+    .toBuffer();
+
+  const n = w * h;
+  const label = new Int32Array(n).fill(-1);
+  const stack = new Int32Array(n);
+  const areas = [];
+  const touches = [];
+
+  for (let start = 0; start < n; start++) {
+    if (alpha[start] <= STRAY_ALPHA || label[start] !== -1) continue;
+    const id = areas.length;
+    areas.push(0);
+    touches.push(false);
+    let sp = 0;
+    stack[sp++] = start;
+    label[start] = id;
+    while (sp > 0) {
+      const p = stack[--sp];
+      const x = p % w, y = (p - x) / w;
+      areas[id]++;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touches[id] = true;
+      if (x > 0)     { const q = p - 1; if (alpha[q] > STRAY_ALPHA && label[q] === -1) { label[q] = id; stack[sp++] = q; } }
+      if (x < w - 1) { const q = p + 1; if (alpha[q] > STRAY_ALPHA && label[q] === -1) { label[q] = id; stack[sp++] = q; } }
+      if (y > 0)     { const q = p - w; if (alpha[q] > STRAY_ALPHA && label[q] === -1) { label[q] = id; stack[sp++] = q; } }
+      if (y < h - 1) { const q = p + w; if (alpha[q] > STRAY_ALPHA && label[q] === -1) { label[q] = id; stack[sp++] = q; } }
+    }
+  }
+
+  if (areas.length < 2) return buf;
+
+  let main = 0;
+  for (let i = 1; i < areas.length; i++) if (areas[i] > areas[main]) main = i;
+
+  const drop = areas.map((_, i) => i !== main && touches[i]);
+  if (!drop.some(Boolean)) return buf;
+
+  const droppedPx = areas.reduce((s, a, i) => (drop[i] ? s + a : s), 0);
+  console.log(
+    `[separate] stray fragments: dropped ${drop.filter(Boolean).length} of ${areas.length} shapes ` +
+    `(${((droppedPx / (areas[main] || 1)) * 100).toFixed(1)}% of the main shape)`
+  );
+
+  const keep = Buffer.alloc(n, 0);
+  for (let p = 0; p < n; p++) {
+    const id = label[p];
+    if (id === -1 || !drop[id]) keep[p] = 255;
+  }
+  const grown = Buffer.from(keep);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x;
+      if (keep[p] === 255 || label[p] !== -1) continue; /* background pixels only */
+      if ((x > 0 && keep[p - 1] === 255) || (x < w - 1 && keep[p + 1] === 255) ||
+          (y > 0 && keep[p - w] === 255) || (y < h - 1 && keep[p + w] === 255)) grown[p] = 255;
+    }
+  }
+
+  const rgba = Buffer.alloc(n * 4);
+  for (let p = 0; p < n; p++) {
+    rgba[p * 4] = 255; rgba[p * 4 + 1] = 255; rgba[p * 4 + 2] = 255; rgba[p * 4 + 3] = grown[p];
+  }
+  const mask = await sharp(rgba, { raw: { width: w, height: h, channels: 4 } })
+    .resize(W, H, { fit: "fill", kernel: "nearest" })
+    .png()
+    .toBuffer();
+
+  return await sharp(buf).composite([{ input: mask, blend: "dest-in" }]).png().toBuffer();
+}
+
 async function processOne(buf, msLeft) {
   const src = await sharp(buf).metadata();
   const startPx = Math.max(src.width || 0, src.height || 0);
@@ -658,6 +758,14 @@ async function processOne(buf, msLeft) {
     console.log("[separate] upload is already transparent - skipping background removal");
   } else {
     work = await removeBackground(work);
+  }
+
+  /* Drop slices of a neighbouring item that the rectangular crop dragged in. Runs before the ink
+     check on purpose, so the check measures the artwork that will actually ship. */
+  try {
+    work = await dropStrayFragments(work);
+  } catch (e) {
+    console.warn("[separate] stray-fragment cleanup failed, keeping the cutout as it is:", e.message);
   }
 
   /* Refuse rather than deliver. An empty file that looks finished is the one failure the user
