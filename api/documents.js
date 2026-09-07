@@ -986,6 +986,56 @@ async function doEmail(req, body) {
   return { status: 200, body: { ok: true, sent: rows.length, to: g.student.email, totals } };
 }
 
+/* ---------------- קריאת שם מוצר מאריזה ("הקניות שלי") ---------------- */
+/* 2026-09-07: נוסף כאן ולא בקובץ חדש, כי api/ עומד על 12/12 במסלול Hobby.
+   לא נוגע בטבלאות, לא בקרדיטים ולא בשום פעולה קיימת. */
+
+const PRODUCT_SYSTEM = `You read a photograph of a grocery product package, usually Israeli, and identify the product.
+
+Return ONLY a JSON object, no markdown, no explanation:
+{
+  "found": true | false,
+  "name": "",
+  "brand": "",
+  "size": ""
+}
+
+Rules:
+- "name" is the product as a shopper would write it on a shopping list, in Hebrew when the package is Hebrew. Include the brand when it is part of how people name it. Example: "טחינה אל ארז", "קוטג' תנובה 5%".
+- "brand" is the manufacturer alone, "" if unclear.
+- "size" is the net weight or volume as printed, e.g. "500 גרם", "1.5 ליטר". "" if not visible.
+- "found" is false when the photo is not a product package, or the writing is too blurred to read.
+- Never guess a product you cannot actually see. An empty answer is better than a wrong one.
+- Keep "name" under 40 characters.`;
+
+async function doProduct(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const { image, mediaType } = body;
+  if (!image) return { status: 400, body: { error: "לא התקבלה תמונה." } };
+
+  const text = await askVision({
+    system: PRODUCT_SYSTEM,
+    ask: "Identify the product in this photo and answer with the JSON object only.",
+    image, mediaType: mediaType || "image/jpeg",
+    maxTokens: 200,
+  });
+
+  const j = parseModelJson(text);
+  if (!j) {
+    console.error("[documents] product unreadable. Raw:", String(text).slice(0, 300));
+    return { status: 200, body: { found: false } };
+  }
+
+  const clean = (v) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, 60);
+  const name = clean(j.name);
+  if (j.found === false || !name) return { status: 200, body: { found: false } };
+
+  return { status: 200, body: { found: true, name, brand: clean(j.brand), size: clean(j.size) } };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1025,6 +1075,7 @@ export default async function handler(req, res) {
       case "search":  out = await doSearch(req, body);   break;
       case "chart":   out = await doChart(req, body);    break;
       case "email":   out = await doEmail(req, body);    break;
+      case "product": out = await doProduct(body);       break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
