@@ -1036,6 +1036,69 @@ async function doProduct(body) {
   return { status: 200, body: { found: true, name, brand: clean(j.brand), size: clean(j.size) } };
 }
 
+/* ---------------- קריאת תאריך תפוגה מאריזה ("הקניות שלי") ---------------- */
+/* 2026-09-07: על אריזות מודפסים לא פעם שני תאריכים — ייצור ותפוגה. הכלל שנקבע
+   מולו: התפוגה היא תמיד המאוחר מבין השניים. */
+
+const EXPIRY_SYSTEM = `You read a photograph of a printed date on a food or grocery package, usually Israeli.
+
+Return ONLY a JSON object, no markdown, no explanation:
+{
+  "found": true | false,
+  "expiry": "YYYY-MM-DD",
+  "printed": "",
+  "two_dates": true | false
+}
+
+Rules:
+- Packages often print TWO dates: a production date and an expiry date. The expiry is ALWAYS the LATER of the two. Return the later one and set "two_dates" to true.
+- Hebrew labels: "בתוקף עד", "תאריך אחרון לשימוש", "לשימוש עד", "עדיף להשתמש לפני" mark the expiry. "ייצור", "תאריך ייצור", "יוצר ב" mark production. When a label is visible, trust the label over the ordering.
+- Israeli dates are usually DD/MM/YY or DD/MM/YYYY. A day above 12 disambiguates. When the year has two digits, assume 20YY.
+- "printed" is the raw text exactly as you read it, for the user to verify against.
+- "found" is false when no date is legible, or you cannot tell which number is a date. Never guess a date. A wrong expiry date is worse than no date at all.`;
+
+async function doExpiry(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const { image, mediaType } = body;
+  if (!image) return { status: 400, body: { error: "לא התקבלה תמונה." } };
+
+  const text = await askVision({
+    system: EXPIRY_SYSTEM,
+    ask: "Read the printed date(s) in this photo and answer with the JSON object only.",
+    image, mediaType: mediaType || "image/jpeg",
+    maxTokens: 200,
+  });
+
+  const j = parseModelJson(text);
+  if (!j) {
+    console.error("[documents] expiry unreadable. Raw:", String(text).slice(0, 300));
+    return { status: 200, body: { found: false } };
+  }
+
+  const iso = String(j.expiry || "").trim();
+  /* לא סומכים על המודל לפורמט. תאריך שלא נראה כמו תאריך — נדחה. */
+  if (j.found === false || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    return { status: 200, body: { found: false } };
+  }
+  const d = new Date(iso + "T00:00:00Z");
+  if (isNaN(d.getTime()) || d.getUTCFullYear() < 2020 || d.getUTCFullYear() > 2040) {
+    return { status: 200, body: { found: false } };
+  }
+
+  return {
+    status: 200,
+    body: {
+      found: true,
+      expiry: iso,
+      printed: String(j.printed == null ? "" : j.printed).replace(/\s+/g, " ").trim().slice(0, 60),
+      twoDates: j.two_dates === true,
+    },
+  };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1076,6 +1139,7 @@ export default async function handler(req, res) {
       case "chart":   out = await doChart(req, body);    break;
       case "email":   out = await doEmail(req, body);    break;
       case "product": out = await doProduct(body);       break;
+      case "expiry":  out = await doExpiry(body);        break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
