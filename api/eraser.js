@@ -1,5 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
+import { makePrintFile } from "./_print.js";
 // api/eraser.js v11 — מחק קסם + יצירת רקעים למחולל הברכות
 //
 // v11 (2026-09-03): יצירת הרקעים נפתחת ללקוחות, בתשלום.
@@ -397,9 +398,16 @@ export default async function handler(req, res) {
         continue;
       }
       console.log("eraser success with model:", model);
+      /* קובץ הדפסה 4500x5400 — נוצר רק אם הלקוח ביקש print:true.
+         כישלון כאן לא מפיל את התשובה: הלקוח עדיין מקבל את התמונה השקופה. */
+      let printUrl = null;
+      if (body.print === true) {
+        try { printUrl = await makePrintFile(outUrl); }
+        catch (e) { console.error("[eraser] print file failed:", e.message); }
+      }
       const left = await settle(acct.student, acct.quota, acct.owner);
       return res.status(200).json({
-        imageUrl: outUrl, model,
+        imageUrl: outUrl, model, printUrl,
         freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
       });
     } catch (err) {
