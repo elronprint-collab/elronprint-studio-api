@@ -1,5 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
+import { makePrintFile } from "./_print.js";
 // api/removebg-upload.js — הסרת רקע לתמונות שהלקוח מעלה (מתארחות ב-Cloudinary)
 // קובץ נפרד ועצמאי. אינו נוגע ב-removebg.js הקיים.
 const ALLOWED = [
@@ -90,9 +91,17 @@ export default async function handler(req, res) {
     const data = await r.json();
     const outUrl = data?.image?.url;
     if (!outUrl) return res.status(502).json({ error: "No image returned" });
+
+    /* קובץ הדפסה 4500x5400 — נוצר רק אם הלקוח ביקש print:true.
+       כישלון כאן לא מפיל את התשובה: הלקוח עדיין מקבל את התמונה השקופה. */
+    let printUrl = null;
+    if (body.print === true) {
+      try { printUrl = await makePrintFile(outUrl); }
+      catch (e) { console.error("[removebg-upload] print file failed:", e.message); }
+    }
     const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
       : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
-    return res.status(200).json({ freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner, imageUrl: outUrl });
+    return res.status(200).json({ freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner, imageUrl: outUrl, printUrl });
   } catch (err) {
     console.error(err);
     return res.status(502).json({ error: "Background removal failed" });
