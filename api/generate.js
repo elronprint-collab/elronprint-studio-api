@@ -1,5 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
+import { makePrintFile } from "./_print.js";
 // api/generate.js — שלב 1: יצירת העיצוב (FLUX.1 dev)
 //
 // v2 — תיקון התרגום מעברית.
@@ -183,11 +184,18 @@ export default async function handler(req, res) {
     const imageUrl = data?.images?.[0]?.url;
     if (!imageUrl) return res.status(502).json({ error: "No image returned" });
 
+    /* קובץ הדפסה 4500x5400 — נוצר רק אם הלקוח ביקש print:true.
+       כישלון כאן לא מפיל את התשובה: הלקוח עדיין מקבל את התמונה השקופה. */
+    let printUrl = null;
+    if (body.print === true) {
+      try { printUrl = await makePrintFile(imageUrl); }
+      catch (e) { console.error("[generate] print file failed:", e.message); }
+    }
     // promptUsed נשלח חזרה כדי שתקלות תרגום יהיו גלויות ולא שקטות
     const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
       : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
     return res.status(200).json({
-      imageUrl, promptUsed: englishPrompt, translatedVia: via,
+      imageUrl, printUrl, promptUsed: englishPrompt, translatedVia: via,
       freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
     });
   } catch (err) {
