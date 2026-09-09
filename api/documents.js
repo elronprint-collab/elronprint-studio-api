@@ -1,4 +1,5 @@
 import { gate, settle } from "./_account.js";
+import { gunzipSync } from "zlib";
 import { checkRateLimit } from "./_ratelimit.js";
 // api/documents.js — "מסמכים וקבלות" v1
 //
@@ -1221,6 +1222,111 @@ async function doShufProbe(body) {
   };
 }
 
+/* ---------------- שליפת מוצר בודד מקובץ המחירים ---------------- */
+/* 2026-09-09: שלב שני. מוריד את קובץ ה-PriceFull של הסניף, פורס אותו,
+   וקורא את ה-XML. עדיין לא שומר כלום — המטרה לראות שהנתונים יוצאים
+   נכון על ברקוד אמיתי לפני שבונים אחסון וחיפוש.
+   gunzip מובנה ב-Node (zlib), אין צורך בספרייה חיצונית. */
+
+/* חילוץ תוכן של תגית XML בודדת. הקבצים האלה שטוחים ובלי מרחבי שמות,
+   ולכן ביטוי רגולרי מספיק וזול בהרבה מפרסר מלא על 7,000 רשומות. */
+function xmlTag(chunk, tag) {
+  const m = chunk.match(new RegExp("<" + tag + ">([\\s\\S]*?)</" + tag + ">", "i"));
+  return m ? m[1].trim() : null;
+}
+
+/* שמות התגיות משתנים בין רשתות ולפעמים בין גרסאות של אותה רשת,
+   ולכן בודקים כמה חלופות במקום להניח אחת. */
+function xmlAny(chunk, tags) {
+  for (const t of tags) {
+    const v = xmlTag(chunk, t);
+    if (v) return v;
+  }
+  return null;
+}
+
+function parseItems(xml) {
+  const out = [];
+  const parts = xml.split(/<Item>/i);
+  for (let i = 1; i < parts.length; i++) {
+    const chunk = parts[i];
+    const code = xmlAny(chunk, ["ItemCode"]);
+    if (!code) continue;
+    out.push({
+      code,
+      name:  xmlAny(chunk, ["ItemName", "ItemNm"]),
+      maker: xmlAny(chunk, ["ManufacturerName", "ManufactureName"]),
+      qty:   xmlAny(chunk, ["Quantity"]),
+      unit:  xmlAny(chunk, ["UnitQty", "UnitOfMeasure"]),
+      price: Number(xmlAny(chunk, ["ItemPrice"])) || null,
+      unitPrice: Number(xmlAny(chunk, ["UnitOfMeasurePrice"])) || null,
+    });
+  }
+  return out;
+}
+
+async function doShufItem(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const store = String(body.store || "121").replace(/\D/g, "") || "121";
+  const want  = String(body.barcode || "").replace(/\D/g, "");
+  const t0 = Date.now();
+
+  /* 1. קישור טרי. החתימה פגה תוך כשעה, ולכן היא נשלפת בכל קריאה. */
+  let listHtml;
+  try {
+    const lr = await fetch(SHUF_GRID + "?catID=2&storeId=" + store, {
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html" },
+    });
+    if (!lr.ok) return { status: 502, body: { error: "רשימת הקבצים לא נטענה.", httpStatus: lr.status } };
+    listHtml = await lr.text();
+  } catch (e) {
+    return { status: 502, body: { error: "הבקשה לרשימת הקבצים נכשלה.", detail: e.message } };
+  }
+
+  const links = listHtml.match(/https:\/\/[^"'\s]*pricefull[^"'\s]*\.gz[^"'<]*/gi) || [];
+  if (!links.length) return { status: 502, body: { error: "לא נמצא קובץ מלא לסניף הזה." } };
+  /* ה-HTML מגיע עם &amp; במקום & — בלי הפענוח הזה הקישור לא תקף. */
+  const fileUrl = links[0].replace(/&amp;/g, "&");
+  const tList = Date.now() - t0;
+
+  /* 2. הורדה ופריסה */
+  let items, gzBytes, xmlChars;
+  try {
+    const fr = await fetch(fileUrl);
+    if (!fr.ok) {
+      return { status: 502, body: { error: "הורדת הקובץ נכשלה.", httpStatus: fr.status } };
+    }
+    const buf = Buffer.from(await fr.arrayBuffer());
+    gzBytes = buf.length;
+    const xml = gunzipSync(buf).toString("utf8");
+    xmlChars = xml.length;
+    items = parseItems(xml);
+  } catch (e) {
+    return { status: 502, body: { error: "פריסת הקובץ נכשלה.", detail: e.message } };
+  }
+
+  const found = want ? items.filter((it) => it.code.replace(/^0+/, "") === want.replace(/^0+/, "")) : [];
+
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      ms: Date.now() - t0,
+      msList: tList,
+      fileName: (fileUrl.split("/").pop() || "").split("?")[0],
+      gzBytes,
+      xmlChars,
+      itemCount: items.length,
+      searched: want || null,
+      found: found.length ? found[0] : null,
+      sample: items.slice(0, 3),
+    },
+  };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1265,6 +1371,7 @@ export default async function handler(req, res) {
       case "shopSave": out = await doShopSave(body);     break;
       case "shopLoad": out = await doShopLoad(body);     break;
       case "shufProbe": out = await doShufProbe(body); break;
+      case "shufItem":  out = await doShufItem(body);  break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
