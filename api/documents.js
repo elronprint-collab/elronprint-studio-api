@@ -1599,34 +1599,47 @@ async function doRamiProbe(body) {
   const store = String(body.store || "032").replace(/\D/g, "").padStart(3, "0");
   const t0 = Date.now();
 
-  let session, list;
-  try {
-    session = await rlLogin();
-    list = await rlList(session, "PriceFull" + RL_CHAIN + "-001-" + store);
-  } catch (e) {
-    return { status: 502, body: { error: "ההתחברות או הרשימה נכשלו.", detail: e.message } };
+  /* 2026-09-09: ההתחברות והרשימה מופרדות בכוונה. בגרסה הקודמת כשל
+     ברשימה בלע גם את תוצאת ההתחברות, ולא היה אפשר לדעת איזה משני
+     השלבים נשבר. עכשיו כל שלב מדווח על עצמו. */
+  let session = null, loginError = null;
+  try { session = await rlLogin(); }
+  catch (e) { loginError = e.message; }
+
+  if (!session) {
+    return { status: 200, body: { ok: false, stage: "login", ms: Date.now() - t0, error: loginError } };
   }
 
-  /* המבנה המדויק של התשובה לא מתועד, ולכן מחזירים גם דגימה גולמית
-     במקום לנחש שמות שדות. */
-  const rows = Array.isArray(list && list.aaData) ? list.aaData : [];
+  const info = {
+    ms: Date.now() - t0,
+    loginStatus: session.loginStatus,
+    location: session.location,
+    loggedIn: session.loggedIn,
+    gotCsrf: !!session.csrf,
+    csrfLen: session.csrf ? session.csrf.length : 0,
+    cookies: Object.keys(session.jar),
+  };
+
+  let list = null, listError = null;
+  try { list = await rlList(session, "PriceFull" + RL_CHAIN + "-001-" + store); }
+  catch (e) { listError = e.message; }
+
+  if (!list) {
+    return { status: 200, body: Object.assign({ ok: false, stage: "list", error: listError }, info) };
+  }
+
+  const rows = Array.isArray(list.aaData) ? list.aaData : [];
   const names = rows.map((r) => (Array.isArray(r) ? r[0] : (r && (r.fname || r.name)) || "")).filter(Boolean);
 
   return {
     status: 200,
-    body: {
+    body: Object.assign({
       ok: true,
-      ms: Date.now() - t0,
-      loginStatus: session.loginStatus,
-      location: session.location,
-      loggedIn: session.loggedIn,
-      gotCsrf: !!session.csrf,
-      cookies: Object.keys(session.jar),
       rowCount: rows.length,
+      total: list.iTotalRecords,
       names: names.slice(0, 5),
-      rawSample: rows.length ? JSON.stringify(rows[0]).slice(0, 400) : null,
-      topKeys: list ? Object.keys(list).slice(0, 10) : null,
-    },
+      rawSample: rows.length ? JSON.stringify(rows[0]).slice(0, 300) : null,
+    }, info),
   };
 }
 
