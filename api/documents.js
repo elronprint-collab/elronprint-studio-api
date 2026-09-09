@@ -1518,18 +1518,58 @@ async function rlLogin() {
     body: form.toString(),
   });
   cookieJar(p, jar);
+  const location = p.headers.get("location") || null;
 
-  /* הצלחה מזוהה לפי הפניה או לפי הדף שאחריה, לא לפי ניחוש. */
-  return { jar, csrf, loginStatus: p.status, location: p.headers.get("location") || null };
+  /* נכנסים לדף הקבצים עצמו: זה מייצב את הסשן ומאפשר לקרוא את הטוקן. */
+  let inner = "";
+  try {
+    const f = await fetch(RL_BASE + "/file", {
+      headers: { "User-Agent": "Mozilla/5.0", "Cookie": cookieHeader(jar) },
+    });
+    cookieJar(f, jar);
+    inner = await f.text();
+  } catch (e) { /* לא קריטי — הטוקן עשוי לשבת בעוגייה */ }
+
+  return { jar, csrf: rlCsrf(jar, inner) || csrf, loginStatus: p.status, location,
+           loggedIn: /Logged in as/i.test(inner) };
 }
 
-/* הפורטל מחזיר את רשימת הקבצים כ-JSON, לא כ-HTML. */
+/* 2026-09-09: גוף הבקשה הועתק מבקשה אמיתית של הדפדפן שלהם (DevTools).
+   זו טבלת DataTables, ולכן היא שולחת הגדרת עמודות מלאה ולא רק חיפוש.
+   הניסיון הקודם שלח ארבעה שדות בלבד והשרת החזיר את דף הכניסה.
+   ה-csrftoken כן קיים — הוא פשוט לא בטופס הכניסה אלא בעוגייה, ולכן
+   החיפוש אחריו ב-HTML לא מצא אותו. */
+function rlCsrf(jar, html) {
+  if (jar && jar.csrftoken) return jar.csrftoken;
+  const m = String(html || "").match(/csrftoken["']?\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']/);
+  return m ? m[1] : "";
+}
+
 async function rlList(session, term) {
+  const cols = [
+    ["fname", true, true],
+    ["typeLabel", true, false],
+    ["size", true, true],
+    ["ftime", true, true],
+    ["", true, false],
+  ];
+
   const form = new URLSearchParams();
   form.set("sEcho", "1");
+  form.set("iColumns", String(cols.length));
+  form.set("sColumns", ",,,,");
   form.set("iDisplayStart", "0");
-  form.set("iDisplayLength", "1000");
+  form.set("iDisplayLength", "10000");
+  cols.forEach(function (c, i) {
+    form.set("mDataProp_" + i, c[0]);
+    form.set("sSearch_" + i, "");
+    form.set("bRegex_" + i, "false");
+    form.set("bSearchable_" + i, String(c[1]));
+    form.set("bSortable_" + i, String(c[2]));
+  });
   form.set("sSearch", term || "");
+  form.set("bRegex", "false");
+  form.set("iSortingCols", "0");
   form.set("cd", "/");
   if (session.csrf) form.set("csrftoken", session.csrf);
 
@@ -1537,9 +1577,12 @@ async function rlList(session, term) {
     method: "POST",
     headers: {
       "User-Agent": "Mozilla/5.0",
-      "Content-Type": "application/x-www-form-urlencoded",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+      "Accept": "application/json, text/javascript, */*; q=0.01",
       "Cookie": cookieHeader(session.jar),
       "Referer": RL_BASE + "/file",
+      "Origin": RL_BASE,
     },
     body: form.toString(),
   });
@@ -1576,6 +1619,7 @@ async function doRamiProbe(body) {
       ms: Date.now() - t0,
       loginStatus: session.loginStatus,
       location: session.location,
+      loggedIn: session.loggedIn,
       gotCsrf: !!session.csrf,
       cookies: Object.keys(session.jar),
       rowCount: rows.length,
