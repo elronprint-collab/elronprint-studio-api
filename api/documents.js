@@ -1713,7 +1713,7 @@ async function doRamiSync(body) {
     if (!session.loggedIn) throw new Error("ההתחברות לפורטל נכשלה.");
     fname = await rlNewestFile(session, store);
     const buf = await rlDownload(session, fname);
-    items = parseItems(gunzipSync(buf).toString("utf8"));
+    items = parseItems(decodeXml(gunzipSync(buf)));
   } catch (e) {
     return { status: 502, body: { error: "משיכת הקובץ מרמי לוי נכשלה.", detail: e.message } };
   }
@@ -1762,9 +1762,11 @@ async function doRamiSync(body) {
 /* שמות המשתמש שנבדקים. חלקם מהרשימה הישנה וחלקם שמות מקובלים;
    מה שלא ייכנס פשוט ידווח ככשל, בלי לשבור כלום. */
 const PORTAL_USERS = [
-  "RamiLevi", "KeshetTaamim", "SuperDosh", "HaziHinam", "StopMarket",
-  "osherad", "doralon", "TivTaam", "yohananof", "politzer",
-  "freshmarket", "Keshet", "SalachD", "supershuk", "Quik",
+  /* אלה שנכנסו בפועל בסריקה של 2026-09-09. השמות שנכשלו הוסרו:
+     KeshetTaamim, StopMarket, supershuk, Quik. */
+  "RamiLevi", "Keshet", "osherad", "doralon", "TivTaam",
+  "yohananof", "politzer", "freshmarket", "SalachD",
+  "SuperDosh", "HaziHinam",
 ];
 
 async function portalLogin(user) {
@@ -1802,6 +1804,31 @@ async function portalLogin(user) {
   return { jar, csrf: metaToken(inner) || csrf, loggedIn: /Logged in as/i.test(inner) };
 }
 
+/* 2026-09-09: קבצי הסניפים בפורטל הזה מקודדים ב-UTF-16 ולא ב-UTF-8.
+   הקריאה כ-UTF-8 החזירה טקסט עם בית אפס בין כל אות, אף תגית לא
+   נמצאה, וכל הרשתות דיווחו אפס סניפים — כולל רמי לוי שראינו בעיניים
+   שיש לו סניף נהריה. הקידוד מזוהה עכשיו לפי BOM ולא מונח.
+   (קבצי המחירים הדחוסים כן מגיעים ב-UTF-8, ולכן הם עבדו.) */
+function decodeXml(buf) {
+  if (buf.length >= 2) {
+    if (buf[0] === 0xff && buf[1] === 0xfe) return buf.toString("utf16le");
+    if (buf[0] === 0xfe && buf[1] === 0xff) {
+      /* big-endian: מחליפים זוגות בתים ואז קוראים כ-little-endian */
+      const sw = Buffer.from(buf);
+      for (let i = 0; i + 1 < sw.length; i += 2) {
+        const t = sw[i]; sw[i] = sw[i + 1]; sw[i + 1] = t;
+      }
+      return sw.toString("utf16le");
+    }
+  }
+  /* בלי BOM: אם כל בית שני הוא אפס, זה עדיין UTF-16. */
+  let zeros = 0;
+  const n = Math.min(buf.length, 200);
+  for (let i = 1; i < n; i += 2) if (buf[i] === 0) zeros++;
+  if (n > 20 && zeros > n / 4) return buf.toString("utf16le");
+  return buf.toString("utf8");
+}
+
 /* קובץ הסניפים אצלם הוא XML גלוי, לפעמים דחוס ולפעמים לא. */
 async function portalStores(session) {
   const list = await rlList(session, "Stores");
@@ -1818,7 +1845,7 @@ async function portalStores(session) {
   let buf = Buffer.from(await r.arrayBuffer());
   /* חתימת gzip היא 1f 8b. אם היא שם — פורסים, אחרת זה XML גולמי. */
   if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf);
-  return { fname, xml: buf.toString("utf8") };
+  return { fname, xml: decodeXml(buf) };
 }
 
 function findNahariya(xml) {
