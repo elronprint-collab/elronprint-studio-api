@@ -1327,6 +1327,131 @@ async function doShufItem(body) {
   };
 }
 
+/* ---------------- מאגר המוצרים המקומי ---------------- */
+/* 2026-09-09: shufItem מוכיח שאפשר למשוך בזמן אמת, אבל 3 שניות בכל
+   סריקה זה יותר מדי, והכלי היה נשבר בכל פעם ששופרסל למטה. לכן הקובץ
+   נשמר אצלנו פעם ביום, והחיפוש הוא מול המאגר.
+   sync = מילוי המאגר. lookup = מה שהכלי קורא לו בזמן סריקה. */
+
+/* Supabase לא בולע 8,500 שורות בבקשה אחת בלי להיחנק. */
+const SHUF_BATCH = 800;
+
+/* יחידות מידה כפי שהן מופיעות בפועל בקבצים של שופרסל. */
+const UNIT_WORDS = 'ג|גר|גרם|ק"ג|קג|קילו|מ"ל|מל|מיליליטר|ליטר|ל|יח|יחידות|יחי\'|מטר|מטרים|ס"מ';
+const HAS_SIZE = new RegExp('\\d+(?:[.,]\\d+)?\\s*(?:' + UNIT_WORDS + ')(?![\\u0590-\\u05FFa-zA-Z])', 'i');
+
+function buildName(it) {
+  /* השם בקובץ לרוב כבר כולל גודל, אבל לא תמיד ולא באותו פורמט.
+     הכלל: לא נוגעים בשם של הרשת אם כבר יש בו גודל, ורק אם אין —
+     מוסיפים אותו מהשדות הנפרדים qty ו-unit, שהם נקיים.
+     2026-09-09: הניסיון הראשון בנה את השם תמיד מ-qty והוא ייצר שתי
+     תקלות אמיתיות — "שקיות זיפר M 25 יחידות" הפך ל-"1 יחידות" כי
+     qty מתאר אריזה אחת, ו"ניילון נצמד 30 מטר" קיבל גודל כפול. */
+  const base = String(it.name || "").replace(/\s+/g, " ").trim();
+  if (!base) return null;
+  if (HAS_SIZE.test(base)) return base.slice(0, 80);
+
+  const q = Number(it.qty);
+  const u = String(it.unit || "").trim();
+  if (!q || !u) return base.slice(0, 80);
+
+  const num = Number.isInteger(q) ? String(q) : String(q).replace(/0+$/, "").replace(/\.$/, "");
+  return (base + " " + num + " " + u).slice(0, 80);
+}
+
+async function shufFetchItems(store) {
+  const lr = await fetch(SHUF_GRID + "?catID=2&storeId=" + store, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "text/html" },
+  });
+  if (!lr.ok) throw new Error("רשימת הקבצים החזירה " + lr.status);
+  const html = await lr.text();
+
+  const links = html.match(/https:\/\/[^"'\s]*pricefull[^"'\s]*\.gz[^"'<]*/gi) || [];
+  if (!links.length) throw new Error("לא נמצא קובץ מלא לסניף " + store);
+  const fileUrl = links[0].replace(/&amp;/g, "&");
+
+  const fr = await fetch(fileUrl);
+  if (!fr.ok) throw new Error("הורדת הקובץ החזירה " + fr.status);
+  const buf = Buffer.from(await fr.arrayBuffer());
+  const xml = gunzipSync(buf).toString("utf8");
+  return { items: parseItems(xml), fileName: (fileUrl.split("/").pop() || "").split("?")[0] };
+}
+
+async function doShufSync(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const store = String(body.store || "121").replace(/\D/g, "") || "121";
+  const t0 = Date.now();
+
+  let got;
+  try { got = await shufFetchItems(store); }
+  catch (e) { return { status: 502, body: { error: "משיכת הקובץ נכשלה.", detail: e.message } }; }
+
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const it of got.items) {
+    const name = buildName(it);
+    if (!name || it.price === null) continue;
+    rows.push({
+      store,
+      code: String(it.code).replace(/^0+/, "") || String(it.code),
+      name,
+      maker: it.maker ? String(it.maker).slice(0, 80) : null,
+      qty: it.qty, unit: it.unit,
+      price: it.price, unit_price: it.unitPrice,
+      updated_at: now,
+    });
+  }
+
+  let saved = 0;
+  try {
+    for (let i = 0; i < rows.length; i += SHUF_BATCH) {
+      await sbPost("shufersal_items", rows.slice(i, i + SHUF_BATCH), "resolution=merge-duplicates");
+      saved += Math.min(SHUF_BATCH, rows.length - i);
+    }
+  } catch (e) {
+    return { status: 502, body: { error: "השמירה נכשלה.", detail: e.message, saved } };
+  }
+
+  return {
+    status: 200,
+    body: { ok: true, ms: Date.now() - t0, store, fileName: got.fileName,
+            parsed: got.items.length, saved, skipped: got.items.length - rows.length },
+  };
+}
+
+/* lookup — זה מה שהכלי קורא לו ברגע הסריקה. */
+async function doShufLookup(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const code = String(body.barcode || "").replace(/\D/g, "").replace(/^0+/, "");
+  if (!code) return { status: 400, body: { error: "חסר ברקוד." } };
+
+  let rows = [];
+  try {
+    rows = await sbGet(
+      "shufersal_items?code=eq." + enc(code) +
+      "&select=store,code,name,maker,price,unit_price,updated_at&order=price.asc&limit=10"
+    );
+  } catch (e) {
+    return { status: 502, body: { error: "החיפוש נכשל.", detail: e.message } };
+  }
+
+  if (!rows.length) return { status: 200, body: { ok: true, found: false } };
+  return {
+    status: 200,
+    body: {
+      ok: true, found: true,
+      name: rows[0].name,
+      maker: rows[0].maker,
+      updatedAt: rows[0].updated_at,
+      prices: rows.map((r) => ({ store: r.store, price: Number(r.price), unitPrice: Number(r.unit_price) })),
+    },
+  };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1372,6 +1497,8 @@ export default async function handler(req, res) {
       case "shopLoad": out = await doShopLoad(body);     break;
       case "shufProbe": out = await doShufProbe(body); break;
       case "shufItem":  out = await doShufItem(body);  break;
+      case "shufSync":   out = await doShufSync(body);   break;
+      case "shufLookup": out = await doShufLookup(body); break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
