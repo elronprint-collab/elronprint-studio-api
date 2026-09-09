@@ -1099,6 +1099,62 @@ async function doExpiry(body) {
   };
 }
 
+/* ---------------- גיבוי "הקניות שלי" ---------------- */
+/* 2026-09-09: דף בדפדפן לא יכול להתעורר לבד ולא יכול לשלוח מייל, ולכן
+   הגיבוי נשמר כאן בכל שינוי. אין כאן חשבון: הזיהוי הוא קוד שהלקוח בוחר,
+   ומי שמחזיק בקוד רואה את הנתונים. זו הסיבה לאורך המינימלי.
+   הנתונים נשמרים כמחרוזת אחת ולא מפורקים לעמודות — זה גיבוי, לא מסד. */
+
+/* וורסל חוסם גוף בקשה מעל 4.5MB. עוצרים לפני, עם הודעה ברורה,
+   כי כישלון שקט בגיבוי הוא הדבר הגרוע ביותר שיכול לקרות כאן. */
+const SHOP_BACKUP_MAX = 4000000;
+
+function shopKey(v) {
+  const s = String(v == null ? "" : v).trim();
+  return /^[A-Za-z0-9._-]{8,64}$/.test(s) ? s : null;
+}
+
+async function doShopSave(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const key = shopKey(body.key);
+  if (!key) {
+    return { status: 400, body: { error: "קוד גיבוי לא תקין. לפחות 8 תווים, אותיות באנגלית וספרות." } };
+  }
+
+  const data = typeof body.data === "string" ? body.data : JSON.stringify(body.data || null);
+  if (!data || data.length < 2) return { status: 400, body: { error: "אין מה לגבות." } };
+  if (data.length > SHOP_BACKUP_MAX) {
+    return {
+      status: 413,
+      body: {
+        error: "הגיבוי גדול מדי לשמירה בענן (" + Math.round(data.length / 100000) / 10 + "MB). " +
+               "הגיבוי למכשיר עדיין עובד.",
+        size: data.length, limit: SHOP_BACKUP_MAX,
+      },
+    };
+  }
+
+  const now = new Date().toISOString();
+  await sbPost("shopping_backups", { key, data, updated_at: now }, "resolution=merge-duplicates");
+  return { status: 200, body: { ok: true, size: data.length, savedAt: now } };
+}
+
+async function doShopLoad(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const key = shopKey(body.key);
+  if (!key) return { status: 400, body: { error: "קוד גיבוי לא תקין." } };
+
+  const rows = await sbGet(
+    "shopping_backups?key=eq." + enc(key) + "&select=data,updated_at&limit=1"
+  );
+  if (!rows.length) return { status: 200, body: { ok: true, found: false } };
+  return { status: 200, body: { ok: true, found: true, data: rows[0].data, updatedAt: rows[0].updated_at } };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1140,6 +1196,8 @@ export default async function handler(req, res) {
       case "email":   out = await doEmail(req, body);    break;
       case "product": out = await doProduct(body);       break;
       case "expiry":  out = await doExpiry(body);        break;
+      case "shopSave": out = await doShopSave(body);     break;
+      case "shopLoad": out = await doShopLoad(body);     break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
