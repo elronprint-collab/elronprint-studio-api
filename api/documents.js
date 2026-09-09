@@ -1170,8 +1170,10 @@ async function doShufProbe(body) {
   }
 
   const store = String(body.store || "121").replace(/\D/g, "") || "121";
-  /* catID 2 = PricesFull ברשימה שלהם. אם הוא שגוי נראה את זה בתוצאה. */
-  const url = SHUF_LIST + "?catID=2&storeId=" + store;
+  /* 2026-09-09: שמות השדות נלקחו מקוד המקור של הדף שלהם —
+     ddlStore הוא הסניף ו-ddlCategory=2 הוא PricesFull. הניחוש הקודם
+     (storeId/catID) פשוט לא קיים אצלם, ולכן הדף החזיר רשימה לא מסוננת. */
+  const url = SHUF_LIST + "?ddlCategory=2&ddlStore=" + store;
 
   const t0 = Date.now();
   let r, html;
