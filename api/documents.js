@@ -1751,6 +1751,126 @@ async function doRamiSync(body) {
   };
 }
 
+/* ---------------- גילוי רשתות בפורטל ---------------- */
+/* 2026-09-09: אין רשימה רשמית מעודכנת של הרשתות ושל פרטי הגישה שלהן —
+   הרשימה של המועצה לצרכנות היא מ-2015 והסיסמאות בה כבר לא תקפות.
+   לכן במקום לנחש, הפעולה הזו מנסה להתחבר בפועל לכל שם משתמש ברשימה,
+   ולכל אחד שנכנס היא מורידה את קובץ הסניפים ומחפשת בו "נהריה".
+   התוצאה היא עובדות: מי פתוח, ובאיזה מספר סניף.
+   רצה סדרתית בכוונה — במקביל השרת נחנק (זה מה שהפיל את רמי לוי). */
+
+/* שמות המשתמש שנבדקים. חלקם מהרשימה הישנה וחלקם שמות מקובלים;
+   מה שלא ייכנס פשוט ידווח ככשל, בלי לשבור כלום. */
+const PORTAL_USERS = [
+  "RamiLevi", "KeshetTaamim", "SuperDosh", "HaziHinam", "StopMarket",
+  "osherad", "doralon", "TivTaam", "yohananof", "politzer",
+  "freshmarket", "Keshet", "SalachD", "supershuk", "Quik",
+];
+
+async function portalLogin(user) {
+  const jar = {};
+  const g = await fetch(RL_BASE + "/login", { headers: { "User-Agent": "Mozilla/5.0" } });
+  if (!g.ok) throw new Error("login page " + g.status);
+  cookieJar(g, jar);
+  const csrf = metaToken(await g.text());
+
+  const form = new URLSearchParams();
+  form.set("r", "");
+  form.set("username", user);
+  form.set("password", "");
+  form.set("Submit", "Sign in");
+  if (csrf) form.set("csrftoken", csrf);
+
+  const p = await fetch(RL_BASE + "/login/user", {
+    method: "POST", redirect: "manual",
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Cookie": cookieHeader(jar),
+      "Referer": RL_BASE + "/login",
+      "Origin": RL_BASE,
+    },
+    body: form.toString(),
+  });
+  cookieJar(p, jar);
+
+  const f = await fetch(RL_BASE + "/file", {
+    headers: { "User-Agent": "Mozilla/5.0", "Cookie": cookieHeader(jar) },
+  });
+  cookieJar(f, jar);
+  const inner = await f.text();
+  return { jar, csrf: metaToken(inner) || csrf, loggedIn: /Logged in as/i.test(inner) };
+}
+
+/* קובץ הסניפים אצלם הוא XML גלוי, לפעמים דחוס ולפעמים לא. */
+async function portalStores(session) {
+  const list = await rlList(session, "Stores");
+  const rows = Array.isArray(list.aaData) ? list.aaData : [];
+  const names = rows.map((r) => (Array.isArray(r) ? r[0] : (r && r.fname) || "")).filter(Boolean);
+  if (!names.length) return null;
+  names.sort();
+  const fname = names[names.length - 1];
+
+  const r = await fetch(RL_BASE + "/file/d/" + encodeURIComponent(fname), {
+    headers: { "User-Agent": "Mozilla/5.0", "Cookie": cookieHeader(session.jar), "Referer": RL_BASE + "/file" },
+  });
+  if (!r.ok) throw new Error("download " + r.status);
+  let buf = Buffer.from(await r.arrayBuffer());
+  /* חתימת gzip היא 1f 8b. אם היא שם — פורסים, אחרת זה XML גולמי. */
+  if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf);
+  return { fname, xml: buf.toString("utf8") };
+}
+
+function findNahariya(xml) {
+  const out = [];
+  const chain = xmlAny(xml, ["ChainName"]) || null;
+  const parts = String(xml).split(/<Store>/i);
+  for (let i = 1; i < parts.length; i++) {
+    const c = parts[i];
+    const name = xmlAny(c, ["StoreName"]) || "";
+    const addr = xmlAny(c, ["Address"]) || "";
+    if (name.indexOf("נהריה") < 0 && addr.indexOf("נהריה") < 0) continue;
+    out.push({
+      id: xmlAny(c, ["StoreID"]),
+      sub: xmlAny(c, ["SubChainID"]),
+      name, addr,
+    });
+  }
+  return { chain, stores: out };
+}
+
+async function doPortalScan(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const users = Array.isArray(body.users) && body.users.length ? body.users : PORTAL_USERS;
+  const t0 = Date.now();
+  const out = [];
+
+  for (const u of users.slice(0, 20)) {
+    const row = { user: u };
+    try {
+      const session = await portalLogin(u);
+      row.loggedIn = !!session.loggedIn;
+      if (session.loggedIn) {
+        const st = await portalStores(session);
+        if (!st) { row.note = "אין קובץ סניפים"; }
+        else {
+          const f = findNahariya(st.xml);
+          row.chain = f.chain;
+          row.nahariya = f.stores;
+          row.storesFile = st.fname;
+        }
+      }
+    } catch (e) {
+      row.error = e.message.slice(0, 120);
+    }
+    out.push(row);
+  }
+
+  return { status: 200, body: { ok: true, ms: Date.now() - t0, results: out } };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1800,6 +1920,7 @@ export default async function handler(req, res) {
       case "shufLookup": out = await doShufLookup(body); break;
       case "ramiProbe":  out = await doRamiProbe(body);  break;
       case "ramiSync":   out = await doRamiSync(body);   break;
+      case "portalScan": out = await doPortalScan(body); break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
