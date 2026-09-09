@@ -1484,18 +1484,25 @@ function cookieHeader(jar) {
 async function rlLogin() {
   const jar = {};
 
-  /* דף ההתחברות מנפיק עוגייה וטוקן csrf. בלי שניהם ההתחברות נדחית. */
+  /* 2026-09-09: קוד המקור של דף הכניסה שלהם נקרא בפועל. הטופס הוא
+     id="login-form" action="/login/user" method="post", ושדותיו הם
+     username, password, שדה נסתר r, וכפתור Submit. אין שם csrftoken —
+     הניסיון הראשון שלח אותו על סמך הנחה, וההתחברות נדחתה בשקט
+     והחזירה את דף הכניסה במקום JSON. */
   const g = await fetch(RL_BASE + "/login", { headers: { "User-Agent": "Mozilla/5.0" } });
   if (!g.ok) throw new Error("דף ההתחברות החזיר " + g.status);
   cookieJar(g, jar);
   const html = await g.text();
-  const m = html.match(/name=["']csrftoken["'][^>]*value=["']([^"']+)["']/i)
-         || html.match(/value=["']([^"']+)["'][^>]*name=["']csrftoken["']/i);
+
+  /* אם יבוא יום והם יוסיפו טוקן — נשלח אותו. אם אין, לא ממציאים. */
+  const m = html.match(/name=["']csrftoken["'][^>]*value=["']([^"']*)["']/i);
   const csrf = m ? m[1] : "";
 
   const form = new URLSearchParams();
+  form.set("r", "");
   form.set("username", RL_USER);
   form.set("password", "");
+  form.set("Submit", "Sign in");
   if (csrf) form.set("csrftoken", csrf);
 
   const p = await fetch(RL_BASE + "/login/user", {
@@ -1506,11 +1513,14 @@ async function rlLogin() {
       "Content-Type": "application/x-www-form-urlencoded",
       "Cookie": cookieHeader(jar),
       "Referer": RL_BASE + "/login",
+      "Origin": RL_BASE,
     },
     body: form.toString(),
   });
   cookieJar(p, jar);
-  return { jar, csrf, loginStatus: p.status };
+
+  /* הצלחה מזוהה לפי הפניה או לפי הדף שאחריה, לא לפי ניחוש. */
+  return { jar, csrf, loginStatus: p.status, location: p.headers.get("location") || null };
 }
 
 /* הפורטל מחזיר את רשימת הקבצים כ-JSON, לא כ-HTML. */
@@ -1565,6 +1575,7 @@ async function doRamiProbe(body) {
       ok: true,
       ms: Date.now() - t0,
       loginStatus: session.loginStatus,
+      location: session.location,
       gotCsrf: !!session.csrf,
       cookies: Object.keys(session.jar),
       rowCount: rows.length,
