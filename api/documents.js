@@ -1751,6 +1751,127 @@ async function doRamiSync(body) {
   };
 }
 
+/* ---------------- מחסני השוק ---------------- */
+/* 2026-09-09: הם לא בפורטל publishedprices בכלל — הם מפרסמים ב-laibcatalog
+   עם API פתוח של JSON, בלי התחברות ובלי עוגיות. זה הופך אותם לפשוטים יותר
+   גם משופרסל וגם מרמי לוי: אין קישור חתום שפג ואין סשן לתחזק.
+   הסניף שלנו הוא 268 נהריה, תת-רשת 003.
+   אומת מול הקובץ האמיתי: 7,545 מוצרים, מבנה XML זהה לשופרסל, ולכן
+   parseItems ו-buildName משמשים כאן בלי שינוי. */
+
+const MS_BASE  = "https://laibcatalog.co.il";
+const MS_CHAIN = "7290661400001";
+const MS_STORE_PREFIX = "MS";
+
+STORE_LABELS["MS268"] = "מחסני השוק נהריה";
+
+/* 2026-09-09: אצלם הברקוד לא תמיד נשמר במלואו. הטחינה 7290001216040
+   רשומה בקובץ כ-1216040. מתוך 409 קודים בני 7 ספרות, 395 הופכים לברקוד
+   תקין כשמחזירים את הקידומת — לפי ספרת הביקורת של EAN-13, כלומר בדיקה
+   ולא הנחה. לכן משחזרים כאן ורק כשהבדיקה עוברת; מה שנכשל נשמר כמות שהוא.
+   בלי זה כל המוצרים האלה היו מחזירים "לא נמצא" בסריקה. */
+
+const MS_EAN_PAD = "7290000000000";
+
+function eanValid(c) {
+  if (!/^\d{13}$/.test(c)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += Number(c[i]) * (i % 2 ? 3 : 1);
+  return (10 - (sum % 10)) % 10 === Number(c[12]);
+}
+
+function msFullCode(code) {
+  const c = String(code == null ? "" : code);
+  /* קודים קצרים מ-5 ספרות הם קודים פנימיים (שקילה, מדבקות מחלקה)
+     ולא ברקודים חתוכים — אותם לא נוגעים. */
+  if (!/^\d+$/.test(c) || c.length >= 13 || c.length < 5) return c;
+  const cand = MS_EAN_PAD.slice(0, 13 - c.length) + c;
+  return eanValid(cand) ? cand : c;
+}
+
+async function msNewestFile(store) {
+  const r = await fetch(MS_BASE + "/webapi/api/getfiles?edi=" + MS_CHAIN, {
+    headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" },
+  });
+  if (!r.ok) throw new Error("רשימת הקבצים החזירה " + r.status);
+
+  let list;
+  try { list = JSON.parse((await r.text()) || "[]"); }
+  catch (e) { throw new Error("הרשימה לא חזרה כ-JSON"); }
+
+  /* הפרמטר branchNumber בכתובת לא מסנן — השרת מחזיר את כל הרשת.
+     לכן מסננים כאן, גם לפי הסניף וגם לפי סוג הקובץ. */
+  const mine = (Array.isArray(list) ? list : []).filter(
+    (f) => String((f && f.fileType) || "").toLowerCase() === "pricefull" &&
+           String(f && f.branchNumber) === String(Number(store))
+  );
+  if (!mine.length) throw new Error("לא נמצא קובץ מלא לסניף " + store);
+
+  /* שם הקובץ מסתיים בתאריך ובשעה, ולכן מיון אלפביתי נותן את החדש בסוף. */
+  mine.sort((a, b) => String(a.fileName).localeCompare(String(b.fileName)));
+  return mine[mine.length - 1].fileName;
+}
+
+async function doMshukSync(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const store = String(body.store || "268").replace(/\D/g, "") || "268";
+  const key = MS_STORE_PREFIX + store;
+  const t0 = Date.now();
+
+  let fname, items;
+  try {
+    fname = await msNewestFile(store);
+    const fr = await fetch(MS_BASE + "/webapi/" + MS_CHAIN + "/" + encodeURIComponent(fname), {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (!fr.ok) throw new Error("הורדת הקובץ החזירה " + fr.status);
+    let buf = Buffer.from(await fr.arrayBuffer());
+    /* חתימת gzip היא 1f 8b. אם היא שם — פורסים, אחרת זה XML גולמי. */
+    if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf);
+    items = parseItems(decodeXml(buf));
+  } catch (e) {
+    return { status: 502, body: { error: "משיכת הקובץ ממחסני השוק נכשלה.", detail: e.message } };
+  }
+
+  const rows = [];
+  const now = new Date().toISOString();
+  let restored = 0;
+  for (const it of items) {
+    const name = buildName(it);
+    if (!name || it.price === null) continue;
+    const full = msFullCode(it.code);
+    if (full !== String(it.code)) restored++;
+    rows.push({
+      store: key,
+      code: String(full).replace(/^0+/, "") || String(full),
+      name,
+      maker: it.maker ? String(it.maker).slice(0, 80) : null,
+      qty: it.qty, unit: it.unit,
+      price: it.price, unit_price: it.unitPrice,
+      updated_at: now,
+    });
+  }
+
+  let saved = 0;
+  try {
+    for (let i = 0; i < rows.length; i += SHUF_BATCH) {
+      await sbPost("shufersal_items", rows.slice(i, i + SHUF_BATCH), "resolution=merge-duplicates");
+      saved += Math.min(SHUF_BATCH, rows.length - i);
+    }
+  } catch (e) {
+    return { status: 502, body: { error: "השמירה נכשלה.", detail: e.message, saved } };
+  }
+
+  return {
+    status: 200,
+    body: { ok: true, ms: Date.now() - t0, store: key, fileName: fname,
+            parsed: items.length, saved, skipped: items.length - rows.length,
+            codesRestored: restored },
+  };
+}
+
 /* ---------------- גילוי רשתות בפורטל ---------------- */
 /* 2026-09-09: אין רשימה רשמית מעודכנת של הרשתות ושל פרטי הגישה שלהן —
    הרשימה של המועצה לצרכנות היא מ-2015 והסיסמאות בה כבר לא תקפות.
@@ -1953,6 +2074,7 @@ export default async function handler(req, res) {
       case "shufLookup": out = await doShufLookup(body); break;
       case "ramiProbe":  out = await doRamiProbe(body);  break;
       case "ramiSync":   out = await doRamiSync(body);   break;
+      case "mshukSync":  out = await doMshukSync(body);  break;
       case "portalScan": out = await doPortalScan(body); break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
