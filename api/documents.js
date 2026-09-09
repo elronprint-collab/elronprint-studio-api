@@ -1860,6 +1860,12 @@ async function doPortalScan(body) {
           row.chain = f.chain;
           row.nahariya = f.stores;
           row.storesFile = st.fname;
+          /* 2026-09-09: הסריקה הראשונה החזירה אפס סניפים לכל הרשתות,
+             כולל רמי לוי שאצלו ראינו סניף נהריה בעיניים. לכן מוחזרת
+             דגימה גולמית — כדי לראות מה באמת התקבל במקום לנחש. */
+          row.xmlLen = st.xml.length;
+          row.storeTags = (st.xml.match(/<Store>/gi) || []).length;
+          row.head = st.xml.slice(0, 300);
         }
       }
     } catch (e) {
