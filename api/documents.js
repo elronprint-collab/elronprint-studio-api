@@ -1155,6 +1155,69 @@ async function doShopLoad(body) {
   return { status: 200, body: { ok: true, found: true, data: rows[0].data, updatedAt: rows[0].updated_at } };
 }
 
+/* ---------------- בדיקת מקור המחירים של שופרסל ---------------- */
+/* 2026-09-09: פעולת אבחון בלבד. לא שומרת כלום ולא נוגעת בשום טבלה.
+   מטרתה לענות על שאלה אחת שאי אפשר לענות עליה מבחוץ: האם שרת יכול
+   לבקש מדף שקיפות המחירים של שופרסל את הסניף שלנו דרך הכתובת,
+   ולקבל קישור הורדה חתום. אם כן — הדרך פתוחה. אם לא — נדע מיד למה,
+   כי הפעולה מחזירה את מה שבאמת חזר ולא פרשנות שלו. */
+
+const SHUF_LIST = "https://prices.shufersal.co.il/";
+
+async function doShufProbe(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const store = String(body.store || "121").replace(/\D/g, "") || "121";
+  /* catID 2 = PricesFull ברשימה שלהם. אם הוא שגוי נראה את זה בתוצאה. */
+  const url = SHUF_LIST + "?catID=2&storeId=" + store;
+
+  const t0 = Date.now();
+  let r, html;
+  try {
+    r = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "he-IL,he;q=0.9",
+      },
+    });
+    html = await r.text();
+  } catch (e) {
+    return { status: 502, body: { error: "הבקשה לשופרסל נכשלה.", detail: e.message } };
+  }
+  const ms = Date.now() - t0;
+
+  /* כל הקישורים לקבצים המלאים שמופיעים בדף */
+  const links = (html.match(/https:\/\/[^"'\s]*pricefull[^"'\s]*\.gz[^"'\s]*/gi) || []);
+  const mine  = links.filter((u) => u.indexOf("-" + store.padStart(3, "0") + "-") > -1);
+
+  /* כמה סניפים שונים מופיעים בדף — כך נדע אם הסינון בכלל תפס */
+  const stores = {};
+  (html.match(/Price(?:Full)?7290027600007-\d{3}-(\d{3})-/g) || []).forEach((m) => {
+    const k = m.slice(-4, -1);
+    stores[k] = (stores[k] || 0) + 1;
+  });
+  const storeList = Object.keys(stores);
+
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      httpStatus: r.status,
+      ms,
+      htmlLength: html.length,
+      filtered: storeList.length === 1 && storeList[0] === store.padStart(3, "0"),
+      storesOnPage: storeList.slice(0, 12),
+      pricefullLinks: links.length,
+      myBranchLinks: mine.length,
+      firstMine: mine[0] || null,
+      firstAny: links[0] || null,
+    },
+  };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1198,6 +1261,7 @@ export default async function handler(req, res) {
       case "expiry":  out = await doExpiry(body);        break;
       case "shopSave": out = await doShopSave(body);     break;
       case "shopLoad": out = await doShopLoad(body);     break;
+      case "shufProbe": out = await doShufProbe(body); break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
