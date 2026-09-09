@@ -1481,6 +1481,13 @@ function cookieHeader(jar) {
   return Object.keys(jar).map((k) => k + "=" + jar[k]).join("; ");
 }
 
+function metaToken(html) {
+  const h = String(html || "");
+  const m = h.match(/<meta[^>]+name=["']csrftoken["'][^>]*content=["']([^"']+)["']/i)
+         || h.match(/<meta[^>]+content=["']([^"']+)["'][^>]*name=["']csrftoken["']/i);
+  return m ? m[1] : "";
+}
+
 async function rlLogin() {
   const jar = {};
 
@@ -1494,9 +1501,11 @@ async function rlLogin() {
   cookieJar(g, jar);
   const html = await g.text();
 
-  /* אם יבוא יום והם יוסיפו טוקן — נשלח אותו. אם אין, לא ממציאים. */
-  const m = html.match(/name=["']csrftoken["'][^>]*value=["']([^"']*)["']/i);
-  const csrf = m ? m[1] : "";
+  /* 2026-09-09: הטוקן לא יושב בתוך הטופס אלא בתגית meta בראש הדף:
+     <meta name="csrftoken" content="..."/>. חיפוש אחריו כשדה טופס
+     החזיר ריק, הכניסה נדחתה בשקט, וכל הבקשות שאחריה קיבלו 401.
+     הועתק מבקשת התחברות אמיתית של הדפדפן. */
+  const csrf = metaToken(html);
 
   const form = new URLSearchParams();
   form.set("r", "");
@@ -1540,9 +1549,8 @@ async function rlLogin() {
    ה-csrftoken כן קיים — הוא פשוט לא בטופס הכניסה אלא בעוגייה, ולכן
    החיפוש אחריו ב-HTML לא מצא אותו. */
 function rlCsrf(jar, html) {
-  if (jar && jar.csrftoken) return jar.csrftoken;
-  const m = String(html || "").match(/csrftoken["']?\s*[:=]\s*["']([A-Za-z0-9_\-]{16,})["']/);
-  return m ? m[1] : "";
+  /* הטוקן של הדף הפנימי גובר: הוא זה שתקף לבקשות שאחרי ההתחברות. */
+  return metaToken(html) || (jar && jar.csrftoken) || "";
 }
 
 async function rlList(session, term) {
