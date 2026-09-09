@@ -1447,7 +1447,13 @@ async function doShufLookup(body) {
       name: rows[0].name,
       maker: rows[0].maker,
       updatedAt: rows[0].updated_at,
-      prices: rows.map((r) => ({ store: r.store, price: Number(r.price), unitPrice: Number(r.unit_price) })),
+      prices: rows.map((r) => ({
+        store: r.store,
+        label: storeLabel(r.store),
+        price: Number(r.price),
+        unitPrice: Number(r.unit_price),
+        updatedAt: r.updated_at,
+      })),
     },
   };
 }
@@ -1651,6 +1657,100 @@ async function doRamiProbe(body) {
   };
 }
 
+/* ---------------- סנכרון רמי לוי ---------------- */
+/* 2026-09-09: הפורמט זהה לשופרסל, ולכן parseItems ו-buildName משמשים
+   כאן בלי שינוי. שני הבדלים בלבד: ההורדה דורשת את עוגיית הסשן,
+   והקובץ כבד יותר (כמגה לעומת 426KB).
+   מזהה החנות במאגר הוא "RL032" ולא "032", כדי שלא יתנגש במספור
+   של שופרסל שכבר יושב שם כ-"121". */
+
+const RL_STORE_PREFIX = "RL";
+
+const STORE_LABELS = {
+  "121":   "יוניברס נהריה",
+  "RL032": "רמי לוי נהריה",
+};
+
+function storeLabel(code) {
+  return STORE_LABELS[code] || code;
+}
+
+async function rlNewestFile(session, store) {
+  const list = await rlList(session, "PriceFull" + RL_CHAIN + "-001-" + store);
+  const rows = Array.isArray(list.aaData) ? list.aaData : [];
+  const names = rows
+    .map((r) => (Array.isArray(r) ? r[0] : (r && r.fname) || ""))
+    .filter((n) => /\.gz$/i.test(n));
+  if (!names.length) throw new Error("לא נמצא קובץ מלא לסניף " + store);
+  /* שם הקובץ מסתיים בתאריך ובשעה, ולכן מיון אלפביתי יורד נותן את החדש. */
+  names.sort();
+  return names[names.length - 1];
+}
+
+async function rlDownload(session, fname) {
+  const r = await fetch(RL_BASE + "/file/d/" + encodeURIComponent(fname), {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Cookie": cookieHeader(session.jar),
+      "Referer": RL_BASE + "/file",
+    },
+  });
+  if (!r.ok) throw new Error("הורדת הקובץ החזירה " + r.status);
+  return Buffer.from(await r.arrayBuffer());
+}
+
+async function doRamiSync(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+  const store = String(body.store || "032").replace(/\D/g, "").padStart(3, "0");
+  const key = RL_STORE_PREFIX + store;
+  const t0 = Date.now();
+
+  let fname, items;
+  try {
+    const session = await rlLogin();
+    if (!session.loggedIn) throw new Error("ההתחברות לפורטל נכשלה.");
+    fname = await rlNewestFile(session, store);
+    const buf = await rlDownload(session, fname);
+    items = parseItems(gunzipSync(buf).toString("utf8"));
+  } catch (e) {
+    return { status: 502, body: { error: "משיכת הקובץ מרמי לוי נכשלה.", detail: e.message } };
+  }
+
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const it of items) {
+    const name = buildName(it);
+    if (!name || it.price === null) continue;
+    rows.push({
+      store: key,
+      code: String(it.code).replace(/^0+/, "") || String(it.code),
+      name,
+      maker: it.maker ? String(it.maker).slice(0, 80) : null,
+      qty: it.qty, unit: it.unit,
+      price: it.price, unit_price: it.unitPrice,
+      updated_at: now,
+    });
+  }
+
+  let saved = 0;
+  try {
+    for (let i = 0; i < rows.length; i += SHUF_BATCH) {
+      await sbPost("shufersal_items", rows.slice(i, i + SHUF_BATCH), "resolution=merge-duplicates");
+      saved += Math.min(SHUF_BATCH, rows.length - i);
+    }
+  } catch (e) {
+    return { status: 502, body: { error: "השמירה נכשלה.", detail: e.message, saved } };
+  }
+
+  return {
+    status: 200,
+    body: { ok: true, ms: Date.now() - t0, store: key, fileName: fname,
+            parsed: items.length, saved, skipped: items.length - rows.length },
+  };
+}
+
 /* ---------------- handler ---------------- */
 
 export default async function handler(req, res) {
@@ -1699,6 +1799,7 @@ export default async function handler(req, res) {
       case "shufSync":   out = await doShufSync(body);   break;
       case "shufLookup": out = await doShufLookup(body); break;
       case "ramiProbe":  out = await doRamiProbe(body);  break;
+      case "ramiSync":   out = await doRamiSync(body);   break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
     }
