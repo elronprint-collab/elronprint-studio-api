@@ -1162,7 +1162,10 @@ async function doShopLoad(body) {
    ולקבל קישור הורדה חתום. אם כן — הדרך פתוחה. אם לא — נדע מיד למה,
    כי הפעולה מחזירה את מה שבאמת חזר ולא פרשנות שלו. */
 
-const SHUF_LIST = "https://prices.shufersal.co.il/";
+/* 2026-09-09: הכתובת נלקחה מ-Main.js של שופרסל. הדף הראשי מתעלם
+   מהפרמטרים כי הסינון מתבצע בבקשה נפרדת לנתיב הזה, שמחזיר רק את
+   הטבלה. שני הפרמטרים הם catID ו-storeId, בדיוק כפי שהקוד שלהם שולח. */
+const SHUF_GRID = "https://prices.shufersal.co.il/FileObject/UpdateCategory";
 
 async function doShufProbe(body) {
   if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
@@ -1170,10 +1173,8 @@ async function doShufProbe(body) {
   }
 
   const store = String(body.store || "121").replace(/\D/g, "") || "121";
-  /* 2026-09-09: שמות השדות נלקחו מקוד המקור של הדף שלהם —
-     ddlStore הוא הסניף ו-ddlCategory=2 הוא PricesFull. הניחוש הקודם
-     (storeId/catID) פשוט לא קיים אצלם, ולכן הדף החזיר רשימה לא מסוננת. */
-  const url = SHUF_LIST + "?ddlCategory=2&ddlStore=" + store;
+  /* catID=2 הוא PricesFull ברשימת הקטגוריות שלהם. */
+  const url = SHUF_GRID + "?catID=2&storeId=" + store;
 
   const t0 = Date.now();
   let r, html;
