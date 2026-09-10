@@ -1753,23 +1753,61 @@ async function doRamiSync(body) {
 
 /* ---------------- מחסני השוק ---------------- */
 /* 2026-09-09: הם לא בפורטל publishedprices בכלל — הם מפרסמים ב-laibcatalog
-   עם API פתוח של JSON, בלי התחברות ובלי עוגיות. זה הופך אותם לפשוטים יותר
-   גם משופרסל וגם מרמי לוי: אין קישור חתום שפג ואין סשן לתחזק.
+   עם API פתוח של JSON, בלי התחברות ובלי עוגיות.
    הסניף שלנו הוא 268 נהריה, תת-רשת 003.
-   אומת מול הקובץ האמיתי: 7,545 מוצרים, מבנה XML זהה לשופרסל, ולכן
-   parseItems ו-buildName משמשים כאן בלי שינוי. */
+   אומת מול הקובץ האמיתי: 7,545 מוצרים, מבנה XML זהה לשופרסל.
+
+   2026-09-10: הריצה הראשונה מוורסל החזירה "fetch failed" — כשל חיבור,
+   לא שגיאת HTTP. מהדפדפן שלו אותה כתובת נפתחת, ולכן זה משהו בצד השרת
+   (תעודה, IPv6, או חסימה). Node עוטף את הסיבה האמיתית ב-cause ומסתיר
+   אותה, ולכן היא נחשפת כאן במפורש, ויש נפילה ל-http אם https נכשל.
+   בלי זה כל ניסיון תיקון היה ניחוש. */
 
 const MS_BASE  = "https://laibcatalog.co.il";
+const MS_BASE_ALT = "http://laibcatalog.co.il";
 const MS_CHAIN = "7290661400001";
 const MS_STORE_PREFIX = "MS";
 
 STORE_LABELS["MS268"] = "מחסני השוק נהריה";
 
+/* מחזיר את הסיבה האמיתית מתוך שרשרת ה-cause של Node. */
+function netReason(e) {
+  const bits = [];
+  let cur = e;
+  for (let i = 0; i < 4 && cur; i++) {
+    if (cur.message) bits.push(cur.message);
+    if (cur.code) bits.push("[" + cur.code + "]");
+    cur = cur.cause;
+  }
+  return bits.join(" <- ").slice(0, 300);
+}
+
+/* מנסה https, ואם החיבור עצמו נכשל — מנסה http. שגיאת HTTP אמיתית
+   (403, 404) לא מפעילה נפילה, כי שם החיבור דווקא הצליח. */
+async function msFetch(path) {
+  const tried = [];
+  for (const base of [MS_BASE, MS_BASE_ALT]) {
+    try {
+      const r = await fetch(base + path, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+          "Accept": "*/*",
+        },
+      });
+      return { res: r, base, tried };
+    } catch (e) {
+      tried.push(base + " => " + netReason(e));
+    }
+  }
+  const err = new Error("לא הצלחנו להתחבר ל-laibcatalog. " + tried.join(" | "));
+  err.tried = tried;
+  throw err;
+}
+
 /* 2026-09-09: אצלם הברקוד לא תמיד נשמר במלואו. הטחינה 7290001216040
    רשומה בקובץ כ-1216040. מתוך 409 קודים בני 7 ספרות, 395 הופכים לברקוד
    תקין כשמחזירים את הקידומת — לפי ספרת הביקורת של EAN-13, כלומר בדיקה
-   ולא הנחה. לכן משחזרים כאן ורק כשהבדיקה עוברת; מה שנכשל נשמר כמות שהוא.
-   בלי זה כל המוצרים האלה היו מחזירים "לא נמצא" בסריקה. */
+   ולא הנחה. לכן משחזרים כאן ורק כשהבדיקה עוברת; מה שנכשל נשמר כמות שהוא. */
 
 const MS_EAN_PAD = "7290000000000";
 
@@ -1790,17 +1828,14 @@ function msFullCode(code) {
 }
 
 async function msNewestFile(store) {
-  const r = await fetch(MS_BASE + "/webapi/api/getfiles?edi=" + MS_CHAIN, {
-    headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" },
-  });
-  if (!r.ok) throw new Error("רשימת הקבצים החזירה " + r.status);
+  const got = await msFetch("/webapi/api/getfiles?edi=" + MS_CHAIN);
+  if (!got.res.ok) throw new Error("רשימת הקבצים החזירה " + got.res.status);
 
   let list;
-  try { list = JSON.parse((await r.text()) || "[]"); }
+  try { list = JSON.parse((await got.res.text()) || "[]"); }
   catch (e) { throw new Error("הרשימה לא חזרה כ-JSON"); }
 
-  /* הפרמטר branchNumber בכתובת לא מסנן — השרת מחזיר את כל הרשת.
-     לכן מסננים כאן, גם לפי הסניף וגם לפי סוג הקובץ. */
+  /* הפרמטר branchNumber בכתובת לא מסנן — השרת מחזיר את כל הרשת. */
   const mine = (Array.isArray(list) ? list : []).filter(
     (f) => String((f && f.fileType) || "").toLowerCase() === "pricefull" &&
            String(f && f.branchNumber) === String(Number(store))
@@ -1809,7 +1844,7 @@ async function msNewestFile(store) {
 
   /* שם הקובץ מסתיים בתאריך ובשעה, ולכן מיון אלפביתי נותן את החדש בסוף. */
   mine.sort((a, b) => String(a.fileName).localeCompare(String(b.fileName)));
-  return mine[mine.length - 1].fileName;
+  return { fileName: mine[mine.length - 1].fileName, base: got.base };
 }
 
 async function doMshukSync(body) {
@@ -1820,19 +1855,26 @@ async function doMshukSync(body) {
   const key = MS_STORE_PREFIX + store;
   const t0 = Date.now();
 
-  let fname, items;
+  let fname, items, usedBase;
   try {
-    fname = await msNewestFile(store);
-    const fr = await fetch(MS_BASE + "/webapi/" + MS_CHAIN + "/" + encodeURIComponent(fname), {
-      headers: { "User-Agent": "Mozilla/5.0" },
-    });
-    if (!fr.ok) throw new Error("הורדת הקובץ החזירה " + fr.status);
-    let buf = Buffer.from(await fr.arrayBuffer());
+    const nf = await msNewestFile(store);
+    fname = nf.fileName;
+    usedBase = nf.base;
+    const got = await msFetch("/webapi/" + MS_CHAIN + "/" + encodeURIComponent(fname));
+    if (!got.res.ok) throw new Error("הורדת הקובץ החזירה " + got.res.status);
+    let buf = Buffer.from(await got.res.arrayBuffer());
     /* חתימת gzip היא 1f 8b. אם היא שם — פורסים, אחרת זה XML גולמי. */
     if (buf[0] === 0x1f && buf[1] === 0x8b) buf = gunzipSync(buf);
     items = parseItems(decodeXml(buf));
   } catch (e) {
-    return { status: 502, body: { error: "משיכת הקובץ ממחסני השוק נכשלה.", detail: e.message } };
+    return {
+      status: 502,
+      body: {
+        error: "משיכת הקובץ ממחסני השוק נכשלה.",
+        detail: e.message,
+        tried: e.tried || null,
+      },
+    };
   }
 
   const rows = [];
@@ -1867,11 +1909,10 @@ async function doMshukSync(body) {
   return {
     status: 200,
     body: { ok: true, ms: Date.now() - t0, store: key, fileName: fname,
-            parsed: items.length, saved, skipped: items.length - rows.length,
-            codesRestored: restored },
+            base: usedBase, parsed: items.length, saved,
+            skipped: items.length - rows.length, codesRestored: restored },
   };
 }
-
 /* ---------------- גילוי רשתות בפורטל ---------------- */
 /* 2026-09-09: אין רשימה רשמית מעודכנת של הרשתות ושל פרטי הגישה שלהן —
    הרשימה של המועצה לצרכנות היא מ-2015 והסיסמאות בה כבר לא תקפות.
