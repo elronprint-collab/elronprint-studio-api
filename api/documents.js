@@ -2115,7 +2115,8 @@ export default async function handler(req, res) {
       case "shufLookup": out = await doShufLookup(body); break;
       case "ramiProbe":  out = await doRamiProbe(body);  break;
       case "ramiSync":   out = await doRamiSync(body);   break;
-      case "mshukSync":  out = await doMshukSync(body);  break;
+          case "mshukUpload": out = await doMshukUpload(body); break;
+              case "mshukSync":  out = await doMshukSync(body);  break;
       case "portalScan": out = await doPortalScan(body); break;
       default:
         return res.status(400).json({ error: "פעולה לא מוכרת." });
@@ -2125,4 +2126,69 @@ export default async function handler(req, res) {
     console.error("[documents] " + action + " threw:", e.message);
     return res.status(500).json({ error: "שגיאה בשרת. נסו שוב." });
   }
+}
+
+/* 2026-09-10: הסנכרון האוטומטי של מחסני השוק מת. השרת מקבל Connect Timeout
+   מ-laibcatalog גם מווירג'יניה וגם מפרנקפורט, והדפדפן נחסם ב-CORS. הכתובת
+   שלהם היא 82.80.16.207 — קו בזק בינלאומי, כלומר שרת שיושב בישראל ולא עונה
+   לפניות מבחוץ, ולוורסל אין אזור בישראל. לכן הקובץ יורד אצלו בדפדפן, מפורק
+   שם, ומה שמגיע לכאן הוא שורות מוכנות בלבד. doMshukSync נשאר בקוד למקרה
+   שהחסימה תוסר. */
+
+async function doMshukUpload(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const store = String(body.store || "268").replace(/\D/g, "") || "268";
+  const key = MS_STORE_PREFIX + store;
+  const items = Array.isArray(body.items) ? body.items : null;
+  if (!items || !items.length) {
+    return { status: 400, body: { error: "לא התקבלו שורות." } };
+  }
+  /* הדף שולח במנות. גוף בקשה בוורסל חסום ב-4.5MB, ומנה גדולה מדי
+     נכשלת בשקט לפני שהיא מגיעה לכאן. */
+  if (items.length > 1500) {
+    return { status: 413, body: { error: "מנה גדולה מדי. שלחו עד 1500 שורות בכל פעם." } };
+  }
+
+  const t0 = Date.now();
+  const now = new Date().toISOString();
+  const rows = [];
+  let restored = 0;
+
+  for (const it of items) {
+    const name = buildName(it);
+    const price = Number(it.price);
+    if (!name || !Number.isFinite(price)) continue;
+    const full = msFullCode(it.code);
+    if (full !== String(it.code)) restored++;
+    rows.push({
+      store: key,
+      code: String(full).replace(/^0+/, "") || String(full),
+      name,
+      maker: it.maker ? String(it.maker).slice(0, 80) : null,
+      qty: it.qty, unit: it.unit,
+      price: price,
+      unit_price: Number.isFinite(Number(it.unitPrice)) ? Number(it.unitPrice) : null,
+      updated_at: now,
+    });
+  }
+
+  let saved = 0;
+  try {
+    for (let i = 0; i < rows.length; i += SHUF_BATCH) {
+      await sbPost("shufersal_items", rows.slice(i, i + SHUF_BATCH), "resolution=merge-duplicates");
+      saved += Math.min(SHUF_BATCH, rows.length - i);
+    }
+  } catch (e) {
+    return { status: 502, body: { error: "השמירה נכשלה.", detail: e.message, saved } };
+  }
+
+  return {
+    status: 200,
+    body: { ok: true, ms: Date.now() - t0, store: key,
+            received: items.length, saved, skipped: items.length - rows.length,
+            codesRestored: restored },
+  };
 }
