@@ -2113,6 +2113,7 @@ export default async function handler(req, res) {
       case "shufItem":  out = await doShufItem(body);  break;
       case "shufSync":   out = await doShufSync(body);   break;
       case "shufLookup": out = await doShufLookup(body); break;
+              case "shufSearch": out = await doShufSearch(body); break;
       case "ramiProbe":  out = await doRamiProbe(body);  break;
       case "ramiSync":   out = await doRamiSync(body);   break;
           case "mshukUpload": out = await doMshukUpload(body); break;
@@ -2190,5 +2191,87 @@ async function doMshukUpload(body) {
     body: { ok: true, ms: Date.now() - t0, store: key,
             received: items.length, saved, skipped: items.length - rows.length,
             codesRestored: restored },
+  };
+}
+
+/* ---------------- חיפוש לפי שם במאגר ---------------- */
+/* 2026-09-11: עד כה אפשר היה לחפש רק לפי ברקוד, כלומר רק מול מוצר
+   שהוא מחזיק בידיים. חיפוש בשם פותח את המאגר גם מהבית — "טחינה"
+   מחזיר את כל מה שיש בשלוש הרשתות עם המחירים.
+   ILIKE ולא to_tsvector: עברית עובדת בוודאות, ובנפח הזה אין הבדל.
+   התוצאות מקובצות לפי code, כי אותו מוצר מופיע פעם אחת לכל חנות. */
+
+async function doShufSearch(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const q = String(body.q == null ? "" : body.q).trim();
+  if (q.length < 2) {
+    return { status: 400, body: { error: "צריך לפחות שתי אותיות." } };
+  }
+  /* פסיק, נקודתיים, כוכבית וסוגריים שוברים את תחביר הפילטרים של PostgREST. */
+  const safe = q.replace(/[,():*%]/g, " ").trim();
+  if (!safe) return { status: 400, body: { error: "חיפוש לא תקין." } };
+
+  /* תקרה גבוהה בכוונה: מילה נפוצה כמו "חלב" מחזירה מאות שורות,
+     ורק אחרי הקיבוץ מתברר כמה מוצרים באמת יש. */
+  let rows = [];
+  try {
+    rows = await sbGet(
+      "shufersal_items?name=ilike." + enc("%" + safe + "%") +
+      "&select=store,code,name,maker,price,unit_price,updated_at" +
+      "&order=name.asc&limit=600"
+    );
+  } catch (e) {
+    return { status: 502, body: { error: "החיפוש נכשל.", detail: e.message } };
+  }
+
+  if (!rows.length) return { status: 200, body: { ok: true, found: false, products: [] } };
+
+  /* קיבוץ לפי ברקוד: מוצר אחד, כמה מחירים. */
+  const byCode = new Map();
+  for (const r of rows) {
+    let p = byCode.get(r.code);
+    if (!p) {
+      p = { code: r.code, name: r.name, maker: r.maker, prices: [] };
+      byCode.set(r.code, p);
+    }
+    /* השם עשוי להשתנות מעט בין רשתות. לוקחים את הארוך ביותר —
+       הוא בדרך כלל זה שכולל את הגודל. */
+    if (r.name && r.name.length > String(p.name || "").length) p.name = r.name;
+    p.prices.push({
+      store: r.store,
+      label: storeLabel(r.store),
+      price: Number(r.price),
+      unitPrice: Number(r.unit_price),
+      updatedAt: r.updated_at,
+    });
+  }
+
+  const products = Array.from(byCode.values()).map((p) => {
+    p.prices.sort((a, b) => a.price - b.price);
+    p.min = p.prices[0] ? p.prices[0].price : null;
+    p.max = p.prices.length ? p.prices[p.prices.length - 1].price : null;
+    p.gap = (p.min !== null && p.max !== null) ? Math.round((p.max - p.min) * 100) / 100 : 0;
+    return p;
+  });
+
+  /* קודם מה שיש בכמה חנויות (שם ההשוואה שווה משהו), ובתוך זה לפי הפרש. */
+  products.sort((a, b) => {
+    if (b.prices.length !== a.prices.length) return b.prices.length - a.prices.length;
+    return b.gap - a.gap;
+  });
+
+  const limit = Math.min(Math.max(Number(body.limit) || 25, 1), 60);
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      found: true,
+      total: products.length,
+      truncated: products.length > limit || rows.length === 600,
+      products: products.slice(0, limit),
+    },
   };
 }
