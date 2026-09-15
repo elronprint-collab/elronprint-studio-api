@@ -1,4 +1,13 @@
-// api/reimagine.js — "עיצוב מחדש" v84
+// api/reimagine.js — "עיצוב מחדש" v85
+// v85 change: THE DISC BEHIND THE BATCH DESIGNS — two causes, both mine.
+// 1. The gallery's horse (#022) and panther (#021) came back on a big disc and looksLikeDisc() let
+//    them through. Measured on the real designs: circle=0.284 and 0.198 against a 0.30 limit. The
+//    disc was there; transparent pockets inside it (white stripes, highlights, cut away with the
+//    background) stopped the inscribed circle early. Enclosed pockets are now filled before measuring
+//    — horse 0.494, panther 0.471, both caught; the black cat (#008, no disc) still passes clean.
+// 2. flux/dev takes no negative prompt, so the ban never arrived — and the positive prompt itself
+//    named "badge, rounded blob, circle or oval behind the subject". Reworded positively.
+// Nothing else touched: thresholds, retry budget, presets, the edit-model path and the page are as v84.
 // v84 change: A WORD DRAWN TWICE IS ERASED, NOT ARGUED WITH.
 // v83 worked exactly as designed and the log proves every step: the transcription reported
 // "RISE KEEP KEEP GOING 9" — it did NOT quietly correct what it saw, which was the risk I flagged —
@@ -2516,6 +2525,31 @@ async function looksLikeDisc(buf) {
   }
   if (!best) return null;
 
+  /* v85: fill the component's enclosed holes before measuring. A white stripe, a white belly or a
+     highlight inside the disc is cut away with the background and leaves transparent pockets in the
+     middle of the shape; the inscribed circle then stops at the nearest pocket and a real disc measures
+     far too small. The gallery's horse (circle=0.284 against a 0.30 limit) and panther (0.198) both
+     slipped through that way. Only pockets that cannot reach the canvas edge are filled, so the
+     outline of the shape is never changed. */
+  {
+    const outside = new Uint8Array(n);
+    let sp = 0;
+    const push = (q) => { if (!outside[q] && label[q] !== best.id) { outside[q] = 1; stack[sp++] = q; } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (sp > 0) {
+      const q = stack[--sp];
+      const x = q % w, y = (q / w) | 0;
+      if (x > 0)     push(q - 1);
+      if (x < w - 1) push(q + 1);
+      if (y > 0)     push(q - w);
+      if (y < h - 1) push(q + w);
+    }
+    for (let p = 0; p < n; p++) {
+      if (!outside[p] && label[p] !== best.id) { label[p] = best.id; best.count++; }
+    }
+  }
+
   /* Chamfer 3-4 distance transform over that component. Neighbours outside the canvas are simply
      skipped rather than counted as background, so a disc running off the edge still measures as the
      circle it is instead of being cut in half by the frame. */
@@ -3098,10 +3132,15 @@ function specToPrompt(spec) {
     ", original t-shirt print artwork, one self-contained design, " +
     "isolated on a pure flat white #FFFFFF background with wide empty margins on all four sides, " +
     "nothing touching any edge, no mockup, no shirt, no person, no photo frame, no border" +
-    // v19-v21: a coloured backdrop SHAPE is not a frame or a border, so those words never blocked
-    // it — and birefnet then keeps the shape as the salient object instead of the artwork.
-    ", the artwork floats freely on empty white, no coloured backdrop shape behind it, " +
-    "no panel, no badge, no sticker shape, no rounded blob, no circle or oval behind the subject, " +
+    // v85: fal-ai/flux/dev has NO negative_prompt in its input schema (fal's own API page lists
+    // prompt, image_size, steps, seed, guidance, safety, format, acceleration — nothing else), and
+    // fal's FLUX guide says negatives are not supported and positive phrasing should be used instead.
+    // So every "no circle" ever put in negativeFor() was silently dropped, and the only place the
+    // shapes were named at all was HERE, in the positive prompt: "badge, sticker shape, rounded
+    // blob, circle or oval behind the subject". Naming them put them in the picture. Described now
+    // only by what IS behind the subject: nothing but the white page.
+    ", the subject stands directly on the plain white page, surrounded only by open empty white " +
+    "space, the bare white page is the only thing behind it, " +
     // v24: white IS the background and gets cut away, which turns white areas into holes.
     // v42, restored: cream and pale grey ARE near-white and get cut away too. The substitute has
     // to be a MID-TONE or DEEP shade, which is what v24 said before v40 softened it.
