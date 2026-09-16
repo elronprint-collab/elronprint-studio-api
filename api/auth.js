@@ -288,7 +288,8 @@ async function designBalance(studentId, credits) {
    והוא גם מבריח לקוח שהיה יכול לחזור ולקנות אחר כך. הוחלט 2026-08-31. */
 const FREE_TOOLS = [
   "image-editor", "text-art", "collage", "qr-generator",
-  "video-tool", "greeting-tool", "transparent-tool"
+  "video-tool", "greeting-tool", "transparent-tool",
+  "black-white-design"
 ];
 
 async function doConsume(body) {
