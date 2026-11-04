@@ -11,6 +11,7 @@
 //   POST {action:"balance", token}        -> {loggedIn, email, freeLeft, credits}
 //   POST {action:"consume", token, tool}  -> מחייב שימוש אחד בכלי (חינם/קרדיט/בעלים)
 //   POST {action:"grant", secret, email, credits, reference} -> מוסיף קרדיטים לכלי העיצוב
+//   POST {action:"buslaneStatus", token} / {action:"buslaneData", token} -> מנוי נת"צ
 //   POST {action:"adminList",    token}                -> רשימת נרשמים (בעלים בלבד)
 //   POST {action:"adminCredits", token, email, amount} -> שינוי קרדיטים (בעלים בלבד)
 //
@@ -22,6 +23,7 @@
 // fetch רגיל מול Supabase REST, בלי חבילות npm חדשות.
 
 import crypto from "crypto";
+import { BUSLANE_JSON } from "./_buslane-data.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -267,6 +269,26 @@ function isOwnerEmail(email) {
     .map(function (x) { return x.trim().toLowerCase(); })
     .filter(Boolean);
   return !!email && list.indexOf(String(email).trim().toLowerCase()) !== -1;
+}
+
+/* ---------- מנוי נת"צ (10 ₪ לחודש) ----------
+   buslane_until בטבלת students = עד מתי המנוי בתוקף. ריק = עוד לא נכנס אף פעם:
+   בבדיקה הראשונה מתחיל ניסיון חינם. בעלים תמיד פעיל. הנתונים עצמם
+   (buslaneData) לא יוצאים מהשרת למי שאין לו מנוי בתוקף. */
+const BUSLANE_TRIAL_DAYS = 7;
+
+async function buslaneState(s) {
+  if (isOwnerEmail(s.email)) return { active: true, owner: true, until: null };
+  const rows = await sbGet("students?id=eq." + enc(s.studentId) + "&select=buslane_until&limit=1");
+  let until = rows[0] && rows[0].buslane_until;
+  let trial = false;
+  if (!until) {
+    until = new Date(Date.now() + BUSLANE_TRIAL_DAYS * 86400000).toISOString();
+    await sbPatch("students?id=eq." + enc(s.studentId), { buslane_until: until });
+    trial = true;
+  }
+  const active = new Date(until).getTime() > Date.now();
+  return { active: active, owner: false, until: until, trial: trial };
 }
 
 async function designBalance(studentId, credits) {
@@ -764,6 +786,22 @@ export default async function handler(req, res) {
       }
       const bal = await designBalance(s.studentId, rows[0] && rows[0].design_credits);
       return res.status(200).json(Object.assign({ loggedIn: true, email: s.email }, bal));
+    }
+
+    if (action === "buslaneStatus") {
+      const s = await studentByToken(body.token);
+      if (!s) return res.status(200).json({ loggedIn: false });
+      const st = await buslaneState(s);
+      return res.status(200).json({ loggedIn: true, email: s.email, active: st.active, owner: st.owner, until: st.until, trial: !!st.trial });
+    }
+
+    if (action === "buslaneData") {
+      const s = await studentByToken(body.token);
+      if (!s) return res.status(401).json({ error: "יש להתחבר." });
+      const st = await buslaneState(s);
+      if (!st.active) return res.status(402).json({ error: "המנוי הסתיים.", until: st.until });
+      res.setHeader("Cache-Control", "no-store");
+      return res.status(200).json({ until: st.until, data: JSON.parse(BUSLANE_JSON) });
     }
 
     if (action === "consume") {
