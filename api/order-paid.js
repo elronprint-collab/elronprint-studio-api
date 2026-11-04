@@ -34,14 +34,17 @@ const SKU_CREDITS = {
   "DESIGN-50": { kind: "design", credits: 50 },
   /* 2026-09-01: ארנק נפרד לכלי המסמכים. סריקת קבלה עולה סנטים בודדים
      ולכן היא מתומחרת אחרת מעיצוב — ואסור ששתיהן יגרעו מאותו ארנק. */
-  "DOCS-100": { kind: "document", credits: 100 }
+  "DOCS-100": { kind: "document", credits: 100 },
+  /* 2026-11-03: מנוי נת"צ — credits כאן = ימים. מתווסף לתאריך הסיום, לא לספירת קרדיטים. */
+  "BUSLANE-30": { kind: "buslane", credits: 30 }
 };
 
 /* לאן כל סוג נכתב. שינוי כאן בלי שינוי במסד ישבור זיכויים. */
 const KINDS = {
   avatar:   { column: "avatar_credits",   table: "avatar_grants",   label: "avatar" },
   design:   { column: "design_credits",   table: "design_grants",   label: "design" },
-  document: { column: "document_credits", table: "document_grants", label: "document" }
+  document: { column: "document_credits", table: "document_grants", label: "document" },
+  buslane:  { column: "buslane_until",    table: "buslane_grants",  label: "buslane" }
 };
 
 /* ---------- Supabase ---------- */
@@ -179,7 +182,7 @@ export default async function handler(req, res) {
     /* הלקוח נטען פעם אחת, עם שתי העמודות, כדי לא לפנות למסד לכל סוג בנפרד. */
     let found = await sbGet(
       "students?email=eq." + enc(email) +
-      "&select=id,avatar_credits,design_credits,document_credits&limit=1"
+      "&select=id,avatar_credits,design_credits,document_credits,buslane_until&limit=1"
     );
     let student = found[0];
     if (!student) {
@@ -204,7 +207,14 @@ export default async function handler(req, res) {
         continue;
       }
 
-      const next = (student[spec.column] || 0) + amount;
+      let next;
+      if (kind === "buslane") {
+        /* ימים, לא קרדיטים: מוסיפים 30 יום מהמאוחר מבין עכשיו לבין סוף המנוי הנוכחי */
+        const cur = student[spec.column] ? new Date(student[spec.column]).getTime() : 0;
+        next = new Date(Math.max(Date.now(), cur) + amount * 86400000).toISOString();
+      } else {
+        next = (student[spec.column] || 0) + amount;
+      }
       const patch = {};
       patch[spec.column] = next;
       await sbPatch("students?id=eq." + enc(student.id), patch);
