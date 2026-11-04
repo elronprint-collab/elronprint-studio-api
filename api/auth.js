@@ -591,6 +591,7 @@ async function doAdminList(body) {
       id: st.id,
       email: st.email || "",
       credits: st.design_credits || 0,
+      buslaneUntil: st.buslane_until || null,
       runs: stats.total,
       paidRuns: stats.charged,
       createdAt: st.created_at || st.inserted_at || null,
