@@ -237,7 +237,7 @@ export default async function handler(req, res) {
 
   } catch (e) {
     // 500 בכוונה: שופיפיי ינסה שוב, וההגנה על כפילות למעלה תמנע זיכוי כפול.
-    console.error("[order-paid] FAILED for order", order.id, email, credits, e);
+    console.error("[order-paid] FAILED for order", order.id, email, String(e && e.message ? e.message : e));
     return res.status(500).send("retry");
   }
 }
