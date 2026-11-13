@@ -14,6 +14,8 @@
 //   POST {action:"buslaneStatus", token} / {action:"buslaneData", token} -> מנוי נת"צ
 //   POST {action:"adminList",    token}                -> רשימת נרשמים (בעלים בלבד)
 //   POST {action:"adminCredits", token, email, amount} -> שינוי קרדיטים (בעלים בלבד)
+//   POST {action:"englishChat", token, messages}       -> שיחה חופשית עם המורה באפליקציית האנגלית (בעלים בלבד)
+//   send עם app:"english" שולח קוד רק למייל בעלים — האפליקציה סגורה לכל השאר בינתיים.
 //
 // balance/grant משרתים את כלי "עיצוב מחדש", שחולק את אותן טבלאות students/sessions —
 // מי שנרשם לאקדמיה מזוהה גם בכלי, ולהפך. grant מוגן בסוד נפרד (DESIGN_GRANT_SECRET)
@@ -739,6 +741,86 @@ async function doAdminDelete(body) {
   return { status: 200, body: { deleted: true, email: st.email || "", label: label } };
 }
 
+/* ---------- אפליקציית האנגלית: שיחה חופשית עם המורה (Groq) ----------
+   בעלים בלבד בשלב זה. ההרשאה נבדקת בשרת: הטוקן -> חשבון -> המייל מול OWNER_EMAILS.
+   המפתח GROQ_API_KEY נשאר בשרת ולא מגיע לדפדפן. */
+const ENGLISH_MODELS = [process.env.GROQ_MODEL || "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+const ENGLISH_SYSTEM =
+  "You are Emma, a warm, patient English teacher talking by voice with a Hebrew speaker who is learning English. " +
+  "Reply ONLY in simple, natural spoken English, one or two short sentences, then ask one short follow-up question to keep the conversation going. " +
+  "If the learner makes a mistake, first say the correct sentence briefly (for example: You can say: ...), then continue. " +
+  "Match the learner's level: use easy words when their English is basic. " +
+  "Plain text only: no lists, no markdown, no emojis, no Hebrew. Keep every topic friendly and suitable for all ages.";
+
+function englishMessages(raw) {
+  const out = [];
+  const list = Array.isArray(raw) ? raw.slice(-16) : [];
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i] || {};
+    const role = m.role === "assistant" ? "assistant" : (m.role === "user" ? "user" : "");
+    const content = String(m.content == null ? "" : m.content).trim().slice(0, 400);
+    if (role && content) out.push({ role: role, content: content });
+  }
+  return out;
+}
+
+async function groqOnce(model, messages, withEffort) {
+  const payload = {
+    model: model,
+    messages: [{ role: "system", content: ENGLISH_SYSTEM }].concat(messages),
+    temperature: 0.7,
+    max_completion_tokens: 600
+  };
+  if (withEffort) payload.reasoning_effort = "low";
+  const ctrl = new AbortController();
+  const timer = setTimeout(function () { ctrl.abort(); }, 20000);
+  try {
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + process.env.GROQ_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: ctrl.signal
+    });
+    const t = await r.text();
+    let j = null;
+    try { j = JSON.parse(t); } catch (e) {}
+    const msg = j && j.choices && j.choices[0] && j.choices[0].message;
+    const reply = String((msg && msg.content) || "").trim();
+    return { ok: r.ok && !!reply, status: r.status, reply: reply, raw: t.slice(0, 300) };
+  } catch (e) {
+    return { ok: false, status: 0, reply: "", raw: String(e && e.message || e).slice(0, 300) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function doEnglishChat(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 401, body: { error: "יש להתחבר.", needLogin: true } };
+  if (!isOwnerEmail(s.email)) {
+    return { status: 403, body: { error: "השיחה החופשית עדיין לא פתוחה." } };
+  }
+  if (!process.env.GROQ_API_KEY) {
+    return { status: 500, body: { error: "חסר מפתח GROQ_API_KEY בשרת." } };
+  }
+  const messages = englishMessages(body.messages);
+  if (!messages.length || messages[messages.length - 1].role !== "user") {
+    return { status: 400, body: { error: "לא התקבלה הודעה." } };
+  }
+  let last = null;
+  for (let i = 0; i < ENGLISH_MODELS.length; i++) {
+    last = await groqOnce(ENGLISH_MODELS[i], messages, true);
+    if (!last.ok && last.status === 400) last = await groqOnce(ENGLISH_MODELS[i], messages, false);
+    if (last.ok) return { status: 200, body: { reply: last.reply.slice(0, 600) } };
+    console.error("[auth] englishChat " + ENGLISH_MODELS[i] + " -> " + last.status + " " + last.raw);
+    if (last.status === 429) break;
+  }
+  if (last && last.status === 429) {
+    return { status: 429, body: { error: "הגענו למגבלת השימוש כרגע. נסו שוב בעוד דקה." } };
+  }
+  return { status: 502, body: { error: "המורה לא זמינה כרגע. נסו שוב.", code: last ? last.status : 0 } };
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
@@ -764,6 +846,9 @@ export default async function handler(req, res) {
     }
 
     if (action === "send") {
+      if (String(body.app || "") === "english" && !isOwnerEmail(email)) {
+        return res.status(403).json({ error: "השיחה החופשית עדיין לא פתוחה להרשמה." });
+      }
       const out = await doSend(email);
       return res.status(out.status).json(out.body);
     }
@@ -838,6 +923,11 @@ export default async function handler(req, res) {
 
     if (action === "avatarGrant") {
       const out = await doAvatarGrant(body);
+      return res.status(out.status).json(out.body);
+    }
+
+    if (action === "englishChat") {
+      const out = await doEnglishChat(body);
       return res.status(out.status).json(out.body);
     }
 
