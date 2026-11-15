@@ -1138,9 +1138,11 @@ Rules:
    קורא תמונות ויש לו מסלול חינמי. המפתח GEMINI_API_KEY כבר מוגדר בוורסל.
    אם המודל הראשון לא זמין, עוברים לשני. */
 const GEMINI_VISION_MODELS = [
-  process.env.GEMINI_VISION_MODEL || "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
+  process.env.GEMINI_VISION_MODEL || "gemini-3.8-flash",
+  "gemini-3.5-flash-lite",
 ];
+/* 2026-11-15: gemini-2.5-flash ו-flash-lite החזירו 404 "no longer available
+   to new users", וההודעה עצמה הפנתה לשני השמות האלה. */
 
 async function askGeminiVision({ system, ask, image, mediaType, maxTokens }) {
   if (!process.env.GEMINI_API_KEY) {
@@ -1165,9 +1167,6 @@ async function askGeminiVision({ system, ask, image, mediaType, maxTokens }) {
               temperature: 0,
               maxOutputTokens: maxTokens || 2000,
               responseMimeType: "application/json",
-              /* בלי "חשיבה" — היא אוכלת מאותה מכסת טוקנים ומאטה, וכאן
-                 צריך רק להעתיק טבלה. */
-              thinkingConfig: { thinkingBudget: 0 },
             },
           }),
         }
