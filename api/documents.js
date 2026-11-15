@@ -140,7 +140,18 @@ function readFalText(d) {
   return null;
 }
 
-async function askVision({ system, ask, image, mediaType, maxTokens }) {
+/* 2026-11-15: כל קריאות התמונה בקובץ (קבלות, שם מוצר, תאריך תפוגה, תעודת
+   משלוח) עוברות קודם ל-Gemini, בחינם. fal נשאר רק כגיבוי — אם Gemini נכשל
+   ויש יתרה ב-fal, הוא יענה. תקרת הטוקנים מורמת ל-2048 לפחות, כי במודלים
+   החדשים ה"חשיבה" נספרת מאותה תקרה ותשובה של 200 טוקנים הייתה נחתכת. */
+async function askVision(opts) {
+  const viaGemini = await askGeminiVision({ ...opts, maxTokens: Math.max(opts.maxTokens || 0, 2048) });
+  if (viaGemini) return viaGemini;
+  console.warn("[documents] gemini gave nothing, falling back to fal");
+  return askFalVision(opts);
+}
+
+async function askFalVision({ system, ask, image, mediaType, maxTokens }) {
   const endpoint = "fal-ai/any-llm/vision";
   const list = FAL_MODEL_PIN ? [FAL_MODEL_PIN]
     : _falVisionModel ? [_falVisionModel]
