@@ -1138,9 +1138,13 @@ Rules:
    קורא תמונות ויש לו מסלול חינמי. המפתח GEMINI_API_KEY כבר מוגדר בוורסל.
    אם המודל הראשון לא זמין, עוברים לשני. */
 const GEMINI_VISION_MODELS = [
-  process.env.GEMINI_VISION_MODEL || "gemini-3.8-flash",
-  "gemini-3.5-flash-lite",
+  process.env.GEMINI_VISION_MODEL || "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
 ];
+/* 2026-11-15: gemini-3.8-flash עבר את מגבלת 60 השניות של וורסל (504) —
+   הוא "חושב" לפני שהוא עונה. לכן: flash-lite קודם, חשיבה ברמה נמוכה,
+   ותקרת זמן לכל ניסיון כדי שהבקשה תסתיים לפני שוורסל חותך. */
+const GEMINI_DEADLINE_MS = 52000;
 /* 2026-11-15: gemini-2.5-flash ו-flash-lite החזירו 404 "no longer available
    to new users", וההודעה עצמה הפנתה לשני השמות האלה. */
 
@@ -1149,8 +1153,14 @@ async function askGeminiVision({ system, ask, image, mediaType, maxTokens }) {
     console.error("[documents] GEMINI_API_KEY missing");
     return null;
   }
+  const started = Date.now();
   for (const model of GEMINI_VISION_MODELS) {
-    let r;
+    const left = GEMINI_DEADLINE_MS - (Date.now() - started);
+    if (left < 8000) { console.error("[documents] gemini: no time left for", model); return null; }
+    let r, raw, withThinking = true;
+    for (let attempt = 0; attempt < 2; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), GEMINI_DEADLINE_MS - (Date.now() - started));
     try {
       r = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -1167,15 +1177,28 @@ async function askGeminiVision({ system, ask, image, mediaType, maxTokens }) {
               temperature: 0,
               maxOutputTokens: maxTokens || 2000,
               responseMimeType: "application/json",
+              ...(withThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}),
             },
           }),
+          signal: ctrl.signal,
         }
       );
+      raw = await r.text();
     } catch (e) {
-      console.error("[documents] gemini fetch threw:", e.message);
+      clearTimeout(timer);
+      console.error("[documents] gemini fetch failed on", model + ":", e.name === "AbortError" ? "timeout" : e.message);
+      if (e.name === "AbortError") return null;
       return null;
     }
-    const raw = await r.text();
+    clearTimeout(timer);
+    /* מודל שלא מכיר את הגדרת החשיבה — מנסים שוב בלעדיה. */
+    if (r.status === 400 && withThinking && /thinking/i.test(raw)) {
+      console.warn("[documents] gemini: retrying", model, "without thinkingConfig");
+      withThinking = false;
+      continue;
+    }
+    break;
+    }
     if (!r.ok) {
       console.error(`[documents] gemini vision failed on "${model}":`, r.status, raw.slice(0, 400));
       /* מודל שלא קיים, או מכסה שנגמרה למודל הזה — מנסים את הבא. */
@@ -1186,7 +1209,10 @@ async function askGeminiVision({ system, ask, image, mediaType, maxTokens }) {
     try { d = JSON.parse(raw); } catch (_) {}
     const parts = d?.candidates?.[0]?.content?.parts || [];
     const t = parts.map((p) => (typeof p?.text === "string" ? p.text : "")).join("").trim();
-    if (t) return t;
+    if (t) {
+      console.log(`[documents] gemini vision ok on "${model}" in ${Date.now() - started}ms`);
+      return t;
+    }
     console.error("[documents] gemini vision: empty answer from", model, raw.slice(0, 300));
     return null;
   }
