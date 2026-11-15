@@ -1,6 +1,6 @@
 import { checkRateLimit } from "./_ratelimit.js";
 import { gate, settle } from "./_account.js";
-import { makePrintFile } from "./_print.js";
+import { makePrintFile, uploadCloudinary } from "./_print.js";
 // api/generate.js — שלב 1: יצירת העיצוב (FLUX.1 dev)
 //
 // v2 — תיקון התרגום מעברית.
@@ -42,6 +42,86 @@ function cors(req, res) {
 
 function hasHebrew(text) {
   return /[\u0590-\u05FF]/.test(text);
+}
+
+/* 2026-11-15: מעבר לחינם. התרגום עובר קודם ל-Gemini (GEMINI_API_KEY, מסלול
+   חינמי), והתמונה נוצרת ב-Cloudflare Workers AI (flux-1-schnell, מכסה יומית
+   חינמית, CF_API_TOKEN). fal נשאר כגיבוי בלבד: אם השירות החינמי נכשל ויש
+   יתרה ב-fal, הוא יענה כמו קודם. */
+const TRANSLATE_SYSTEM =
+  "You convert a Hebrew description of a t-shirt graphic into a short English image-generation prompt. " +
+  "Output ONLY the English prompt - no quotes, no explanation, no preamble. " +
+  "Keep it under 40 words. Preserve every concrete subject, object, colour and style the user named. " +
+  "Do not invent a different subject. Do not add text or lettering to the image.";
+
+async function translateWithGemini(text) {
+  if (!process.env.GEMINI_API_KEY) throw new Error("no GEMINI_API_KEY");
+  const models = [process.env.GEMINI_TEXT_MODEL || "gemini-3.5-flash-lite", "gemini-3.8-flash"];
+  let last = "no model";
+  for (const model of models) {
+    const r = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: TRANSLATE_SYSTEM }] },
+          contents: [{ role: "user", parts: [{ text }] }],
+          generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+        }),
+      }
+    );
+    const raw = await r.text();
+    if (!r.ok) { last = `gemini ${model} ${r.status} ${raw.slice(0, 200)}`; continue; }
+    let d = null;
+    try { d = JSON.parse(raw); } catch (_) {}
+    const out = (d?.candidates?.[0]?.content?.parts || [])
+      .map((p) => (typeof p?.text === "string" ? p.text : "")).join("").trim().replace(/^["']|["']$/g, "");
+    if (out && !hasHebrew(out)) return out;
+    last = `gemini ${model} returned no usable english`;
+  }
+  throw new Error(last);
+}
+
+const CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID || "5633e768dfc1afc72319ed31d87b6e7c";
+const CF_IMAGE_MODEL = process.env.CF_IMAGE_MODEL || "@cf/black-forest-labs/flux-1-schnell";
+
+/* מחזיר כתובת של התמונה בקלאודינרי, או null אם Cloudflare לא ענה
+   (אין מפתח, המכסה היומית נגמרה, תקלה) — ואז הקורא עובר ל-fal. */
+async function generateWithCloudflare(fullPrompt) {
+  if (!process.env.CF_API_TOKEN) { console.error("[generate] CF_API_TOKEN missing"); return null; }
+  let r, raw;
+  try {
+    r = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/ai/run/${CF_IMAGE_MODEL}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.CF_API_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: fullPrompt.slice(0, 2000), steps: 8 }),
+      }
+    );
+    raw = await r.text();
+  } catch (e) {
+    console.error("[generate] cloudflare fetch threw:", e.message);
+    return null;
+  }
+  if (!r.ok) {
+    console.error("[generate] cloudflare failed:", r.status, raw.slice(0, 300));
+    return null;
+  }
+  let d = null;
+  try { d = JSON.parse(raw); } catch (_) {}
+  const b64 = d?.result?.image;
+  if (typeof b64 !== "string" || b64.length < 1000) {
+    console.error("[generate] cloudflare returned no image:", raw.slice(0, 300));
+    return null;
+  }
+  try {
+    return await uploadCloudinary(Buffer.from(b64, "base64"), "generated.jpg");
+  } catch (e) {
+    console.error("[generate] cloudinary upload failed:", e.message);
+    return null;
+  }
 }
 
 // ניסיון 1 — LLM דרך fal. אמין משרת, ומחזיר תיאור ויזואלי ולא תרגום מילולי.
@@ -98,6 +178,12 @@ async function translateWithGoogle(text) {
 
 async function toEnglishPrompt(text) {
   if (!hasHebrew(text)) return { prompt: text, via: "none" };
+
+  try {
+    return { prompt: await translateWithGemini(text), via: "gemini" };
+  } catch (e) {
+    console.error("translate via gemini failed:", e.message);
+  }
 
   try {
     return { prompt: await translateWithLLM(text), via: "llm" };
@@ -157,7 +243,13 @@ export default async function handler(req, res) {
 
 
 
+  const STYLE = "rich modern cartoon illustration, soft shading with highlights and dynamic lighting, bold clean linework, vibrant colors, high detail, isolated subject, t-shirt print artwork";
+
   try {
+    let imageUrl = await generateWithCloudflare(`${englishPrompt}, ${STYLE}, plain white background`);
+    const engine = imageUrl ? "cloudflare" : "fal";
+
+    if (!imageUrl) {
     const r = await fetch("https://fal.run/fal-ai/flux/dev", {
       method: "POST",
       headers: {
@@ -165,7 +257,7 @@ export default async function handler(req, res) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        prompt: `${englishPrompt}, rich modern cartoon illustration, soft shading with highlights and dynamic lighting, bold clean linework, vibrant colors, high detail, isolated subject, t-shirt print artwork`,
+        prompt: `${englishPrompt}, ${STYLE}`,
         image_size: { width: 1152, height: 1536 },
         num_inference_steps: 28,
         guidance_scale: 3.5,
@@ -181,8 +273,9 @@ export default async function handler(req, res) {
     }
 
     const data = await r.json();
-    const imageUrl = data?.images?.[0]?.url;
+    imageUrl = data?.images?.[0]?.url;
     if (!imageUrl) return res.status(502).json({ error: "No image returned" });
+    }
 
     /* קובץ הדפסה 4500x5400 — נוצר רק אם הלקוח ביקש print:true.
        כישלון כאן לא מפיל את התשובה: הלקוח עדיין מקבל את התמונה השקופה. */
@@ -195,7 +288,7 @@ export default async function handler(req, res) {
     const left = chargeable ? await settle(acct.student, acct.quota, acct.owner)
       : { freeLeft: acct.quota.freeLeft, credits: acct.quota.credits };
     return res.status(200).json({
-      imageUrl, printUrl, promptUsed: englishPrompt, translatedVia: via,
+      imageUrl, printUrl, promptUsed: englishPrompt, translatedVia: via, engine,
       freeLeft: left.freeLeft, credits: left.credits, owner: !!acct.owner,
     });
   } catch (err) {
