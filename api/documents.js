@@ -1132,6 +1132,61 @@ Rules:
 - "supplier" is the supplying company name if printed, "number" the delivery note number (מס' תעודה). Use "" when not visible.
 - Numbers are numbers, not strings. Never invent a row or a value: a missing or unreadable value is null (or "" for text).`;
 
+/* 2026-11-15: תעודת משלוח נקראת דרך Groq ולא דרך fal — החלטה שלו: רק
+   בחינם. Groq נותן מודל תמונה (Llama 4 Scout) במסלול החינמי. אותו מפתח
+   GROQ_API_KEY שכבר משמש את אפליקציית האנגלית ב-auth.js. אם המודל
+   הראשון לא זמין, עוברים לשני. */
+const GROQ_VISION_MODELS = [
+  process.env.GROQ_VISION_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+];
+
+async function askGroqVision({ system, ask, image, mediaType, maxTokens }) {
+  if (!process.env.GROQ_API_KEY) {
+    console.error("[documents] GROQ_API_KEY missing");
+    return null;
+  }
+  for (const model of GROQ_VISION_MODELS) {
+    let r;
+    try {
+      r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + process.env.GROQ_API_KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          max_tokens: maxTokens || 2000,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: [
+              { type: "text", text: ask },
+              { type: "image_url", image_url: { url: `data:${mediaType};base64,${image}` } },
+            ] },
+          ],
+        }),
+      });
+    } catch (e) {
+      console.error("[documents] groq fetch threw:", e.message);
+      return null;
+    }
+    const raw = await r.text();
+    if (!r.ok) {
+      console.error(`[documents] groq vision failed on "${model}":`, r.status, raw.slice(0, 400));
+      /* מודל שלא קיים או לא זמין — מנסים את הבא. כל שגיאה אחרת (מכסה,
+         מפתח) לא תיפתר במודל אחר. */
+      if (r.status === 404 || /model_not_found|decommissioned|does not exist/i.test(raw)) continue;
+      return null;
+    }
+    let d = null;
+    try { d = JSON.parse(raw); } catch (_) {}
+    const t = d?.choices?.[0]?.message?.content;
+    if (typeof t === "string" && t.trim()) return t.trim();
+    console.error("[documents] groq vision: empty answer from", model);
+    return null;
+  }
+  return null;
+}
+
 async function doDeliveryNote(body) {
   if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
     return { status: 403, body: { error: "אין הרשאה." } };
@@ -1140,7 +1195,7 @@ async function doDeliveryNote(body) {
   const { image, mediaType } = body;
   if (!image) return { status: 400, body: { error: "לא התקבלה תמונה." } };
 
-  const text = await askVision({
+  const text = await askGroqVision({
     system: DNOTE_SYSTEM,
     ask: "Read every product row of this delivery note and answer with the JSON object only.",
     image, mediaType: mediaType || "image/jpeg",
