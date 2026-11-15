@@ -1100,6 +1100,95 @@ async function doExpiry(body) {
   };
 }
 
+/* ---------------- תעודת משלוח (מחסן) ---------------- */
+/* 2026-11-15: קריאת שורות מצילום של תעודת משלוח. נבנה על שתי תעודות
+   אמיתיות שלו מספקים שונים: העמודות שונות בכל ספק ("בודדים" מול
+   "יח' ללקוח", "אריזות" מול "קרטונים", ולפעמים גם "מגשים"), והקרטונים
+   בשברים (0.5, 0.2). לכן הכמות שנספרת היא יחידות, והברקוד הוא המפתח.
+   הסכום המודפס חוזר בנפרד כדי שהדף ישווה אותו לסכום השורות — זו
+   הבדיקה שתופסת שורה שלא נקראה או ספרה שהתבלבלה. */
+const DNOTE_SYSTEM = `You read a photograph of a printed Israeli delivery note (תעודת משלוח) from a food/grocery supplier.
+
+Return ONLY a JSON object, no markdown, no explanation:
+{
+  "supplier": "" ,
+  "number": "",
+  "lines": [
+    { "item": "", "name": "", "barcode": "", "units": 0, "cartons": 0, "trays": 0 }
+  ],
+  "total_units": null,
+  "total_cartons": null
+}
+
+Rules:
+- One entry in "lines" per product row of the table, in the printed order. Skip header rows, the totals row and anything that is not a product.
+- "item" is the supplier's own item code column (פריט / מק"ט / קוד פריט). Copy it exactly as printed.
+- "name" is the item description (תאור פריט) in Hebrew, copied as printed.
+- "barcode" is the manufacturer barcode column (ברקוד יצרן / ברקוד). Digits only, copied digit by digit. It is usually 13 digits starting with 729, but 8-digit and other lengths are valid. If you cannot read every digit with certainty, return "" — never guess a digit.
+- "units" is the number of single units for that row. Column names vary by supplier: בודדים, יח' ללקוח, יחידות, כמות. Return null if the note has no units column.
+- "cartons" is the cartons/packages column (אריזות, קרטונים, ארגזים). It may be fractional (0.5, 0.2). Return null if absent.
+- "trays" is the trays column (מגשים) when present, otherwise null.
+- "total_units" and "total_cartons" are the numbers printed in the totals row (סה"כ), or null if not printed. Do NOT compute them yourself.
+- "supplier" is the supplying company name if printed, "number" the delivery note number (מס' תעודה). Use "" when not visible.
+- Numbers are numbers, not strings. Never invent a row or a value: a missing or unreadable value is null (or "" for text).`;
+
+async function doDeliveryNote(body) {
+  if (process.env.SHOP_SECRET && body.secret !== process.env.SHOP_SECRET) {
+    return { status: 403, body: { error: "אין הרשאה." } };
+  }
+
+  const { image, mediaType } = body;
+  if (!image) return { status: 400, body: { error: "לא התקבלה תמונה." } };
+
+  const text = await askVision({
+    system: DNOTE_SYSTEM,
+    ask: "Read every product row of this delivery note and answer with the JSON object only.",
+    image, mediaType: mediaType || "image/jpeg",
+    maxTokens: 4000,
+  });
+
+  const j = parseModelJson(text);
+  if (!j || !Array.isArray(j.lines)) {
+    console.error("[documents] deliveryNote unreadable. Raw:", String(text).slice(0, 300));
+    return { status: 200, body: { found: false } };
+  }
+
+  const num = (v) => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(String(v).replace(",", "."));
+    return isFinite(n) && n >= 0 && n < 100000 ? n : null;
+  };
+  const txt = (v, max) => String(v == null ? "" : v).replace(/\s+/g, " ").trim().slice(0, max);
+
+  const lines = j.lines.slice(0, 200).map((l) => {
+    const bc = String(l && l.barcode != null ? l.barcode : "").replace(/\D/g, "");
+    return {
+      item: txt(l && l.item, 40),
+      name: txt(l && l.name, 120),
+      /* ברקוד באורך לא סביר נזרק. עדיף שורה בלי ברקוד, שהוא ישייך
+         בסריקה הראשונה, מאשר ברקוד שגוי שיתאים למוצר אחר. */
+      barcode: bc.length >= 6 && bc.length <= 14 ? bc : "",
+      units: num(l && l.units),
+      cartons: num(l && l.cartons),
+      trays: num(l && l.trays),
+    };
+  }).filter((l) => l.name || l.barcode || l.item);
+
+  if (!lines.length) return { status: 200, body: { found: false } };
+
+  return {
+    status: 200,
+    body: {
+      found: true,
+      supplier: txt(j.supplier, 80),
+      number: txt(j.number, 40),
+      lines,
+      totalUnits: num(j.total_units),
+      totalCartons: num(j.total_cartons),
+    },
+  };
+}
+
 /* ---------------- גיבוי "הקניות שלי" ---------------- */
 /* 2026-09-09: דף בדפדפן לא יכול להתעורר לבד ולא יכול לשלוח מייל, ולכן
    הגיבוי נשמר כאן בכל שינוי. אין כאן חשבון: הזיהוי הוא קוד שהלקוח בוחר,
@@ -2109,6 +2198,7 @@ export default async function handler(req, res) {
       case "email":   out = await doEmail(req, body);    break;
       case "product": out = await doProduct(body);       break;
       case "expiry":  out = await doExpiry(body);        break;
+      case "deliveryNote": out = await doDeliveryNote(body); break;
       case "shopSave": out = await doShopSave(body);     break;
       case "shopLoad": out = await doShopLoad(body);     break;
       case "shufProbe": out = await doShufProbe(body); break;
