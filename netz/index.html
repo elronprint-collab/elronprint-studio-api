@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>התראת נת"צ</title>
+</head>
+<body style="margin:0;padding:12px;background:#000">
+<div id="bla" dir="rtl">
+<style>
+#bla{max-width:520px;margin:0 auto;padding:16px;font-family:system-ui,-apple-system,sans-serif;color:#fff;background:#111;border-radius:16px;text-align:center;line-height:1.4}
+#bla h2{margin:0 0 6px;font-size:24px;color:#fff}
+#bla .sub{font-size:14px;color:#bbb;margin-bottom:10px}
+#bla .st{font-size:14px;color:#aaa;margin:6px 0}
+#bla button{width:100%;padding:18px;font-size:20px;border:0;border-radius:14px;background:#1db954;color:#fff;font-weight:700;margin-top:10px;cursor:pointer}#bla .mapboxgl-ctrl button{width:auto;padding:0;margin:0;border:0;border-radius:0;background:transparent;font-size:inherit;font-weight:inherit;color:inherit}
+#bla button.stop{background:#c0392b}
+#bla button.sm{font-size:16px;padding:12px;background:#2c3e50}
+#bla button.rec{background:#e67e22}
+#bla button.gray{font-size:14px;padding:10px;background:#444}
+#bla button:disabled{background:#444;color:#999}
+#bla .box{margin-top:14px;padding:30px 10px;border-radius:14px;background:#222;font-size:22px;font-weight:700;color:#fff}
+#bla .box.alert{background:#c0392b;animation:blap 1s infinite}
+@keyframes blap{50%{opacity:.6}}
+#bla input{width:100%;padding:14px;font-size:18px;border:1px solid #444;border-radius:12px;background:#222;color:#fff;margin-top:10px;text-align:center;box-sizing:border-box}
+#bla a.btn{display:block;padding:16px;font-size:18px;border-radius:14px;background:#0071e3;color:#fff;font-weight:700;margin-top:10px;text-decoration:none}
+#bla .lnk{background:none;border:0;color:#8ab4f8;font-size:13px;width:auto;padding:4px;margin:0;text-decoration:underline;font-weight:400}
+#bla label.agree{display:block;margin-top:12px;font-size:14px;color:#ccc;text-align:right;line-height:1.5;cursor:pointer}
+#bla label.agree input{width:auto;display:inline;margin:0 0 0 8px;vertical-align:middle}
+#bla-map{display:none;height:260px;border-radius:14px;margin-top:12px;overflow:hidden}
+#bla-map.bla-full{position:fixed;top:0;left:0;right:0;bottom:0;width:100%;height:auto;margin:0;border-radius:0;z-index:2147483000}
+#bla .mapboxgl-ctrl button.bla-fs{width:38px;height:38px;padding:0;margin:0;border:0;border-radius:8px;background:#fff;color:#111;font-size:22px;line-height:38px;font-weight:700;cursor:pointer}
+#bla .note{font-size:12px;color:#888;margin-top:14px;line-height:1.6}
+#bla .free{margin:10px 0 8px;padding:12px;border-radius:12px;background:#1db954;color:#fff;font-size:18px;font-weight:700}
+#bla .how{font-size:15px;color:#ddd;margin-bottom:10px;line-height:1.6}
+</style>
+<h2>התראת נת"צ</h2>
+<div class="sub">מתריע כשאתה נכנס לנתיב תחבורה ציבורית</div>
+<div id="bla-login" style="display:none">
+<div class="free">7 ימי ניסיון חינם · בלי כרטיס אשראי</div>
+<div class="how">פותחים את הדף לפני הנסיעה ולוחצים על התחל נסיעה. 100 מטר לפני נתיב תחבורה ציבורית תשמע התראה קולית, וגם ברגע שנכנסת אליו. כולל מפה חיה והתראה על קטעים עם אכיפת מצלמה.</div>
+<div class="st" id="bla-lmsg">התחבר עם המייל כדי להשתמש באפליקציה</div>
+<input id="bla-email" type="email" dir="ltr" placeholder="המייל שלך" autocomplete="email">
+<label class="agree"><input type="checkbox" id="bla-agree"> אני מאשר/ת שכתובת המייל שלי תישמר אצל אלרון פרינט לצורך התחברות וניהול המנוי. <a href="https://elronprint.co.il/pages/bus-lane-privacy" target="_blank" style="color:#8ab4f8">מדיניות פרטיות</a></label>
+<button id="bla-send">שלח לי קוד</button>
+<input id="bla-code" dir="ltr" inputmode="numeric" maxlength="6" placeholder="קוד בן 6 ספרות" style="display:none">
+<button id="bla-verify" style="display:none">אישור</button>
+</div>
+<div id="bla-sub" style="display:none">
+<div class="box" id="bla-submsg">המנוי הסתיים</div>
+<a class="btn" href="https://elronprint.co.il/products/bus-lane-alert-monthly">הצטרף ב-10 ₪ ל-30 ימים</a>
+<div class="st">אחרי התשלום חזור לכאן והתחבר עם אותו מייל. אם כבר שילמת, רענן את הדף.</div>
+</div>
+<div class="st" id="bla-acct" style="display:none"></div>
+<div id="bla-app" style="display:none">
+<div class="st" id="bla-data">טוען נתוני נת"צ…</div>
+<button id="bla-go" disabled>התחל נסיעה</button>
+<div id="bla-map"></div>
+<div class="box" id="bla-box">לחץ "התחל נסיעה" והשאר את המסך דלוק</div>
+<div class="st" id="bla-gps"></div>
+<button id="bla-mark" class="sm">סימון נת"צ</button>
+<div id="bla-mark-opts" style="display:none">
+<button id="bla-rec" class="gray" disabled>התחל סימון נת"צ</button><button id="bla-del" class="gray">מחק סימונים בטלפון הזה</button>
+</div>
+<div class="st" id="bla-rst"></div>
+<button id="bla-issue" class="sm">בעיה במפה</button>
+<div id="bla-issue-opts" style="display:none">
+<button id="bla-i1" class="gray">התראה שגויה, אין כאן נת"צ</button><button id="bla-i2" class="gray">יש כאן נת"צ שחסר במפה</button>
+</div>
+<button id="bla-share" class="sm">שלח לחבר בוואטסאפ</button>
+</div>
+<div class="note">
+ההתראה מבוססת על מאגר נתיבי ההעדפה של משרד התחבורה (כולל שעות פעילות), על מפות OpenStreetMap ועל סימונים של נהגים. שעות הפעילות לפי המאגר, ללא התחשבות בחגים. הנתונים חלקיים ועלולים להיות לא מעודכנים או לא מדויקים, וייתכן שתקבל התראה גם בנתיב סמוך. אין לראות בה תחליף לשילוט בכביש, והאחריות על הנהג.
+הדף צריך להישאר פתוח עם מסך דלוק כדי להתריע.
+סימון נת"צ: מתחילים סימון, נוסעים לאורך הנתיב ומסיימים. הסימון נשלח לשרת ומשותף, כולל המסלול שנסעת בו ומזהה אקראי של המכשיר. הוא נכנס לתוקף אצל כולם רק אחרי ששני נהגים שונים סימנו את אותו נתיב. עד אז הוא פועל רק בטלפון שלך.
+</div>
+<script>
+(function(){
+/*GEO-START*/
+var R=6371000,K=Math.PI/180;
+function toXY(lat,lon,lat0,lon0){return [(lon-lon0)*K*R*Math.cos(lat0*K),(lat-lat0)*K*R];}
+function distToSeg(px,py,ax,ay,bx,by){var dx=bx-ax,dy=by-ay,l=dx*dx+dy*dy,t=l?((px-ax)*dx+(py-ay)*dy)/l:0;t=Math.max(0,Math.min(1,t));return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));}
+function buildLanes(json){var out=[];var els=(json&&json.elements)||[];for(var i=0;i<els.length;i++){var e=els[i];if(e.type!=="way"||!e.geometry||e.geometry.length<2)continue;var pts=[],a=90,b=180,c=-90,d=-180;for(var j=0;j<e.geometry.length;j++){var la=e.geometry[j].lat,lo=e.geometry[j].lon;pts.push([la,lo]);if(la<a)a=la;if(lo<b)b=lo;if(la>c)c=la;if(lo>d)d=lo;}out.push({id:e.id,pts:pts,bb:[a,b,c,d]});}return out;}
+function bbOf(pts){var a=90,b=180,c=-90,d=-180;for(var i=0;i<pts.length;i++){var la=pts[i][0],lo=pts[i][1];if(la<a)a=la;if(lo<b)b=lo;if(la>c)c=la;if(lo>d)d=lo;}return [a,b,c,d];}
+function addPoint(rec,lat,lon,minD){if(rec.length){var l=rec[rec.length-1],d=toXY(lat,lon,l[0],l[1]);if(Math.hypot(d[0],d[1])<minD)return false;}rec.push([Math.round(lat*1e6)/1e6,Math.round(lon*1e6)/1e6]);return true;}
+function nearest(lanes,lat,lon,ok,hd){var best={d:Infinity,id:null,cam:0},m=0.0006;for(var i=0;i<lanes.length;i++){var w=lanes[i],bb=w.bb;if(ok&&!ok(w))continue;if(lat<bb[0]-m||lat>bb[2]+m||lon<bb[1]-m||lon>bb[3]+m)continue;for(var j=0;j<w.pts.length-1;j++){var p=toXY(w.pts[j][0],w.pts[j][1],lat,lon),q=toXY(w.pts[j+1][0],w.pts[j+1][1],lat,lon);if(hd!=null&&typeof w.id==="string"&&angDiff(bearing(q[0]-p[0],q[1]-p[1]),hd)>90)continue;var d=distToSeg(0,0,p[0],p[1],q[0],q[1]);if(d<best.d){best.d=d;best.id=w.id;best.cam=w.cam?1:0;}}}return best;}
+function makeTracker(cfg){var s={inLane:false,hit:0,miss:0,last:-1e12};return function(near,acc,speed,now){if(acc>cfg.maxAcc)return null;if(speed!=null&&speed<cfg.minSpeed)return null;if(near.d<=cfg.enter){s.hit++;s.miss=0;}else if(near.d>=cfg.exit){s.miss++;s.hit=0;}if(!s.inLane&&s.hit>=2){s.inLane=true;if(now-s.last>cfg.cool){s.last=now;return "enter";}return null;}if(s.inLane&&s.miss>=3){s.inLane=false;return "exit";}return null;};}
+function validPts(p){if(!Array.isArray(p)||p.length<2||p.length>600)return false;for(var i=0;i<p.length;i++){var q=p[i];if(!Array.isArray(q)||typeof q[0]!=="number"||typeof q[1]!=="number"||q[0]<29||q[0]>34||q[1]<34||q[1]>36)return false;}return true;}
+function overlapFrac(pa,pb,maxD){var bb=bbOf(pb),m=0.0004,hit=0;for(var i=0;i<pa.length;i++){var la=pa[i][0],lo=pa[i][1];if(la<bb[0]-m||la>bb[2]+m||lo<bb[1]-m||lo>bb[3]+m)continue;var best=Infinity;for(var j=0;j<pb.length-1;j++){var p=toXY(pb[j][0],pb[j][1],la,lo),q=toXY(pb[j+1][0],pb[j+1][1],la,lo);var d=distToSeg(0,0,p[0],p[1],q[0],q[1]);if(d<best)best=d;}if(best<=maxD)hit++;}return pa.length?hit/pa.length:0;}
+function confirmedLines(reports,need){var rs=[];for(var i=0;i<reports.length;i++){var r=reports[i];if(r&&typeof r.device==="string"&&validPts(r.pts))rs.push(r);}var out=[];for(var a=0;a<rs.length;a++){var devs={};devs[rs[a].device]=1;var n=1;for(var b=0;b<rs.length;b++){if(a===b||devs[rs[b].device])continue;if(overlapFrac(rs[a].pts,rs[b].pts,20)>=0.6&&overlapFrac(rs[b].pts,rs[a].pts,20)>=0.6){devs[rs[b].device]=1;n++;}}if(n>=need)out.push(rs[a]);}return out;}
+function decodeOff(o){var H=o.h,out=[];for(var i=0;i<o.s.length;i++){var s=o.s[i],f=s[2],pts=[],a=0,b=0;for(var j=0;j<f.length;j+=2){a+=f[j];b+=f[j+1];pts.push([a/1e5,b/1e5]);}if(pts.length<2)continue;out.push({id:"o"+i,pts:pts,bb:bbOf(pts),h:H[s[0]],cam:s[1]?1:0});}return out;}
+function activeNow(h,day,min){var w=h[day===5?1:day===6?2:0];for(var i=0;i<w.length;i++){var a=w[i][0],b=w[i][1];if(a<b){if(min>=a&&min<b)return true;}else if(min>=a||min<b)return true;}return false;}
+function ilNow(d){try{var p=new Intl.DateTimeFormat("en-GB",{timeZone:"Asia/Jerusalem",weekday:"short",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(d),o={};for(var i=0;i<p.length;i++)o[p[i].type]=p[i].value;var m={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};return {day:m[o.weekday],min:(+o.hour)*60+(+o.minute)};}catch(e){return {day:d.getDay(),min:d.getHours()*60+d.getMinutes()};}}
+function dropCovered(osm,offi){var out=[];for(var i=0;i<osm.length;i++){var w=osm[i],n=0;for(var j=0;j<w.pts.length;j++){if(nearest(offi,w.pts[j][0],w.pts[j][1]).d<=25)n++;}if(!(w.pts.length&&n/w.pts.length>=0.6))out.push(w);}return out;}
+function bearing(dx,dy){var b=Math.atan2(dx,dy)/K;return b<0?b+360:b;}
+function angDiff(a,b){var d=Math.abs(a-b)%360;return d>180?360-d:d;}
+function laneBearing(w){var p0=w.pts[0];for(var j=1;j<w.pts.length;j++){var d=toXY(w.pts[j][0],w.pts[j][1],p0[0],p0[1]);if(Math.hypot(d[0],d[1])>=8)return bearing(d[0],d[1]);}return null;}
+function earlyAhead(lanes,lat,lon,heading,ok,maxD,minD){var ids=[],dirs={},dmin=1e9,cam=0;for(var i=0;i<lanes.length;i++){var w=lanes[i];if(typeof w.id!=="string")continue;if(ok&&!ok(w))continue;var d=toXY(w.pts[0][0],w.pts[0][1],lat,lon),dist=Math.hypot(d[0],d[1]);if(dist<minD||dist>maxD)continue;var brg=bearing(d[0],d[1]);if(angDiff(brg,heading)>60)continue;if(w.sb===undefined)w.sb=laneBearing(w);if(w.sb==null||angDiff(w.sb,heading)>110)continue;var rel=((brg-heading+540)%360)-180,k;if(rel>20)k="r";else if(rel<-20)k="l";else{var lr=((w.sb-heading+540)%360)-180;k=lr>35?"r":lr<-35?"l":"s";}dirs[k]=1;ids.push(w.id+"|"+k);if(dist<dmin)dmin=dist;if(w.cam)cam=1;}return ids.length?{d:dmin,ids:ids,dirs:dirs,cam:cam}:null;}
+function dirText(x){var s=!!x.s,l=!!x.l,r=!!x.r;if(s&&l&&r)return"בכל הכיוונים";if(s&&l)return"ישר ושמאלה";if(s&&r)return"ישר וימינה";if(l&&r)return"שמאלה וימינה";return s?"ישר":l?"שמאלה":"ימינה";}
+/*GEO-END*/
+window.blaGetLanes=function(){return lanes;};
+
+var OFF=null,offFail=false,osmNote="",AUTH="https://elronprint-studio-api.vercel.app/api/auth",TK="epai_token";
+var CFG={maxAcc:30,minSpeed:3,enter:15,exit:20,cool:5000},EARLY=100,EARLYMIN=20;
+var QUERY='[out:json][timeout:90];area["ISO3166-1"="IL"]->.a;(way(area.a)[~"^(bus|psv):lanes(:forward|:backward)?(:conditional)?$"~"designated"];way(area.a)[~"^lanes:(bus|psv)(:forward|:backward)?$"~"."];way(area.a)[~"^busway(:left|:right|:both)?$"~"lane"];);out geom;';
+var SERVERS=["https://overpass-api.de/api/interpreter","https://overpass.kumi.systems/api/interpreter"];
+var SB="https://etzuljxmyfrwndeulvqq.supabase.co/rest/v1/bus_lane_lines",PK="sb_publishable_mx5gpAT2wPfYydwemvGovQ_dhrsLBi0",CONFIRM=2,MAXPTS=600;
+var KEY="bla_lanes_v1",TKEY="bla_test_v1",DKEY="bla_dev_v1",MAXAGE=7*864e5;
+var $=function(i){return document.getElementById(i);};
+var hh=[];function hdStable(c){if(c.speed==null||c.speed<CFG.minSpeed||c.heading==null||!isFinite(c.heading)){hh=[];return false;}hh.push(c.heading);if(hh.length>4)hh.shift();if(hh.length<3)return false;for(var i=0;i<hh.length;i++)for(var j=i+1;j<hh.length;j++)if(angDiff(hh[i],hh[j])>20)return false;return true;}
+var inLn=false,earlyT={},earlyTm=null,camT={},lanes=[],baseJson=null,nLocal=0,nServer=0,serverLanes=[],rec=null,watchId=null,wake=null,actx=null,track=null;
+
+function readCache(){try{var c=JSON.parse(localStorage.getItem(KEY)||"null");return c&&c.data?c:null;}catch(e){return null;}}
+function writeCache(data){try{localStorage.setItem(KEY,JSON.stringify({t:Date.now(),data:data}));}catch(e){}}
+function readTest(){try{var a=JSON.parse(localStorage.getItem(TKEY)||"[]");return Array.isArray(a)?a:[];}catch(e){return [];}}
+function writeTest(a){try{localStorage.setItem(TKEY,JSON.stringify(a));}catch(e){}}
+function deviceId(){var d=null;try{d=localStorage.getItem(DKEY);}catch(e){}if(!d||d.length<8||d.length>64){d="d"+Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2)+Date.now().toString(36);d=d.slice(0,40);try{localStorage.setItem(DKEY,d);}catch(e){}}return d;}
+var DEV=deviceId();
+
+function rebuild(){
+ var offi=OFF?decodeOff(OFF):[],osm=baseJson?dropCovered(buildLanes(baseJson),offi):[];lanes=offi.concat(osm);
+ var t=readTest();nLocal=0;for(var i=0;i<t.length;i++){if(t[i]&&validPts(t[i].pts)){lanes.push({id:t[i].id,pts:t[i].pts,bb:bbOf(t[i].pts)});nLocal++;}}
+ nServer=0;for(var k=0;k<serverLanes.length;k++){var s=serverLanes[k];lanes.push({id:"r"+s.id,pts:s.pts,bb:bbOf(s.pts)});nServer++;}
+ ready();}
+function ready(){var base=lanes.length-nLocal-nServer,txt='נטענו '+base+' קטעי נת"צ';if(nServer)txt+=' + '+nServer+' מסימוני נהגים';if(nLocal)txt+=' + '+nLocal+' סימונים שלך';if(offFail)txt+=' (נתוני משרד התחבורה לא נטענו)';if(osmNote)txt+=osmNote;$("bla-data").textContent=txt;$("bla-go").disabled=lanes.length===0;}
+function fetchFrom(i){if(i>=SERVERS.length)return Promise.reject(new Error("all failed"));return fetch(SERVERS[i],{method:"POST",body:"data="+encodeURIComponent(QUERY),headers:{"Content-Type":"application/x-www-form-urlencoded"}}).then(function(r){if(!r.ok)throw new Error("http "+r.status);return r.json();}).catch(function(){return fetchFrom(i+1);});}
+function loadReports(){try{fetch(SB+"?select=id,device,pts&order=id.desc&limit=1000",{headers:{apikey:PK}}).then(function(r){return r.ok?r.json():[];}).then(function(rs){if(!Array.isArray(rs))return;serverLanes=confirmedLines(rs,CONFIRM);rebuild();}).catch(function(){});}catch(e){}}
+function load(){var c=readCache();if(c&&Date.now()-c.t<MAXAGE){baseJson=c.data;rebuild();loadReports();return;}
+ if(c)baseJson=c.data;osmNote=" (מעדכן מפות ברקע…)";rebuild();loadReports();
+ fetchFrom(0).then(function(j){writeCache(j);baseJson=j;osmNote="";rebuild();}).catch(function(){osmNote=c?" (נתונים ישנים, אין חיבור לשרת המפות)":" (מפות OpenStreetMap לא נטענו)";rebuild();});}
+
+function beep(){try{if(!actx)return;for(var i=0;i<2;i++){var o=actx.createOscillator(),g=actx.createGain();o.frequency.value=880;g.gain.value=0.3;o.connect(g);g.connect(actx.destination);o.start(actx.currentTime+i*0.4);o.stop(actx.currentTime+i*0.4+0.25);}}catch(e){}}
+function say(t){try{if(!window.speechSynthesis)return;var u=new SpeechSynthesisUtterance(t);u.lang="he-IL";u.rate=1;window.speechSynthesis.cancel();window.speechSynthesis.speak(u);}catch(e){}}
+function box_alert(){return $("bla-box").className==="box alert";}
+function onCam(){var b=$("bla-box");b.textContent='שים לב! נתיב תחבורה ציבורית · אכיפת מצלמה';beep();say('שים לב, בקטע הזה יש אכיפת מצלמה');}
+function onAlert(cam){var b=$("bla-box");b.className="box alert";b.textContent='שים לב! נתיב תחבורה ציבורית'+(cam?' · אכיפת מצלמה':'');beep();say('שים לב, נתיב תחבורה ציבורית'+(cam?', יש אכיפת מצלמה':''));try{navigator.vibrate&&navigator.vibrate([300,100,300]);}catch(e){}}
+function onEarly(e){var tx=e.d<40?"":": "+dirText(e.dirs),m='בעוד '+(Math.round(e.d/10)*10)+' מטר יש נתיב תחבורה ציבורית'+tx+(e.cam?' · אכיפת מצלמה':''),b=$("bla-box");b.className="box alert";b.textContent=m;beep();say('שים לב, '+m.replace(' · ',', '));if(earlyTm)clearTimeout(earlyTm);earlyTm=setTimeout(function(){if($("bla-box").className==="box alert"&&!inLn)onExit();},9000);try{navigator.vibrate&&navigator.vibrate(200);}catch(e2){}}
+function onExit(){var b=$("bla-box");b.className="box";b.textContent="נוסע… אין נת\"צ ידוע בכביש";}
+
+function startRec(){rec=[];var b=$("bla-rec");b.textContent='סיים סימון נת"צ';b.className="sm rec";$("bla-rst").textContent="מסמן… סע לאורך כל הנתיב ולחץ \"סיים\" בסופו";}
+function postReport(pts){return fetch(SB,{method:"POST",headers:{apikey:PK,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify({device:DEV,pts:pts})}).then(function(r){if(!r.ok)throw new Error("http "+r.status);return true;});}
+function finishRec(){var pts=rec||[];rec=null;var b=$("bla-rec");b.textContent='התחל סימון נת"צ';b.className="sm";
+ if(pts.length>=2&&validPts(pts)){var t=readTest();t.push({id:"mine-"+Date.now(),pts:pts});writeTest(t);rebuild();
+  $("bla-rst").textContent="נשמר בטלפון שלך ("+pts.length+" נקודות). שולח לשרת…";
+  postReport(pts).then(function(){$("bla-rst").textContent="נשלח. הנתיב יופעל אצל כולם אחרי שנהג נוסף יסמן אותו.";}).catch(function(){$("bla-rst").textContent="נשמר רק בטלפון שלך. השליחה לשרת נכשלה.";});}
+ else{$("bla-rst").textContent="לא נקלטו מספיק נקודות. נסה שוב.";}}
+
+var lastPos=null;
+function onPos(p){var c=p.coords;lastPos={lat:c.latitude,lon:c.longitude};try{if(window.blaMapPos)window.blaMapPos(c.latitude,c.longitude,c.heading,c.speed);}catch(e){}$("bla-gps").textContent="דיוק GPS: "+Math.round(c.accuracy)+" מ'"+(c.speed!=null?" · מהירות: "+Math.round(c.speed*3.6)+" קמ\"ש":"");
+ if(rec&&c.accuracy<=30&&rec.length<MAXPTS){if(addPoint(rec,c.latitude,c.longitude,6))$("bla-rst").textContent="מסמן… "+rec.length+" נקודות";}
+ var tn=ilNow(new Date()),hd=(c.speed!=null&&c.speed>=CFG.minSpeed&&c.heading!=null&&isFinite(c.heading))?c.heading:null,near=nearest(lanes,c.latitude,c.longitude,function(w){return !w.h||activeNow(w.h,tn.day,tn.min);},hd);var now=Date.now(),ev=track(near,c.accuracy,c.speed,now);if(ev==="enter"){onAlert(near.cam);if(near.cam)camT[near.id]=now;}else if(ev==="exit")onExit();else if(near.cam&&near.d<=15&&box_alert()&&!(now-(camT[near.id]||0)<300000)){camT[near.id]=now;onCam();}
+ inLn=near.d<CFG.exit;var stable=hdStable(c);if(!inLn&&stable&&c.speed!=null&&c.speed>=CFG.minSpeed&&c.heading!=null&&isFinite(c.heading)&&c.accuracy<=CFG.maxAcc){var ea=earlyAhead(lanes,c.latitude,c.longitude,c.heading,function(w){return !w.h||activeNow(w.h,tn.day,tn.min);},EARLY,EARLYMIN);if(ea){var fresh=false;for(var q=0;q<ea.ids.length;q++){var kq=ea.ids[q];if(earlyT[kq]===undefined||now-earlyT[kq]>8000)fresh=true;earlyT[kq]=now;}if(fresh)onEarly(ea);}}}
+function onErr(e){$("bla-gps").textContent=e.code===1?"אין הרשאת מיקום. אשר גישה למיקום בדפדפן.":"שגיאת GPS: "+e.message;}
+
+function start(){
+ if(!navigator.geolocation){$("bla-gps").textContent="הדפדפן לא תומך במיקום.";return;}
+ try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();if(actx.state==="suspended")actx.resume();}catch(e){}
+ try{if(window.speechSynthesis){var u=new SpeechSynthesisUtterance(" ");u.volume=0;window.speechSynthesis.speak(u);}}catch(e){}
+ try{if(navigator.wakeLock){navigator.wakeLock.request("screen").then(function(l){wake=l;}).catch(function(){});}}catch(e){}
+ track=makeTracker(CFG);try{if(window.blaMapShow)window.blaMapShow();}catch(e){}
+ watchId=navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,maximumAge:0,timeout:20000});
+ var g=$("bla-go");g.textContent="עצור נסיעה";g.className="stop";onExit();$("bla-box").textContent="מחפש GPS…";$("bla-rec").disabled=false;
+}
+function stop(){if(rec)finishRec();$("bla-rec").disabled=true;if(watchId!==null){navigator.geolocation.clearWatch(watchId);watchId=null;}try{if(wake){wake.release();wake=null;}}catch(e){}
+ var g=$("bla-go");g.textContent="התחל נסיעה";g.className="";var b=$("bla-box");b.className="box";b.textContent='לחץ "התחל נסיעה" והשאר את המסך דלוק';$("bla-gps").textContent="";}
+$("bla-go").addEventListener("click",function(){if(watchId===null)start();else stop();});
+$("bla-rec").addEventListener("click",function(){if(rec===null)startRec();else finishRec();});
+$("bla-del").addEventListener("click",function(){writeTest([]);rebuild();$("bla-rst").textContent="הסימונים בטלפון הזה נמחקו (מה שכבר נשלח לשרת נשאר שם).";});
+function sendIssue(kind){show("bla-issue-opts",false);if(!lastPos){$("bla-rst").textContent="אין עדיין מיקום. התחל נסיעה ונסה שוב.";return;}var n=nearest(lanes,lastPos.lat,lastPos.lon),id=(n.d<40&&n.id!=null)?String(n.id):null;fetch(SB.replace("bus_lane_lines","bus_lane_issues"),{method:"POST",headers:{apikey:PK,"Content-Type":"application/json",Prefer:"return=minimal"},body:JSON.stringify({device:DEV,kind:kind,lat:Math.round(lastPos.lat*1e5)/1e5,lon:Math.round(lastPos.lon*1e5)/1e5,lane_id:id})}).then(function(r){if(!r.ok)throw new Error("http");$("bla-rst").textContent="תודה, הדיווח נשלח.";}).catch(function(){$("bla-rst").textContent="שליחת הדיווח נכשלה.";});}
+$("bla-mark").addEventListener("click",function(){show("bla-mark-opts",$("bla-mark-opts").style.display==="none");});
+$("bla-issue").addEventListener("click",function(){show("bla-issue-opts",$("bla-issue-opts").style.display==="none");});
+$("bla-i1").addEventListener("click",function(){sendIssue("false_alert");});
+$("bla-i2").addEventListener("click",function(){sendIssue("missing");});
+$("bla-share").addEventListener("click",function(){var m='התראת נת"צ: אפליקציה שמתריעה כשנכנסים לנתיב תחבורה ציבורית, כדי לא לקבל קנס. '+"https://elronprint.co.il/pages/bus-lane-alert";try{window.open("https://wa.me/?text="+encodeURIComponent(m),"_blank");}catch(e){}});
+document.addEventListener("visibilitychange",function(){if(!document.hidden&&watchId!==null&&navigator.wakeLock){navigator.wakeLock.request("screen").then(function(l){wake=l;}).catch(function(){});}});
+
+function gtok(){try{return localStorage.getItem(TK)||"";}catch(e){return "";}}
+function stok(t){try{if(t)localStorage.setItem(TK,t);else localStorage.removeItem(TK);}catch(e){}}
+function api(body){return fetch(AUTH,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(function(r){return r.json().then(function(j){return {s:r.status,j:j};},function(){throw new Error("bad");});});}
+function show(id,on){$(id).style.display=on?"":"none";}
+function fmt(iso){var d=new Date(iso);return d.getDate()+"."+(d.getMonth()+1)+"."+d.getFullYear();}
+var started=false,curEmail="";
+function showLogin(msg){show("bla-login",true);show("bla-app",false);show("bla-sub",false);show("bla-acct",false);$("bla-lmsg").textContent=msg||"התחבר עם המייל כדי להשתמש באפליקציה";show("bla-email",true);show("bla-send",true);show("bla-code",false);show("bla-verify",false);}
+function acct(st){var a=$("bla-acct");a.innerHTML="";var t=document.createElement("span");t.textContent=st.owner?"חשבון בעלים · ":"מנוי פעיל עד "+fmt(st.until)+" · ";a.appendChild(t);var b=document.createElement("button");b.className="lnk";b.textContent="התנתק";b.onclick=function(){if(watchId!==null)stop();api({action:"logout",token:gtok()}).catch(function(){});stok("");location.reload();};a.appendChild(b);show("bla-acct",true);}
+function activate(st){
+ api({action:"buslaneData",token:gtok()}).then(function(r){
+  if(r.s===401){stok("");showLogin("ההתחברות פגה. התחבר שוב.");return;}
+  if(r.s===402){showExpired(r.j&&r.j.until);return;}
+  if(r.s!==200||!r.j||!r.j.data||!Array.isArray(r.j.data.s)||!Array.isArray(r.j.data.h)){$("bla-lmsg").textContent="שגיאה בטעינת הנתונים. נסה לרענן.";show("bla-login",true);return;}
+  OFF=r.j.data;show("bla-login",false);show("bla-sub",false);show("bla-app",true);acct(st);if(!started){started=true;load();}else{rebuild();}
+ }).catch(function(){showLogin("אין חיבור לשרת. נסה שוב.");});}
+function showExpired(until){show("bla-login",false);show("bla-app",false);show("bla-sub",true);$("bla-submsg").textContent=until?"המנוי הסתיים ב-"+fmt(until):"המנוי הסתיים";var a=$("bla-acct");a.innerHTML="";var b=document.createElement("button");b.className="lnk";b.textContent="התנתק";b.onclick=function(){api({action:"logout",token:gtok()}).catch(function(){});stok("");location.reload();};a.appendChild(b);show("bla-acct",true);}
+function init(){var t=gtok();if(!t){showLogin();return;}
+ api({action:"buslaneStatus",token:t}).then(function(r){
+  if(r.s!==200||!r.j||!r.j.loggedIn){stok("");showLogin();return;}
+  curEmail=r.j.email||"";if(r.j.active)activate(r.j);else showExpired(r.j.until);
+ }).catch(function(){showLogin("אין חיבור לשרת. נסה שוב.");});}
+$("bla-send").addEventListener("click",function(){var e=$("bla-email").value.trim().toLowerCase();if(e.indexOf("@")<1){$("bla-lmsg").textContent="כתוב כתובת מייל תקינה.";return;}
+ if(!$("bla-agree").checked){$("bla-lmsg").textContent="כדי להמשיך יש לאשר את שמירת כתובת המייל.";return;}
+ $("bla-send").disabled=true;api({action:"send",email:e}).then(function(r){$("bla-send").disabled=false;if(r.s!==200){$("bla-lmsg").textContent=(r.j&&r.j.error)||"שליחת הקוד נכשלה.";return;}curEmail=e;$("bla-lmsg").textContent="שלחנו קוד ל-"+e+". הקלד אותו כאן.";show("bla-code",true);show("bla-verify",true);}).catch(function(){$("bla-send").disabled=false;$("bla-lmsg").textContent="אין חיבור לשרת. נסה שוב.";});});
+$("bla-verify").addEventListener("click",function(){var c=$("bla-code").value.trim();$("bla-verify").disabled=true;api({action:"verify",email:curEmail,code:c}).then(function(r){$("bla-verify").disabled=false;if(r.s!==200||!r.j||!r.j.token){$("bla-lmsg").textContent=(r.j&&r.j.error)||"הקוד שגוי.";return;}stok(r.j.token);init();}).catch(function(){$("bla-verify").disabled=false;$("bla-lmsg").textContent="אין חיבור לשרת. נסה שוב.";});});
+init();
+})();
+</script>
+<script>
+(function(){
+var TOKEN="pk.eyJ1IjoiZWxyb25wcmludCIsImEiOiJjbXc0dmZ3a3cwMDNpMnhxeHYydnY3YzZrIn0.rRujX6MCOv-8hXZw7wNK5A";
+var V="3.4.0",map=null,ready=false,loading=false,follow=true,resumeT=null,lastN=-1,pend=null;
+function el(id){return document.getElementById(id);}
+function lanesGeo(){var L=(window.blaGetLanes&&window.blaGetLanes())||[],f=[];for(var i=0;i<L.length;i++){var p=L[i].pts;if(!p||p.length<2)continue;var c=[];for(var j=0;j<p.length;j++)c.push([p[j][1],p[j][0]]);f.push({type:"Feature",properties:{},geometry:{type:"LineString",coordinates:c}});}lastN=L.length;return{type:"FeatureCollection",features:f};}
+function load(cb){
+ if(window.mapboxgl){cb();return;}
+ var l=document.createElement("link");l.rel="stylesheet";l.href="https://api.mapbox.com/mapbox-gl-js/v"+V+"/mapbox-gl.css";document.head.appendChild(l);
+ var s=document.createElement("script");s.src="https://api.mapbox.com/mapbox-gl-js/v"+V+"/mapbox-gl.js";s.onload=cb;s.onerror=function(){loading=false;};document.head.appendChild(s);
+}
+function build(){
+ try{mapboxgl.accessToken=TOKEN;try{mapboxgl.setRTLTextPlugin("https://api.mapbox.com/mapbox-gl-js/plugins/mapbox-gl-rtl-text/v0.3.0/mapbox-gl-rtl-text.js",null,true);}catch(e){}
+ map=new mapboxgl.Map({container:"bla-map",style:"mapbox://styles/mapbox/dark-v11",center:[35.0981,33.0089],zoom:15,language:"he"});
+ map.on("load",function(){
+  map.addSource("lanes",{type:"geojson",data:lanesGeo()});
+  map.addLayer({id:"lanes-l",type:"line",source:"lanes",paint:{"line-color":"#ff4d4d","line-width":5,"line-opacity":.85}});
+  map.addSource("me",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  map.addLayer({id:"me-c",type:"circle",source:"me",paint:{"circle-radius":9,"circle-color":"#4da3ff","circle-stroke-color":"#fff","circle-stroke-width":3}});
+  ready=true;if(pend){var q=pend;pend=null;window.blaMapPos(q[0],q[1],q[2],q[3]);}
+ });
+ try{var fc=document.createElement("div");fc.className="mapboxgl-ctrl mapboxgl-ctrl-group";var fb=document.createElement("button");fb.type="button";fb.className="bla-fs";fb.setAttribute("aria-label","מסך מלא");fb.textContent="⛶";fb.onclick=function(){var d=el("bla-map"),on=d.classList.toggle("bla-full");fb.textContent=on?"✕":"⛶";document.body.style.overflow=on?"hidden":"";setTimeout(function(){try{map.resize();}catch(e){}},60);};fc.appendChild(fb);map.addControl({onAdd:function(){return fc;},onRemove:function(){fc.remove();}},"top-right");}catch(e){}
+ map.on("dragstart",function(){follow=false;clearTimeout(resumeT);resumeT=setTimeout(function(){follow=true;},10000);});
+ }catch(e){}
+}
+window.blaMapShow=function(){
+ var d=el("bla-map");if(!d)return;d.style.display="block";
+ if(map){try{map.resize();}catch(e){}return;}
+ if(loading)return;loading=true;load(build);
+};
+window.blaMapPos=function(lat,lon,hd,sp){
+ if(!ready||!map){pend=[lat,lon,hd,sp];return;}
+ try{
+  map.getSource("me").setData({type:"FeatureCollection",features:[{type:"Feature",properties:{},geometry:{type:"Point",coordinates:[lon,lat]}}]});
+  var L=window.blaGetLanes&&window.blaGetLanes();if(L&&L.length!==lastN)map.getSource("lanes").setData(lanesGeo());
+  if(follow){var o={center:[lon,lat],zoom:16,duration:800};if(hd!=null&&isFinite(hd)&&sp!=null&&sp>=3)o.bearing=hd;map.easeTo(o);}
+ }catch(e){}
+};
+})();
+</script>
+</div>
+</body>
+</html>
