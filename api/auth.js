@@ -821,13 +821,27 @@ async function doEnglishChat(body) {
   return { status: 502, body: { error: "המורה לא זמינה כרגע. נסו שוב.", code: last ? last.status : 0 } };
 }
 
+// נת"צ בדומיין העצמאי (netz.elronprint.co.il): בלי חתימת App Proxy של שופיפיי,
+// רק לפעולות הנת"צ, ורק מהמקור המותר.
+const BUSLANE_ORIGINS = ["https://netz.elronprint.co.il"];
+const BUSLANE_ACTIONS = ["send", "verify", "logout", "buslaneStatus", "buslaneData"];
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
 
+  const origin = String(req.headers.origin || "");
+  const fromBuslaneOrigin = BUSLANE_ORIGINS.indexOf(origin) !== -1;
+  if (fromBuslaneOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Vary", "Origin");
+  }
+  if (req.method === "OPTIONS") {
+    return res.status(fromBuslaneOrigin ? 204 : 405).end();
+  }
+
   try {
-    if (!verifyProxySignature(req.query || {})) {
-      return res.status(401).json({ error: "חתימה לא תקינה" });
-    }
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
@@ -835,6 +849,12 @@ export default async function handler(req, res) {
     let body = req.body;
     if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
     body = body || {};
+
+    const bodyAction = String(body.action || "");
+    const buslaneOnly = fromBuslaneOrigin && BUSLANE_ACTIONS.indexOf(bodyAction) !== -1;
+    if (!buslaneOnly && !verifyProxySignature(req.query || {})) {
+      return res.status(401).json({ error: "חתימה לא תקינה" });
+    }
 
     const action = String(body.action || "");
     const email  = normEmail(body.email);
