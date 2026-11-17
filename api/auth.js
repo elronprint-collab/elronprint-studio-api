@@ -223,6 +223,26 @@ async function doVerify(email, code) {
     return { status: 400, body: { error: "הקוד צריך להיות 6 ספרות." } };
   }
 
+  // חשבון בדיקה לגוגל פלאי: מייל וקוד קבועים מתוך משתני סביבה בלבד (לא בקוד)
+  const reviewEmail = String(process.env.REVIEW_LOGIN_EMAIL || "").trim().toLowerCase();
+  const reviewCode = String(process.env.REVIEW_LOGIN_CODE || "");
+  if (reviewEmail && reviewCode && email === reviewEmail && String(code) === reviewCode) {
+    let found = await sbGet("students?email=eq." + enc(email) + "&select=id&limit=1");
+    let studentId = found[0] && found[0].id;
+    if (!studentId) {
+      const created = await sbPost("students", { email: email });
+      studentId = created[0] && created[0].id;
+    }
+    if (!studentId) return { status: 500, body: { error: "לא הצלחנו ליצור את התלמיד." } };
+    const token = newToken();
+    await sbPost("sessions", {
+      token_hash: hash(token),
+      student_id: studentId,
+      expires_at: plus(SESSION_TTL_DAYS * 86400 * 1000)
+    }, "return=minimal");
+    return { status: 200, body: { token: token, email: email, loggedIn: true } };
+  }
+
   const rows = await sbGet(
     "login_codes?email=eq." + enc(email) +
     "&used_at=is.null&order=created_at.desc&limit=1" +
