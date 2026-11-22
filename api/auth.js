@@ -297,7 +297,7 @@ function isOwnerEmail(email) {
    buslane_until בטבלת students = עד מתי המנוי בתוקף. ריק = עוד לא נכנס אף פעם:
    בבדיקה הראשונה מתחיל ניסיון חינם. בעלים תמיד פעיל. הנתונים עצמם
    (buslaneData) לא יוצאים מהשרת למי שאין לו מנוי בתוקף. */
-const BUSLANE_TRIAL_DAYS = 7;
+const BUSLANE_TRIAL_DAYS = 30;
 
 async function buslaneState(s) {
   if (isOwnerEmail(s.email)) return { active: true, owner: true, until: null };
