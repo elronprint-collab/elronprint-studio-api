@@ -12,6 +12,7 @@
 //   POST {action:"consume", token, tool}  -> מחייב שימוש אחד בכלי (חינם/קרדיט/בעלים)
 //   POST {action:"grant", secret, email, credits, reference} -> מוסיף קרדיטים לכלי העיצוב
 //   POST {action:"buslaneStatus", token} / {action:"buslaneData", token} -> מנוי נת"צ
+//   POST {action:"buslanePlay", token, purchaseToken} -> אימות מנוי Google Play והארכת המנוי
 //   POST {action:"adminList",    token}                -> רשימת נרשמים (בעלים בלבד)
 //   POST {action:"adminCredits", token, email, amount} -> שינוי קרדיטים (בעלים בלבד)
 //   POST {action:"englishChat", token, messages}       -> שיחה חופשית עם המורה באפליקציית האנגלית (בעלים בלבד)
@@ -26,6 +27,7 @@
 
 import crypto from "crypto";
 import { BUSLANE_JSON } from "./_buslane-data.js";
+import { playCheck, playAcknowledge } from "./_play.js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -309,8 +311,53 @@ async function buslaneState(s) {
     await sbPatch("students?id=eq." + enc(s.studentId), { buslane_until: until });
     trial = true;
   }
-  const active = new Date(until).getTime() > Date.now();
+  let active = new Date(until).getTime() > Date.now();
+  if (!active) {
+    // מנוי Google Play מתחדש לבד: כשהתאריך עבר, בודקים מול גוגל אם יש חידוש.
+    const renewed = await buslanePlayRefresh(s.studentId).catch(function () { return null; });
+    if (renewed && new Date(renewed).getTime() > Date.now()) { until = renewed; active = true; }
+  }
   return { active: active, owner: false, until: until, trial: trial };
+}
+
+/* ---------- מנוי נת"צ דרך Google Play ----------
+   טבלת buslane_play: token_hash (מפתח), purchase_token, student_id, expiry.
+   רכישה אחת שייכת לחשבון אחד בלבד — הראשון ששלח אותה. */
+async function buslanePlayRefresh(studentId) {
+  const rows = await sbGet("buslane_play?student_id=eq." + enc(studentId) + "&select=token_hash,purchase_token&order=created_at.desc&limit=3");
+  let best = null;
+  for (let i = 0; i < rows.length; i++) {
+    const c = await playCheck(rows[i].purchase_token);
+    if (c.ok && (!best || c.expiry > best)) best = c.expiry;
+    if (c.expiry) await sbPatch("buslane_play?token_hash=eq." + enc(rows[i].token_hash), { expiry: c.expiry }).catch(function () {});
+  }
+  if (best) await sbPatch("students?id=eq." + enc(studentId), { buslane_until: best });
+  return best;
+}
+
+async function doBuslanePlay(body) {
+  const s = await studentByToken(body.token);
+  if (!s) return { status: 401, body: { error: "יש להתחבר." } };
+  const pt = String(body.purchaseToken || "");
+  if (pt.length < 20 || pt.length > 4000) return { status: 400, body: { error: "רכישה לא תקינה." } };
+  const th = hash("play:" + pt);
+  const owned = await sbGet("buslane_play?token_hash=eq." + enc(th) + "&select=student_id&limit=1");
+  if (owned[0] && String(owned[0].student_id) !== String(s.studentId)) {
+    return { status: 409, body: { error: "הרכישה הזו כבר משויכת לחשבון אחר." } };
+  }
+  const c = await playCheck(pt);
+  if (!c.ok) return { status: 402, body: { error: "המנוי ב-Google Play לא פעיל.", state: c.state || null } };
+  if (!c.acknowledged) await playAcknowledge(pt).catch(function () {});
+  if (!owned[0]) {
+    await sbPost("buslane_play", { token_hash: th, purchase_token: pt, student_id: String(s.studentId), expiry: c.expiry }, "return=minimal");
+  } else {
+    await sbPatch("buslane_play?token_hash=eq." + enc(th), { expiry: c.expiry });
+  }
+  const rows = await sbGet("students?id=eq." + enc(s.studentId) + "&select=buslane_until&limit=1");
+  const cur = rows[0] && rows[0].buslane_until;
+  const until = (!cur || new Date(c.expiry).getTime() > new Date(cur).getTime()) ? c.expiry : cur;
+  if (until !== cur) await sbPatch("students?id=eq." + enc(s.studentId), { buslane_until: until });
+  return { status: 200, body: { ok: true, active: true, until: until } };
 }
 
 async function designBalance(studentId, credits) {
@@ -844,7 +891,7 @@ async function doEnglishChat(body) {
 // נת"צ בדומיין העצמאי (netz.elronprint.co.il): בלי חתימת App Proxy של שופיפיי,
 // רק לפעולות הנת"צ, ורק מהמקור המותר.
 const BUSLANE_ORIGINS = ["https://netz.elronprint.co.il"];
-const BUSLANE_ACTIONS = ["send", "verify", "logout", "buslaneStatus", "buslaneData"];
+const BUSLANE_ACTIONS = ["send", "verify", "logout", "buslaneStatus", "buslaneData", "buslanePlay"];
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -928,6 +975,11 @@ export default async function handler(req, res) {
       if (!st.active) return res.status(402).json({ error: "המנוי הסתיים.", until: st.until });
       res.setHeader("Cache-Control", "no-store");
       return res.status(200).json({ until: st.until, data: JSON.parse(BUSLANE_JSON) });
+    }
+
+    if (action === "buslanePlay") {
+      const out = await doBuslanePlay(body);
+      return res.status(out.status).json(out.body);
     }
 
     if (action === "consume") {
